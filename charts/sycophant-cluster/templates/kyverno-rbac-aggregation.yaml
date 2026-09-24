@@ -69,6 +69,9 @@ rules:
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles"]
     verbs: ["*"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
   - apiGroups: ["cilium.io"]
     resources: ["ciliumnetworkpolicies"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
@@ -89,10 +92,20 @@ rules:
   # `app.kubernetes.io/part-of=sycophant-tenant` label, applied by the
   # namespace creator (tenant chart or deployer), not an auto-labelling
   # mutate — to drive the generate rules. Without this label the tenant
-  # is structurally outside policy enforcement.
+  # is structurally outside policy enforcement. `create` lets the
+  # background-controller materialize the tenant Namespace from the
+  # provision marker; `update`/`patch` let the suspend reactor stamp the
+  # reap-after annotation on that namespace. No web-tier-reachable
+  # ServiceAccount holds these.
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+
+  # ResourceQuota the provision generate policy sizes from the marker's
+  # capacity and nests in the new tenant Namespace.
+  - apiGroups: [""]
+    resources: ["resourcequotas"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
 
   # K8s RBAC anti-escalation: Kyverno cannot grant permissions it does
   # not itself hold. When the generate rule creates a ClusterRoleBinding
@@ -102,3 +115,19 @@ rules:
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
     verbs: ["create"]
+---
+# The reap policy runs in the cleanup controller, whose own ClusterRole grants
+# only `get/list/watch` on namespaces. Without `delete` the policy matches the
+# expired tenant namespace on every tick and fails the deletion, so reap needs
+# this aggregation to do anything at all.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kyverno:tenant-reap:cleanup-controller
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    rbac.kyverno.io/aggregate-to-cleanup-controller: "true"
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "delete"]

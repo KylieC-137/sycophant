@@ -2,13 +2,15 @@
 
 Once a tenant namespace exists, same-namespace ServiceAccounts cannot tamper
 with the resources that define their security boundary. The
-`cluster-protect-security` ClusterPolicy holds seven rules each protecting
-one resource kind. External callers (cluster-admin, deployer) are
-excluded via subject or precondition.
+`cluster-protect-security` ValidatingPolicy holds one validation per protected
+resource kind. External callers (cluster-admin, deployer) are excluded by the
+match condition, which fires only for a caller inside the namespace it is
+writing to.
 
 One test per protected resource, plus:
-- `external-sa-can-write/` — pair test proving the rule isn't a blanket deny
-- `protect-self-policy-immutable/` — protects the ClusterPolicy itself (C1.10)
+- `external-sa-can-write/` — pair test proving the check isn't a blanket deny
+- `policy-write-verbs-are-admin-only/` — protects the policies themselves
+  (C1.10). Admission cannot guard them, so the assertion is on RBAC.
 
 Belongs here: same-ns write/update/delete denials.
 Doesn't belong here: rules gated on caller identity that's NOT same-ns

@@ -1,0 +1,142 @@
+{{- if include "sycophant.renderKyverno" . }}
+# A Namespace carrying `app.kubernetes.io/part-of=sycophant-tenant` is a
+# sycophant tenant. The label is the single trigger; the namespace name is
+# irrelevant. The label is applied by whoever creates the namespace — the
+# `sycophant-tenant` chart (self-host) or the provisioner's own
+# `create namespace` call (SaaS deployer). There is no auto-labelling mutate.
+#
+# When a namespace gains the label, Kyverno generates the wiring the creating
+# credential is deliberately not permitted to make itself (a stolen
+# install/deployer kubeconfig must not be able to mint RBAC or bind itself to a
+# write role):
+#
+#  1. A per-tenant ClusterRoleBinding binding the SHARED relay tokenreview
+#     ClusterRole to this tenant's relay ServiceAccount.
+#  2. A per-tenant ValidatingAdmissionPolicyBinding scoping the shared
+#     cluster-gvisor-pod-policy VAP to this tenant ns.
+#  3. A per-namespace RoleBinding granting the tenant-deployer SA the
+#     tenant-operator write role in this tenant ns, so the deployer's helm
+#     install can create the tenant's workloads.
+#
+# Generated resources are materialized asynchronously after admission returns —
+# consumers must tolerate a short reconciliation window.
+# `evaluation.background.enabled` is absent here because a GeneratingPolicy has
+# no such knob; `generateExisting` is the field that would scan existing
+# namespaces on policy install, and it stays off.
+#
+# The relay ClusterRoleBinding and the VAP binding carry no `namespace`, which
+# is how a template declares a cluster-scoped resource; the RoleBinding carries
+# `namespace: <tenant>` and is namespace-scoped.
+#
+# The relay SA name inside the tenant ns is static (`relay-ctrl`) — no helm
+# release-name prefix — so operators pick any release name. (See
+# `sycophant-tenant` chart.)
+apiVersion: policies.kyverno.io/v1
+kind: GeneratingPolicy
+metadata:
+  name: tenant-rolebinding-generator
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  evaluation:
+    generateExisting:
+      enabled: false
+    synchronize:
+      enabled: true
+  matchConstraints:
+    objectSelector:
+      matchLabels:
+        app.kubernetes.io/part-of: sycophant-tenant
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["namespaces"]
+  variables:
+    - name: tenant
+      expression: "object.metadata.name"
+    - name: tenantUid
+      expression: "object.metadata.uid"
+  generate:
+    - template:
+        interpolate: cel
+        value: |
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: (( variables.tenant ))-relay-tokenreview
+            ownerReferences:
+              - apiVersion: v1
+                kind: Namespace
+                name: (( variables.tenant ))
+                uid: (( variables.tenantUid ))
+                blockOwnerDeletion: false
+            labels:
+              {{- include "sycophant.labels" . | nindent 14 }}
+              app.kubernetes.io/component: relay-ctrl
+          subjects:
+            - kind: ServiceAccount
+              name: relay-ctrl
+              namespace: (( variables.tenant ))
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: cluster-relay-tokenreview
+          ---
+          # ValidatingAdmissionPolicyBinding scoping the broad pod VAP to
+          # this ns. The VAP gates every Pod labeled `part-of=sycophant`
+          # under one envelope (universal rules + component-gated branches
+          # for harness, capability-job, headscale). Per-tenant binding
+          # so admission resolves namespace-locally.
+          apiVersion: admissionregistration.k8s.io/v1
+          kind: ValidatingAdmissionPolicyBinding
+          metadata:
+            name: (( variables.tenant ))-sycophant-pod-binding
+            ownerReferences:
+              - apiVersion: v1
+                kind: Namespace
+                name: (( variables.tenant ))
+                uid: (( variables.tenantUid ))
+                blockOwnerDeletion: false
+            labels:
+              {{- include "sycophant.labels" . | nindent 14 }}
+          spec:
+            policyName: cluster-gvisor-pod-policy
+            validationActions: [Deny]
+            matchResources:
+              namespaceSelector:
+                matchExpressions:
+                  - key: kubernetes.io/metadata.name
+                    operator: In
+                    values:
+                      - (( variables.tenant ))
+          ---
+          # Per-namespace RoleBinding granting the tenant-deployer SA the
+          # tenant-operator write role inside this tenant ns. The deployer's
+          # helm install creates the tenant's workloads, so it needs write here;
+          # it is generated, not made by the deployer, so a stolen deployer
+          # kubeconfig cannot self-bind a write role. Namespace-scoped: it
+          # carries `namespace` and dies with the namespace on reap.
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: RoleBinding
+          metadata:
+            name: tenant-deployer
+            namespace: (( variables.tenant ))
+            ownerReferences:
+              - apiVersion: v1
+                kind: Namespace
+                name: (( variables.tenant ))
+                uid: (( variables.tenantUid ))
+                blockOwnerDeletion: false
+            labels:
+              {{- include "sycophant.labels" . | nindent 14 }}
+              app.kubernetes.io/component: tenant-deployer
+          subjects:
+            - kind: ServiceAccount
+              name: {{ .Values.deployer.serviceAccount.name }}
+              namespace: sycophant-system
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: tenant-operator
+{{- end }}

@@ -19,7 +19,7 @@ spec:
     Service, and a remote provider is reached only through the inference-runtime
     job, never the harness.
 
-    Pure chart-render assertion: renders `harness-netpol.yaml` for one workspace
+    Pure chart-render assertion: renders `harness-cnp.yaml` for one workspace
     and checks the rendered CNP structurally, mirroring
     `tool-dispatch-direction/harness-egress-flips-to-tool-pod`.
   bindings:
@@ -37,7 +37,7 @@ spec:
               REPO_ROOT=$(git rev-parse --show-toplevel)
               render=$(mktemp)
               helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
-                --show-only templates/harness-netpol.yaml \
+                --show-only templates/harness-cnp.yaml \
                 --set 'workspaces.probe.storage=1Gi' \
                 -n "$TENANT_NS" > "$render"
 

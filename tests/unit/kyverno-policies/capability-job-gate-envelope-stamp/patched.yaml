@@ -1,0 +1,63 @@
+# The expected result of the mutate, asserted field for field. Regenerate only
+# with a deliberate change to the envelope: an unexplained diff here is the
+# mutate having stopped filling a field, or having started overwriting one.
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minimal-template
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: capability-job
+        sycophant.md/job-kind: tool
+        sycophant.md/workspace: research
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - image: registry.k8s.io/pause:3.9
+          name: runtime
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+      restartPolicy: Never
+      runtimeClassName: gvisor
+      serviceAccountName: unprivileged-research
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: hostile-security-context
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: capability-job
+        sycophant.md/job-kind: tool
+        sycophant.md/workspace: research
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - image: registry.k8s.io/pause:3.9
+          name: runtime
+          securityContext:
+            allowPrivilegeEscalation: true
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+      restartPolicy: Never
+      runtimeClassName: gvisor
+      serviceAccountName: unprivileged-research

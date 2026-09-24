@@ -21,9 +21,6 @@ spec:
     drifts). This asserts the observable both produce — non-zero exit naming the
     kind.
 
-    Shape copied from
-    tests/integration/cluster-resources/policy-engine-invalid-rejected.
-
     Mutation guard: widen the enum, drop the schema, or template the kind
     without a `fail` default arm, and a bogus kind renders quietly.
   steps:

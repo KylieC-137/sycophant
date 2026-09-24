@@ -64,10 +64,10 @@ spec:
                 value: ($domain_ns)
             content: |
               set -e
-              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
+              kubectl create namespace "$TENANT_NS"
               REPO_ROOT=$(git rev-parse --show-toplevel)
               rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
-                --show-only templates/inference-egress-netpol.yaml \
+                --show-only templates/inference-egress-cnp.yaml \
                 -n "$TENANT_NS" \
                 --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
                 --set-json 'model={"deepseek-v4-flash":{"image":"inference-runtime:local","format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","secret":"sycophant-llm-openrouter"}}')
@@ -122,10 +122,10 @@ spec:
                 value: ($ip_ns)
             content: |
               set -e
-              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
+              kubectl create namespace "$TENANT_NS"
               REPO_ROOT=$(git rev-parse --show-toplevel)
               rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
-                --show-only templates/inference-egress-netpol.yaml \
+                --show-only templates/inference-egress-cnp.yaml \
                 -n "$TENANT_NS" \
                 --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
                 --set-json 'model={"ipdirect":{"image":"inference-runtime:local","format":"openai","model":"m","baseUrl":"http://10.42.0.9:8080/v1"}}')
@@ -171,10 +171,10 @@ spec:
                 value: ($incluster_ns)
             content: |
               set -e
-              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
+              kubectl create namespace "$TENANT_NS"
               REPO_ROOT=$(git rev-parse --show-toplevel)
               rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
-                --show-only templates/inference-egress-netpol.yaml \
+                --show-only templates/inference-egress-cnp.yaml \
                 -n "$TENANT_NS" \
                 --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
                 --set-json 'inference={"local":{"image":"llama-server:local","weights":"weights:local","weightsPath":"/weights/model.gguf"}}' \
@@ -226,7 +226,7 @@ spec:
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
               rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
-                --show-only templates/inference-egress-netpol.yaml \
+                --show-only templates/inference-egress-cnp.yaml \
                 -n "$TENANT_NS" \
                 --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
                 --set-json 'inference={"local":{"image":"llama-server:local","weights":"weights:local","weightsPath":"/weights/model.gguf"}}' \
@@ -290,7 +290,7 @@ spec:
               # (a tool job, or an inference job the harness never stamped)
               # matches no inference-egress rule at all.
               egress=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
-                --show-only templates/inference-egress-netpol.yaml \
+                --show-only templates/inference-egress-cnp.yaml \
                 --set-json 'workspaces={"demo":{"storage":"1Gi"}}' \
                 --set-json 'model={"deepseek-v4-flash":{"image":"inference-runtime:local","format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","secret":"s"}}')
               selectors=$(printf '%s\n' "$egress" | grep -c 'sycophant.md/model:')

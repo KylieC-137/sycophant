@@ -4,26 +4,28 @@ metadata:
   name: tenant-ns-requires-psa
 spec:
   description: |
-    Fail-closed guard, exercised as the real actor — the tenant-deployer SA (the
-    SaaS provisioning identity). The app.kubernetes.io/part-of=sycophant-tenant
-    label switches on all per-tenant policy wiring, and since the auto-labelling
-    mutate was removed, whoever creates the namespace applies the labels. The
+    Fail-closed guard. The app.kubernetes.io/part-of=sycophant-tenant label
+    switches on all per-tenant policy wiring, and since the auto-labelling mutate
+    was removed, whoever creates the namespace applies the labels. The
     cluster-tenant-ns-psa-required VAP rejects a tenant-labeled namespace missing
-    pod-security.kubernetes.io/enforce=restricted, so the deployer CANNOT create a
-    fully-wired but PSA-unenforced tenant namespace — but CAN create a properly
-    labeled one. Also proves the deployer holds namespaces:create.
+    pod-security.kubernetes.io/enforce=restricted, and admits a properly labeled
+    one.
+
+    The VAP reads the object and never the caller, so this runs on the ambient
+    credential. Which identity may create a namespace is RBAC's concern and is
+    asserted separately under sa-permission-bounds.
   bindings:
     - name: tenant_ns
       value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
   steps:
-    - name: deployer-cannot-create-tenant-ns-without-psa
+    - name: tenant-ns-without-psa-is-rejected
       try:
         - script:
             env:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              cat <<EOF | kubectl apply --as=system:serviceaccount:sycophant-system:tenant-deployer -f - 2>&1
+              cat <<EOF | kubectl apply -f - 2>&1
               apiVersion: v1
               kind: Namespace
               metadata:
@@ -34,14 +36,14 @@ spec:
             check:
               ($error != null): true
               (contains($stdout, 'must set pod-security.kubernetes.io/enforce')): true
-    - name: deployer-creates-fully-labeled-tenant-ns
+    - name: fully-labeled-tenant-ns-is-admitted
       try:
         - script:
             env:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              cat <<EOF | kubectl apply --as=system:serviceaccount:sycophant-system:tenant-deployer -f -
+              cat <<EOF | kubectl apply -f -
               apiVersion: v1
               kind: Namespace
               metadata:

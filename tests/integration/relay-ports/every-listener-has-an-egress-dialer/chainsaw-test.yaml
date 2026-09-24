@@ -15,9 +15,9 @@ spec:
     The relay serves the harness port (9090), the app port (9091), and the
     principal port (9092), declared as container ports in
     charts/sycophant-tenant/templates/relay-ctrl.yaml. The dialers today are the
-    harness (9090, harness-netpol.yaml), the transport adapter (9091,
-    adapter-app-netpol.yaml), and the principal adapter (9092,
-    adapter-principal-netpol.yaml).
+    harness (9090, harness-cnp.yaml), the transport adapter (9091,
+    adapter-app-cnp.yaml), and the principal adapter (9092,
+    adapter-principal-cnp.yaml).
 
     A dialer is found by matching each egress rule's `toEndpoints` selector
     against the relay pod's own rendered labels, so a policy keyed on the relay's
@@ -30,7 +30,7 @@ spec:
     the render sets one workspace (probe) to materialize the harness → relay
     9090 dialer.
 
-    Mutation guard: drop adapter-principal-netpol.yaml from the render and the
+    Mutation guard: drop adapter-principal-cnp.yaml from the render and the
     9092 admit survives while its dialer disappears, reding the missing-dialer
     assertion. Remove the app-port ingress rule and 9091 reds the missing-admit
     assertion.

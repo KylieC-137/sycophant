@@ -36,9 +36,8 @@ spec:
     verb/resource, or add an aggregationRule/aggregate-to-* label, and a step
     reds.
 
-    Rendered with policyEngine=external, the simplest flag for an offline
-    render. The tenant-user ClusterRole reads no engine knob, so it renders
-    identically under any auth path.
+    Rendered with the Kyverno CRD api-version present so the chart's policies
+    render. The tenant-user ClusterRole reads no engine knob.
   steps:
     - name: assert-tenant-user-grants-exactly-create-on-configmaps
       try:
@@ -47,7 +46,7 @@ spec:
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
               out=$(helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
-                --set policyEngine=external 2>&1) \
+                --api-versions policies.kyverno.io/v1/ValidatingPolicy 2>&1) \
                 || { echo "cluster chart must render offline"; printf '%s\n' "$out" >&2; exit 1; }
 
               rules=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
@@ -81,7 +80,7 @@ spec:
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
               out=$(helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
-                --set policyEngine=external 2>&1) \
+                --api-versions policies.kyverno.io/v1/ValidatingPolicy 2>&1) \
                 || { echo "cluster chart must render offline"; printf '%s\n' "$out" >&2; exit 1; }
 
               rules=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
@@ -107,7 +106,7 @@ spec:
               # Isolate the single tenant-user ClusterRole document so the
               # aggregation checks read only its own shape.
               doc=$(helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
-                --set policyEngine=external \
+                --api-versions policies.kyverno.io/v1/ValidatingPolicy \
                 --show-only templates/tenant-user-clusterrole.yaml 2>&1) \
                 || { echo "tenant-user ClusterRole template must render offline"; printf '%s\n' "$doc" >&2; exit 1; }
 

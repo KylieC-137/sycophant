@@ -15,7 +15,7 @@ const NODE: &str = "k3d-sycophant-server-0";
 const REGISTRY: &str = "sycophant-registry";
 const SYSTEM_NS: &str = "sycophant-system";
 const CILIUM_VERSION: &str = "1.19.3";
-const KYVERNO_VERSION: &str = "3.5.3";
+const KYVERNO_VERSION: &str = "3.9.1";
 // Pinned gVisor release — the release tarball (gvisor.tar.bz2 + .sha512) is
 // verified present for aarch64 + x86_64. Bump deliberately by hand;
 // `release/latest` would silently drift the node runtime.
@@ -23,7 +23,7 @@ const GVISOR_CHANNEL: &str = "release/20260914";
 
 // Kyverno engine values: CRDs are owned by the separate kyverno-crds release, so
 // the engine must install with crds.install=false (else a Kyverno reinstall
-// would cascade-delete every ClusterPolicy).
+// would cascade-delete every Kyverno policy and PolicyException).
 const KYVERNO_VALUES: &str = include_str!("../../values/kyverno.yaml");
 
 // Cilium engine values: pod CIDR, kube-proxy mode, single-node operator replica
@@ -31,9 +31,9 @@ const KYVERNO_VALUES: &str = include_str!("../../values/kyverno.yaml");
 // stays a `--set`.
 const CILIUM_VALUES: &str = include_str!("../../values/cilium.yaml");
 
-// The cluster layer's policyEngine is set to kyverno because setup installs
-// Kyverno (P5) before this cluster-layer install (P7). Without it the chart
-// fails: policyEngine has no default. Pure so the actual arg list handed to
+// The cluster layer always renders the Kyverno policies and requires the
+// Kyverno CRDs, which setup installs (P5) before this cluster-layer install
+// (P7). There is no engine knob to pass. Pure so the actual arg list handed to
 // helm is unit + mutation testable.
 fn cluster_layer_helm_args(chart: &str) -> Vec<String> {
     [
@@ -43,8 +43,6 @@ fn cluster_layer_helm_args(chart: &str) -> Vec<String> {
         chart,
         "-n",
         SYSTEM_NS,
-        "--set",
-        "policyEngine=kyverno",
         "--wait",
         "--timeout=5m",
     ]
@@ -785,20 +783,17 @@ mod tests {
     }
 
     #[test]
-    fn cluster_layer_selects_kyverno_policy_engine() {
-        // policyEngine has no chart default, so the args install_cluster_layer
-        // hands helm must carry it. Asserts the real arg list (built by the same
-        // fn the call site uses) contains an adjacent `--set policyEngine=kyverno`.
-        // Mutant dropping either element from that list fails here.
+    fn cluster_layer_passes_no_policy_engine_knob() {
+        // The engine knob is gone: the cluster chart always renders the Kyverno
+        // policies. The install args carry no `--set policyEngine`, and a mutant
+        // reintroducing one fails here.
         let args = cluster_layer_helm_args("/charts/sycophant-cluster");
-        let set_idx = args
-            .iter()
-            .position(|a| a == "--set")
-            .expect("helm args must contain --set");
-        assert_eq!(
-            args.get(set_idx + 1).map(String::as_str),
-            Some("policyEngine=kyverno")
+        assert!(
+            !args.iter().any(|a| a.contains("policyEngine")),
+            "install args must not carry a policyEngine knob: {args:?}"
         );
+        assert_eq!(args.first().map(String::as_str), Some("upgrade"));
+        assert!(args.iter().any(|a| a == "--install"));
     }
 
     #[test]

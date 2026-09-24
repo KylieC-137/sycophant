@@ -53,7 +53,7 @@ spec:
                 value: ($inference_values)
             content: |
               set -e
-              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
+              kubectl create namespace "$TENANT_NS"
               REPO_ROOT=$(git rev-parse --show-toplevel)
               PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \

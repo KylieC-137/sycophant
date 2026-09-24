@@ -16,7 +16,7 @@ spec:
 
     Before the flip the CNP admitted capability-job pods to harness:9090
     (inbound to the most privileged component) and had no egress to the pods.
-    Pure chart-render assertion: renders harness-netpol.yaml into a chainsaw ns
+    Pure chart-render assertion: renders harness-cnp.yaml into a chainsaw ns
     and checks the rendered CNP structurally. The live L4 behavior is Cilium's,
     out of scope.
   bindings:
@@ -34,7 +34,7 @@ spec:
               REPO_ROOT=$(git rev-parse --show-toplevel)
               render=$(mktemp)
               helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
-                --show-only templates/harness-netpol.yaml \
+                --show-only templates/harness-cnp.yaml \
                 --set 'workspaces.probe.storage=1Gi' \
                 -n "$TENANT_NS" > "$render"
 

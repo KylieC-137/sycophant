@@ -1,6 +1,6 @@
 # Shared across all sycophant tenants. The relay controller in each tenant
 # namespace authenticates caller SA tokens via TokenReview, a cluster-scoped
-# API. The `tenant-rolebinding-generator.yaml` Kyverno policy creates a
+# API. The `tenant-rolebinding-kpol.yaml` Kyverno policy creates a
 # per-tenant ClusterRoleBinding pointing each tenant's relay SA at this
 # ClusterRole for any namespace carrying the
 # `app.kubernetes.io/part-of=sycophant-tenant` label.

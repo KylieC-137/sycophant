@@ -83,81 +83,29 @@ spec:
             check:
               ($error != null): true
               (contains($stderr, 'cluster-capability-job-gate')): true
-    - name: tenant-residence-not-honored
-      try:
-        # An equivalent exception, but resident in the TENANT namespace. Kyverno
-        # only honors exceptions in sycophant-system, so this self-exemption is
-        # inert. It selects the same tenant Jobs the operator exception will.
-        - apply:
-            template: true
-            resource:
-              apiVersion: kyverno.io/v2
-              kind: PolicyException
-              metadata:
-                name: tenant-self-exemption
-                namespace: ($tenant_ns)
-              spec:
-                exceptions:
-                  - policyName: cluster-capability-job-gate
-                    ruleNames: ["*"]
-                match:
-                  any:
-                    - resources:
-                        kinds: ["Job"]
-                        namespaces:
-                          - ($tenant_ns)
-        # Give Kyverno time to load the exception. Under a cluster-wide-honoring
-        # regression it would be live by now and the Job would admit; the deny
-        # below is then a real residence assertion, not a load race.
-        - sleep:
-            duration: 5s
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-probe" -n "$TENANT_NS" -f -
-              apiVersion: batch/v1
-              kind: Job
-              metadata:
-                name: polex-tenant-residence
-              spec:
-                template:
-                  metadata:
-                    labels:
-                      sycophant.md/job-kind: tool
-                  spec:
-                    restartPolicy: Never
-                    serviceAccountName: attacker-sa
-                    containers:
-                      - name: probe
-                        image: registry.k8s.io/pause:3.9
-              MANIFEST
-            check:
-              ($error != null): true
-              (contains($stderr, 'cluster-capability-job-gate')): true
     - name: operator-grants-exception
       try:
-        # The honored exception: resident in sycophant-system, selecting the
-        # tenant Job by namespace. Only its residence differs from the inert one.
+        # The honored exception: resident in sycophant-system, selecting one Job
+        # by name. Runs before the residence probe so the settle below is proven
+        # long enough for an exception to load; the later deny cannot then be a
+        # load race.
         - apply:
             template: true
             resource:
-              apiVersion: kyverno.io/v2
+              apiVersion: policies.kyverno.io/v1
               kind: PolicyException
               metadata:
                 name: allow-capability-job-shape
                 namespace: ($operator_ns)
               spec:
-                exceptions:
-                  - policyName: cluster-capability-job-gate
-                    ruleNames: ["*"]
-                match:
-                  any:
-                    - resources:
-                        kinds: ["Job"]
-                        namespaces:
-                          - ($tenant_ns)
+                policyRefs:
+                  - kind: ValidatingPolicy
+                    name: cluster-capability-job-gate
+                matchConditions:
+                  - name: the-exempted-job
+                    expression: "object.metadata.name == 'polex-exempted'"
+        - sleep:
+            duration: 15s
     - name: gate-admits-with-exception
       try:
         - script:
@@ -187,13 +135,59 @@ spec:
       catch:
         - events:
             namespace: ($tenant_ns)
+    - name: tenant-residence-not-honored
+      try:
+        # Same type, same shape, same settle as the admit leg. Only the residence
+        # differs, so the deny is a residence assertion.
+        - apply:
+            template: true
+            resource:
+              apiVersion: policies.kyverno.io/v1
+              kind: PolicyException
+              metadata:
+                name: tenant-self-exemption
+                namespace: ($tenant_ns)
+              spec:
+                policyRefs:
+                  - kind: ValidatingPolicy
+                    name: cluster-capability-job-gate
+                matchConditions:
+                  - name: the-self-exempted-job
+                    expression: "object.metadata.name == 'polex-tenant-residence'"
+        - sleep:
+            duration: 15s
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-probe" -n "$TENANT_NS" -f -
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: polex-tenant-residence
+              spec:
+                template:
+                  metadata:
+                    labels:
+                      sycophant.md/job-kind: tool
+                  spec:
+                    restartPolicy: Never
+                    serviceAccountName: attacker-sa
+                    containers:
+                      - name: probe
+                        image: registry.k8s.io/pause:3.9
+              MANIFEST
+            check:
+              ($error != null): true
+              (contains($stderr, 'cluster-capability-job-gate')): true
       finally:
         - script:
             env:
               - name: OPERATOR_NS
                 value: ($operator_ns)
             content: |
-              kubectl delete policyexception allow-capability-job-shape \
+              kubectl delete policyexception.policies.kyverno.io allow-capability-job-shape \
                 -n "$OPERATOR_NS" --ignore-not-found
         - script:
             env:

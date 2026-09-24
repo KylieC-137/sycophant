@@ -193,7 +193,7 @@ EOF
     -keyout "$d/tls.key" -out "$d/tls.crt" -days 7 \
     -config "$d/san.cnf" -extensions v3 >/dev/null 2>&1
   helm template sycophant "$REPO_ROOT/charts/sycophant-cluster" \
-    --set policyEngine=external \
+    --api-versions policies.kyverno.io/v1/ValidatingPolicy \
     --set-string "idp.issuer=$APISERVER_OIDC_ISSUER" \
     --set-string "idp.audience=$APISERVER_OIDC_AUDIENCE" \
     --set-file "idp.certificateAuthority=$d/tls.crt" \
@@ -201,6 +201,44 @@ EOF
     | kubectl create --dry-run=client -f - -o jsonpath='{.data.auth-config\.yaml}' \
     > "$d/auth-config.yaml"
   [ -s "$d/auth-config.yaml" ] || { warn "apiserver auth config render is empty"; exit 1; }
+  gen_second_issuer_trust "$d"
+}
+
+# Append a second, non-Dex JWT issuer to the rendered apiserver auth-config so
+# the lifecycle proof can admit a marker written by an identity Dex never
+# signed. The chart's single-issuer production render is untouched: this edits
+# only the e2e's own boot copy of the file. Generates the issuer's self-signed
+# TLS cert (the CA the apiserver trusts when it fetches the issuer's JWKS) and an
+# RSA signing keypair (its public half the runtime fixture publishes, its private
+# half mints the caller token offline), then appends the issuer as a second jwt:
+# list entry whose username prefix matches the Dex issuer's, so its tokens land
+# in the trusted subject namespace.
+gen_second_issuer_trust() {
+  local d="$1"
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$d/oidc2-tls.key" -out "$d/oidc2-tls.crt" -days 7 \
+    -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1" >/dev/null 2>&1
+  openssl genrsa -out "$d/oidc2-sign.key" 2048 >/dev/null 2>&1
+  openssl rsa -in "$d/oidc2-sign.key" -pubout -out "$d/oidc2-sign.pub" >/dev/null 2>&1
+
+  # A blank line first, so the append starts a fresh jwt: list item even if the
+  # extracted block scalar did not end on a newline.
+  {
+    printf '\n'
+    printf '  - issuer:\n'
+    printf '      url: "%s"\n' "$APISERVER_OIDC2_ISSUER"
+    printf '      audiences:\n'
+    printf '        - "%s"\n' "$APISERVER_OIDC2_AUDIENCE"
+    printf '      certificateAuthority: |\n'
+    sed 's/^/        /' "$d/oidc2-tls.crt"
+    printf '    claimMappings:\n'
+    printf '      username:\n'
+    printf '        claim: sub\n'
+    printf '        prefix: "%s#"\n' "$APISERVER_OIDC_ISSUER"
+    printf '    claimValidationRules:\n'
+    printf "      - expression: '!claims.sub.startsWith(\"system:\")'\n"
+    printf "        message: 'sub must not use the reserved system: prefix'\n"
+  } >> "$d/auth-config.yaml"
 }
 
 # ---- step 0: bootstrap ----
@@ -380,7 +418,7 @@ install_kyverno() {
   # PolicyException is the operator override path for the capability job gate.
   # Honor exceptions ONLY in the operator-owned sycophant-system namespace so
   # tenant workloads can never author a self-exemption that escapes the gate.
-  helm upgrade --install kyverno kyverno/kyverno --version 3.5.3 -n kyverno --create-namespace \
+  helm upgrade --install kyverno kyverno/kyverno --version 3.9.1 -n kyverno --create-namespace \
     --set features.policyExceptions.enabled=true \
     --set features.policyExceptions.namespace=sycophant-system \
     --wait >/dev/null
@@ -659,7 +697,7 @@ step_3_deploy() {
   # config agree. The apiserver already reads its copy from the boot mount; this
   # ConfigMap is the chart-managed record of the same trust.
   helm upgrade --install sycophant "$REPO_ROOT/charts/sycophant-cluster/" \
-    -n sycophant-system --set policyEngine=kyverno \
+    -n sycophant-system \
     --set-string "idp.issuer=$APISERVER_OIDC_ISSUER" \
     --set-string "idp.audience=$APISERVER_OIDC_AUDIENCE" \
     --set-file "idp.certificateAuthority=$APISERVER_OIDC_DIR/tls.crt" \
@@ -667,8 +705,9 @@ step_3_deploy() {
   ok "Cluster chart installed"
 
   # Labelling the ns triggers the (label-matched) tenant-rolebinding-generator,
-  # which mints the per-tenant TokenReview CRBs + the pod VAP binding. Kyverno
-  # generate is async, so wait for the wiring before the controllers need it.
+  # which mints the per-tenant TokenReview CRB, the pod VAP binding, and the
+  # tenant-deployer RoleBinding. Kyverno generate is async, so wait for the
+  # wiring before the controllers need it.
   kubectl label namespace "$NAMESPACE" app.kubernetes.io/part-of=sycophant-tenant --overwrite >/dev/null
 
   local crb
@@ -678,7 +717,9 @@ step_3_deploy() {
   done
   wait_for "${NAMESPACE}-sycophant-pod-binding VAP binding" 120 \
     "kubectl get validatingadmissionpolicybinding ${NAMESPACE}-sycophant-pod-binding >/dev/null 2>&1"
-  ok "Kyverno minted TokenReview CRBs + pod VAP binding (label-triggered)"
+  wait_for "tenant-deployer RoleBinding" 120 \
+    "kubectl get rolebinding tenant-deployer -n $NAMESPACE >/dev/null 2>&1"
+  ok "Kyverno minted TokenReview CRB + pod VAP binding + deployer RoleBinding (label-triggered)"
 
   # The pod VAP is now bound to this ns — assert it actually enforces. The
   # binding object existing does not mean the apiserver enforces it yet: there
@@ -1647,6 +1688,29 @@ TENANT_A_USER_SUB="tenant-a-user"
 TENANT_B_USER_SUB="tenant-b-user"
 TENANT_B_NAMESPACE="${NAMESPACE}-b"
 
+# Lifecycle marker contract. The reserved marker names, the well-known label,
+# and the reap-after annotation are the stable public surface the reactor
+# policies match on (charts/sycophant-cluster/templates/_helpers.tpl). The
+# provision caller is authenticated by a second, non-Dex JWT issuer (below), so
+# the marker contract is proven against an issuer the bundled Dex never signed.
+LIFECYCLE_OPERATOR_SUB="operator-provisioner"
+LIFECYCLE_TENANT_NS="tenant-lifecycle-probe"
+LIFECYCLE_MARKER_LABEL="sycophant.md/lifecycle-marker"
+LIFECYCLE_PROVISION_NAME="sycophant-tenant-provision"
+LIFECYCLE_SUSPEND_NAME="sycophant-tenant-suspend"
+
+# A second JWT issuer, distinct from the bundled Dex, published over HTTPS on its
+# own node loopback NodePort. Its self-signed CA is stamped into the apiserver
+# auth-config at boot (gen_second_issuer_trust) as a second jwt: entry whose
+# username claimMapping uses the same issuer prefix Dex does, so a token it signs
+# authenticates into the trusted subject namespace the provision VAP admits. This
+# proves the marker contract admits an issuer-stamped identity generically, not
+# only the bundled Dex.
+APISERVER_OIDC2_NODEPORT=30444
+APISERVER_OIDC2_ISSUER="https://127.0.0.1:${APISERVER_OIDC2_NODEPORT}"
+APISERVER_OIDC2_AUDIENCE="sycophant-lifecycle"
+APISERVER_OIDC2_KID="lifecycle-fixture-key"
+
 b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 
 verify_oidc_write_path() {
@@ -1933,6 +1997,323 @@ print("\n".join(rb["metadata"]["name"] for rb in d["items"]
   ok "per-identity cluster-identity isolation proof passed"
 }
 
+# Publish the second issuer's discovery + JWKS over HTTPS on its NodePort, using
+# the boot-time TLS cert the apiserver trusts, so the apiserver can fetch and
+# verify a token this issuer signed. Mirrors the object-store OIDC fixture's
+# static-file serving (verify_oidc_write_path), on a TLS NodePort like the
+# bundled Dex. The apiserver node netns has no CoreDNS, so the ClusterIP
+# object-store fixture cannot serve here; this issuer is reached at the node
+# loopback NodePort.
+stand_up_second_issuer() {
+  local work="$1" d="$APISERVER_OIDC_DIR"
+  { [ -f "$d/oidc2-tls.crt" ] && [ -f "$d/oidc2-sign.key" ]; } \
+    || { warn "second-issuer trust material missing under ${d}; boot the cluster with --clean first"; exit 1; }
+
+  local modulus_hex n
+  modulus_hex="$(openssl rsa -in "$d/oidc2-sign.key" -noout -modulus | sed 's/^Modulus=//')"
+  n="$(printf '%s' "$modulus_hex" | xxd -r -p | b64url)"
+  cat > "$work/oidc2-jwks.json" <<EOF
+{"keys":[{"kty":"RSA","use":"sig","alg":"RS256","kid":"${APISERVER_OIDC2_KID}","n":"${n}","e":"AQAB"}]}
+EOF
+  cat > "$work/oidc2-discovery.json" <<EOF
+{"issuer":"${APISERVER_OIDC2_ISSUER}","jwks_uri":"${APISERVER_OIDC2_ISSUER}/.well-known/jwks.json"}
+EOF
+
+  kubectl create configmap oidc2-fixture -n "$APISERVER_OIDC_NS" \
+    --from-file=openid-configuration="$work/oidc2-discovery.json" \
+    --from-file=jwks.json="$work/oidc2-jwks.json" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  kubectl create secret tls oidc2-fixture-tls -n "$APISERVER_OIDC_NS" \
+    --cert="$d/oidc2-tls.crt" --key="$d/oidc2-tls.key" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+  local jwks_sum; jwks_sum="$(shasum -a 256 "$work/oidc2-jwks.json" | cut -d' ' -f1)"
+  kubectl apply -n "$APISERVER_OIDC_NS" -f - >/dev/null <<YAML
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oidc2-fixture
+  labels: { app.kubernetes.io/name: oidc2-fixture }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: oidc2-fixture }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: oidc2-fixture }
+      annotations: { checksum/jwks: "${jwks_sum}" }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: static-server
+          # Same pinned static-web-server the object-store OIDC fixture uses,
+          # here fronted with TLS so the apiserver fetches discovery over HTTPS.
+          image: joseluisq/static-web-server@sha256:c6704bc8f1fe05378d91c3288495ce2e0131cf31cf8956f117cb1c7d83c49c31
+          args:
+            - --port=8443
+            - --root=/public
+            - --ignore-hidden-files=false
+            - --disable-symlinks=false
+            - --http2=true
+            - --http2-tls-cert=/tls/tls.crt
+            - --http2-tls-key=/tls/tls.key
+          ports: [ { name: https, containerPort: 8443 } ]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          readinessProbe:
+            httpGet: { path: /.well-known/openid-configuration, port: 8443, scheme: HTTPS }
+            initialDelaySeconds: 1
+            periodSeconds: 2
+          volumeMounts:
+            - { name: well-known, mountPath: /public/.well-known, readOnly: true }
+            - { name: tls, mountPath: /tls, readOnly: true }
+      volumes:
+        - name: well-known
+          configMap:
+            name: oidc2-fixture
+            items:
+              - { key: openid-configuration, path: openid-configuration }
+              - { key: jwks.json, path: jwks.json }
+        - name: tls
+          secret: { secretName: oidc2-fixture-tls }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oidc2-fixture
+  labels: { app.kubernetes.io/name: oidc2-fixture }
+spec:
+  type: NodePort
+  selector: { app.kubernetes.io/name: oidc2-fixture }
+  ports:
+    - { name: https, port: 8443, targetPort: 8443, nodePort: ${APISERVER_OIDC2_NODEPORT} }
+YAML
+  wait_for "second issuer fixture ready" 120 \
+    "kubectl get deploy oidc2-fixture -n $APISERVER_OIDC_NS -o jsonpath='{.status.readyReplicas}' 2>/dev/null | grep -qx 1"
+}
+
+# Mint an RS256 token signed by the second issuer's fixture key, carrying that
+# issuer, its audience, and the given sub. The apiserver maps it into the same
+# prefixed subject namespace as a Dex token, so the provision VAP admits it.
+mint_fixture_token() {
+  local sub="$1" work="$2" d="$APISERVER_OIDC_DIR"
+  local now exp header payload signing_input sig
+  now="$(date +%s)"; exp="$(( now + 600 ))"
+  header="$(printf '{"alg":"RS256","typ":"JWT","kid":"%s"}' "$APISERVER_OIDC2_KID" | b64url)"
+  payload="$(printf '{"iss":"%s","sub":"%s","aud":"%s","iat":%s,"exp":%s}' \
+    "$APISERVER_OIDC2_ISSUER" "$sub" "$APISERVER_OIDC2_AUDIENCE" "$now" "$exp" | b64url)"
+  signing_input="${header}.${payload}"
+  sig="$(printf '%s' "$signing_input" | openssl dgst -sha256 -sign "$d/oidc2-sign.key" | b64url)"
+  printf '%s.%s' "$signing_input" "$sig"
+}
+
+# ---- tenant lifecycle marker-contract proof ----
+# Live proof of the marker contract: a provision marker written by an
+# IdP-authenticated user identity is admitted by the provision VAP and drives
+# Kyverno to materialize the tenant Namespace + capacity ResourceQuota, while the
+# same marker written by a standing ServiceAccount credential — one that even
+# holds the RBAC create verb — is refused by that VAP. A suspend marker inside
+# the tenant namespace scales its Deployments to zero and stamps a reap-after
+# TTL, and a zero-keepalive marker lets the reap DeletingPolicy delete the
+# namespace. The provision caller is authenticated by the second, non-Dex issuer
+# (stand_up_second_issuer), so the proof is not narrowed to the bundled Dex.
+verify_tenant_lifecycle() {
+  step "Tenant lifecycle marker-contract proof"
+  command -v python3 >/dev/null 2>&1 || { warn "python3 required for the lifecycle proof"; exit 1; }
+  command -v openssl >/dev/null 2>&1 || { warn "openssl required for the lifecycle proof"; exit 1; }
+
+  local work; work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+
+  # Start from nothing: clear any prior run's marker and target namespace.
+  kubectl delete configmap "$LIFECYCLE_PROVISION_NAME" -n sycophant-system --ignore-not-found >/dev/null
+  kubectl delete namespace "$LIFECYCLE_TENANT_NS" --ignore-not-found --wait=false >/dev/null
+
+  # The operator identity and a standing ServiceAccount both hold RBAC create on
+  # configmaps in sycophant-system, so the provision VAP — not RBAC — is the one
+  # thing that can tell them apart.
+  local operator_identity="${APISERVER_OIDC_ISSUER}#${LIFECYCLE_OPERATOR_SUB}"
+  kubectl apply -f - >/dev/null <<YAML
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: lifecycle-marker-writer
+  namespace: sycophant-system
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: lifecycle-standing-sa
+  namespace: sycophant-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: lifecycle-marker-writer
+  namespace: sycophant-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: lifecycle-marker-writer
+subjects:
+  - kind: User
+    name: ${operator_identity}
+    apiGroup: rbac.authorization.k8s.io
+  - kind: ServiceAccount
+    name: lifecycle-standing-sa
+    namespace: sycophant-system
+YAML
+
+  # The provision marker: the reserved provision name and well-known label, in
+  # sycophant-system. keepalive 0 reaps the tenant as soon as it is suspended.
+  cat > "$work/provision-marker.yaml" <<YAML
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ${LIFECYCLE_PROVISION_NAME}
+  namespace: sycophant-system
+  labels:
+    ${LIFECYCLE_MARKER_LABEL}: "true"
+data:
+  tenant: ${LIFECYCLE_TENANT_NS}
+  capacity: 512Mi
+  keepalive: "0"
+YAML
+
+  local api_server
+  api_server="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')"
+  kubectl config view --minify --raw \
+    -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' \
+    | openssl base64 -d -A > "$work/apiserver-ca.crt"
+  [ -s "$work/apiserver-ca.crt" ] \
+    || { warn "could not read the apiserver CA from the current kubeconfig"; exit 1; }
+
+  # --- negative: a standing ServiceAccount credential is refused by the VAP.
+  # The SA holds the create verb, so admitting it would be the VAP failing open.
+  local sa_token sa_kube
+  sa_token="$(kubectl create token lifecycle-standing-sa -n sycophant-system --duration=10m)"
+  sa_kube="$work/sa.kubeconfig"
+  KUBECONFIG="$sa_kube" kubectl config set-cluster e2e \
+    --server="$api_server" --certificate-authority="$work/apiserver-ca.crt" --embed-certs=true >/dev/null
+  KUBECONFIG="$sa_kube" kubectl config set-credentials sa --token="$sa_token" >/dev/null
+  KUBECONFIG="$sa_kube" kubectl config set-context sa --cluster=e2e --user=sa >/dev/null
+  KUBECONFIG="$sa_kube" kubectl config use-context sa >/dev/null
+
+  local sa_err
+  if sa_err="$(kubectl --kubeconfig="$sa_kube" create -f "$work/provision-marker.yaml" 2>&1)"; then
+    warn "a standing ServiceAccount wrote a provision marker; the provision VAP failed open"; exit 1
+  fi
+  printf '%s' "$sa_err" | grep -qi 'cluster-provision-marker-identity' \
+    || { warn "SA provision was refused, but not by the provision identity VAP: ${sa_err}"; exit 1; }
+  ok "a standing ServiceAccount credential cannot write a provision marker"
+
+  # --- positive: an operator identity from the SECOND, non-Dex issuer
+  # provisions. Publishing that issuer and minting its token proves the marker
+  # contract admits any issuer-stamped identity the apiserver trusts, not only
+  # a Dex-signed one.
+  stand_up_second_issuer "$work"
+  local op_token op_kube
+  op_token="$(mint_fixture_token "$LIFECYCLE_OPERATOR_SUB" "$work")"
+  op_kube="$work/operator.kubeconfig"
+  KUBECONFIG="$op_kube" kubectl config set-cluster e2e \
+    --server="$api_server" --certificate-authority="$work/apiserver-ca.crt" --embed-certs=true >/dev/null
+  KUBECONFIG="$op_kube" kubectl config set-credentials op --token="$op_token" >/dev/null
+  KUBECONFIG="$op_kube" kubectl config set-context op --cluster=e2e --user=op >/dev/null
+  KUBECONFIG="$op_kube" kubectl config use-context op >/dev/null
+
+  # The apiserver OIDC authenticator initializes lazily; poll until the operator
+  # token authenticates as its issuer-prefixed identity before writing.
+  wait_for "operator token OIDC authenticator initialized" 60 \
+    "kubectl --kubeconfig='$op_kube' auth whoami -o jsonpath='{.status.userInfo.username}' 2>/dev/null | grep -qFx '$operator_identity'" \
+    || { warn "operator token did not authenticate as ${operator_identity}"; exit 1; }
+
+  kubectl --kubeconfig="$op_kube" create -f "$work/provision-marker.yaml" >/dev/null \
+    || { warn "the provision VAP refused the IdP-authenticated operator identity"; exit 1; }
+  ok "provision marker admitted for the IdP-authenticated operator identity"
+
+  # The provision-marker generate policy emits only the tenant Namespace +
+  # capacity ResourceQuota under Kyverno's own ServiceAccount. The part-of label
+  # on that namespace then triggers tenant-rolebinding-generator separately.
+  wait_for "tenant namespace generated" 120 \
+    "kubectl get namespace '$LIFECYCLE_TENANT_NS' >/dev/null 2>&1"
+  wait_for "tenant capacity quota generated" 120 \
+    "kubectl get resourcequota '${LIFECYCLE_TENANT_NS}-capacity' -n '$LIFECYCLE_TENANT_NS' >/dev/null 2>&1"
+  kubectl get namespace "$LIFECYCLE_TENANT_NS" \
+    -o jsonpath='{.metadata.labels.app\.kubernetes\.io/part-of}' 2>/dev/null | grep -qx sycophant-tenant \
+    || { warn "generated namespace lacks the part-of=sycophant-tenant label"; exit 1; }
+  ok "provision generated the tenant namespace and capacity quota"
+
+  # --- suspend: scale tenant Deployments to zero, stamp the reap TTL.
+  kubectl apply -n "$LIFECYCLE_TENANT_NS" -f - >/dev/null <<'YAML'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lifecycle-workload
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lifecycle-workload
+  template:
+    metadata:
+      labels:
+        app: lifecycle-workload
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.9
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+YAML
+
+  # The suspend marker lands inside the tenant namespace under the reserved
+  # suspend name; the mutate scales the Deployment down and stamps reap-after.
+  kubectl apply -n "$LIFECYCLE_TENANT_NS" -f - >/dev/null <<YAML
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ${LIFECYCLE_SUSPEND_NAME}
+  labels:
+    ${LIFECYCLE_MARKER_LABEL}: "true"
+data:
+  keepalive: "0"
+YAML
+
+  wait_for "tenant deployments scaled to zero" 120 \
+    "kubectl get deploy lifecycle-workload -n '$LIFECYCLE_TENANT_NS' -o jsonpath='{.spec.replicas}' 2>/dev/null | grep -qx 0"
+  wait_for "reap-after TTL stamped on the namespace" 120 \
+    "kubectl get namespace '$LIFECYCLE_TENANT_NS' -o jsonpath='{.metadata.annotations.sycophant\.md/reap-after}' 2>/dev/null | grep -q ."
+  ok "suspend scaled the tenant deployments to zero and stamped the reap TTL"
+
+  # --- delete: the reap DeletingPolicy deletes the namespace once its TTL is in
+  # the past. Provision generate is synchronize:false, so the reaped namespace is
+  # not resurrected while the marker still exists. The policy runs on a */10
+  # schedule, so allow a generous budget.
+  wait_for "tenant namespace reaped" 720 \
+    "! kubectl get namespace '$LIFECYCLE_TENANT_NS' >/dev/null 2>&1"
+  ok "the zero-keepalive tenant namespace was reaped"
+
+  ok "tenant lifecycle marker-contract proof passed"
+}
+
 main() {
   local cluster_exists=0
   if k3d cluster list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$CLUSTER_NAME"; then
@@ -1958,6 +2339,7 @@ main() {
   step_2_configure
   step_3_deploy
   verify_user_isolation
+  verify_tenant_lifecycle
   step_4_verify
   step_5_flutter
   step_6_security

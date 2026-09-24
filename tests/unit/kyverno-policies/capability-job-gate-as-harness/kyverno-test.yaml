@@ -17,11 +17,14 @@
 # `volumes[]` in the ConfigMap ban admits `configmap-env` and
 # `configmap-envfrom`. Each of those reds this suite.
 #
-# What it does NOT catch: deleting a rule outright. The CLI emits no result row
-# for a rule that is not there, and the expectations naming it are dropped
-# rather than failed. `tests/integration/capability-job-gate/foreign-pvc-mount-
-# denies` is the deletion guard -- with the rule gone the Job admits and the
-# apiserver-effect assertion reds.
+# What it does NOT catch: deleting a check outright. A CEL policy has no named
+# rules, so the CLI reports one row per policy and an expectation cannot name
+# the check it is about. `tests/integration/capability-job-gate/foreign-pvc-
+# mount-denies` is the deletion guard -- with the check gone the Job admits and
+# the apiserver-effect assertion reds. What keeps each row honest here is the
+# input: every Job is compliant apart from the one reference it is named for,
+# so the passing case can only pass if every check passes, and each failing
+# case can only fail on its own reference.
 apiVersion: cli.kyverno.io/v1alpha1
 kind: Test
 metadata:
@@ -34,29 +37,16 @@ userinfo: user-harness-research.yaml
 variables: values.yaml
 results:
   - policy: cluster-capability-job-gate
-    rule: pin-workspace-pvc
     kind: Job
     result: pass
     resources:
       - tenant-offline/own-workspace-pvc
   - policy: cluster-capability-job-gate
-    rule: pin-workspace-pvc
     kind: Job
     result: fail
     resources:
       - tenant-offline/sibling-workspace-pvc
       - tenant-offline/conversation-history-pvc
-  - policy: cluster-capability-job-gate
-    rule: deny-configmap-references
-    kind: Job
-    result: pass
-    resources:
-      - tenant-offline/own-workspace-pvc
-  - policy: cluster-capability-job-gate
-    rule: deny-configmap-references
-    kind: Job
-    result: fail
-    resources:
       - tenant-offline/configmap-volume
       - tenant-offline/configmap-env
       - tenant-offline/configmap-envfrom

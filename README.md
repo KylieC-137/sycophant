@@ -65,14 +65,14 @@ syco setup
 kubectl apply -f charts/sycophant-cluster/system-ns.yaml
 
 helm install sycophant charts/sycophant-quickstart \
-  -n sycophant-system --set policyEngine=kyverno --wait
+  -n sycophant-system --wait
 ```
 
 Already provide your own RuntimeClass and CRDs ([see Requirements](#requirements))? Skip the bundle and install the cluster layer alone:
 
 ```sh
 helm install sycophant charts/sycophant-cluster \
-  -n sycophant-system --set policyEngine=kyverno --wait
+  -n sycophant-system --wait
 ```
 
 ## Components
@@ -97,7 +97,7 @@ Sycophant runs on any conformant Kubernetes cluster. It relies on three cluster 
 
 - **Sandboxed container runtime:** a `gvisor` RuntimeClass by default (Kata is a supported alternative). Isolates the toolsets that run agent-executed tool code.
 - **Network egress control:** Cilium (default-deny egress with an L7 DNS allowlist).
-- **Admission policy engine:** Kyverno 3.5.x, with its CRDs.
+- **Admission policy engine:** Kyverno 3.9.x, with its CRDs.
 
 `syco setup` installs this default set on a local k3d cluster for you. Running it needs a local toolchain: k3d, helm, kubectl, cargo (rustup), protoc, cmake, and a C compiler.
 

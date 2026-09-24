@@ -4,7 +4,7 @@ description: |
   Sycophant cluster-scoped install bundle. Contains the kyverno-crds sibling
   chart (CRDs that survive Kyverno uninstall), gVisor RuntimeClass, and the
   sycophant-cluster chart. Prerequisites the operator must install themselves:
-  Cilium 1.19.x in kube-system, and Kyverno 3.5.x in a dedicated `kyverno`
+  Cilium 1.19.x in kube-system, and Kyverno 3.9.x in a dedicated `kyverno`
   namespace labelled `pod-security.kubernetes.io/enforce=restricted`.
 type: application
 version: 0.1.0

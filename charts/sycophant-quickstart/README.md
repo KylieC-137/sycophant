@@ -33,9 +33,9 @@ operators are responsible for ensuring:
   Kyverno's startup sanity check refuses to come Ready if its CRDs are
   missing. Sycophant ships this chart at `charts/kyverno-crds/`; it places
   the CRDs in helm's install-only `crds/` directory so they survive
-  Kyverno's helm uninstall (preserving operator-authored `ClusterPolicy` and
+  Kyverno's helm uninstall (preserving operator-authored policies and
   `PolicyException` resources).
-- **Kyverno 3.5.x in the `kyverno` namespace**, with `config.excludeKyvernoNamespace: true`
+- **Kyverno 3.9.x in the `kyverno` namespace**, with `config.excludeKyvernoNamespace: true`
   (the chart default), `crds.install: false` (the kyverno-crds chart owns
   them), the cleanup + reports controllers disabled, and the
   `kyverno` namespace carrying `pod-security.kubernetes.io/enforce: restricted`.
@@ -125,13 +125,13 @@ helm uninstall kyverno -n kyverno
 ```
 
 The sibling `kyverno-crds` chart's CRDs survive uninstall (helm's `crds/`
-directory lifecycle), so operator-authored `ClusterPolicy` and sycophant CRs
+directory lifecycle), so operator-authored Kyverno policies and sycophant CRs
 are preserved across a `helm uninstall && helm install` rebuild.
 
 ## Why a sibling kyverno-crds chart
 
 Bundling Kyverno's CRDs into Kyverno's own chart would mean `helm uninstall
-kyverno` cascade-deletes every `ClusterPolicy` and `PolicyException` in the
+kyverno` cascade-deletes every Kyverno policy and `PolicyException` in the
 cluster. The sibling `kyverno-crds` chart pins the CRD lifecycle to a separate
 helm release (this chart's release) so policies survive teardown.
 

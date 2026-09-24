@@ -48,10 +48,10 @@ spec:
                 value: ($grant_values)
             content: |
               set -e
-              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
+              kubectl create namespace "$TENANT_NS"
               REPO_ROOT=$(git rev-parse --show-toplevel)
               rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
-                --show-only templates/toolset-grant-netpol.yaml \
+                --show-only templates/toolset-grant-cnp.yaml \
                 -n "$TENANT_NS" \
                 --set-json "workspaces=$GRANT_VALUES")
 

@@ -23,13 +23,12 @@ fail=0
 ok()   { pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
 bad()  { fail=$((fail+1)); printf 'FAIL %s\n    %s\n' "$1" "$2"; }
 
-render() { helm template c "$CHART" -n sycophant "$@" 2>&1; }
+render() { helm template c "$CHART" -n sycophant --api-versions policies.kyverno.io/v1/ValidatingPolicy --show-only templates/apiserver-auth-config.yaml "$@" 2>&1; }
 
 # The whole trust config the per-identity model needs: issuer + audience, no
 # authEngine, no groups. Identity is the prefixed sub; no group claim is mapped
 # or consulted.
 cat > "$WORK/one.yaml" <<'YAML'
-policyEngine: external
 idp:
   issuer: https://idp-a.example.com
   audience: aud-a

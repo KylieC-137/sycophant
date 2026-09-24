@@ -1,0 +1,52 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: keepalive-restricted-to-policy-values
+spec:
+  description: |
+    Every policy that reads keepalive — the provision generator and the suspend
+    policy that stamps the reap-after TTL — constrains it to the literal set
+    0, 30, 60, 90 in a match condition, not a free-form duration.
+
+    Scans every rendered policy that mentions keepalive rather than naming the
+    consumers, so a new consumer added without the gate fails here instead of
+    being missed. Two consumers are expected today; the count is asserted so
+    that a policy losing its keepalive read is also caught.
+  steps:
+    - name: assert-keepalive-gate-on-every-consuming-policy
+      try:
+        - script:
+            content: |
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
+                -n sycophant-system \
+                --api-versions policies.kyverno.io/v1/ValidatingPolicy 2>&1) || {
+                echo "chart must render with no policyEngine set; helm error:" >&2
+                printf '%s\n' "$out" >&2
+                exit 1
+              }
+
+              consumers=0
+              while IFS= read -r name; do
+                [ -n "$name" ] || continue
+                consumers=$((consumers + 1))
+                span=$(printf '%s' "$out" | awk -v n="$name" 'BEGIN{RS="\n---\n"} \
+                  $0 ~ ("name: " n "\n") {print}')
+
+                printf '%s' "$span" | grep -qF '["0", "30", "60", "90"]' \
+                  || { echo "policy '$name' reads keepalive without constraining it to 0, 30, 60, 90"; printf '%s\n' "$span" >&2; exit 1; }
+
+                printf '%s' "$span" | grep -q 'matchConditions:' \
+                  || { echo "policy '$name' has no match condition; an out-of-range keepalive is not rejected"; printf '%s\n' "$span" >&2; exit 1; }
+              done <<EOF
+              $(printf '%s' "$out" | awk 'BEGIN{RS="\n---\n"} \
+                index($0, "data[\"keepalive\"]") > 0 {
+                  if (match($0, /\n  name: [a-z0-9-]+/)) {
+                    s = substr($0, RSTART + 9, RLENGTH - 9); sub(/^ +/, "", s); print s
+                  }
+                }')
+              EOF
+
+              [ "$consumers" -eq 2 ] \
+                || { echo "expected 2 keepalive-consuming policies, found $consumers"; exit 1; }
+              true

@@ -3,15 +3,10 @@
 # Most operators don't need to override anything here. The defaults
 # work for self-host single-tenant and multi-tenant SaaS / on-prem.
 
-# Which admission-policy engine backs the framework's cluster policies.
-# No default — you MUST declare one, so a Kyverno-less cluster fails loudly
-# instead of silently shipping without tenant-isolation policies.
-#   kyverno   — render the three ClusterPolicies (tenant-resource protection,
-#               per-tenant RBAC generation, gVisor runtimeClass mutation).
-#               `syco setup` installs Kyverno and picks this.
-#   external  — you provide equivalent admission control yourself; the chart
-#               renders none of the three policies.
-# policyEngine: kyverno
+# The framework's cluster policies are backed by Kyverno. The chart always
+# renders them and requires the Kyverno CRDs to be present; there is no engine
+# toggle. Installing the Kyverno controller is a cluster prerequisite `syco
+# setup` or the quickstart bundle handles.
 
 # Kubernetes floor for the structured apiserver trust:
 # StructuredAuthenticationConfiguration is beta behind a feature gate at 1.30

@@ -44,10 +44,10 @@ spec:
                 value: ($tenant_ns)
             content: |
               set -e
-              kubectl create namespace "$TENANT_NS" --as=system:serviceaccount:sycophant-system:tenant-deployer
+              kubectl create namespace "$TENANT_NS"
               REPO_ROOT=$(git rev-parse --show-toplevel)
               helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
-                --show-only templates/default-deny-egress-netpol.yaml \
+                --show-only templates/default-deny-egress-cnp.yaml \
                 -n "$TENANT_NS" \
                 | kubectl apply -f -
     - name: floor-policy-is-accepted-by-cilium

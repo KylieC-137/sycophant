@@ -1,0 +1,40 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: provision-marker-vap-identity-only
+spec:
+  description: |
+    The provision-marker ValidatingAdmissionPolicy admits a ConfigMap create in
+    sycophant-system only when request.userInfo.username carries the issuer
+    prefix, and reads no other claim.
+  steps:
+    - name: assert-provision-vap-identity-only
+      try:
+        - script:
+            content: |
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
+                -n sycophant-system \
+                --api-versions policies.kyverno.io/v1/ValidatingPolicy 2>&1) || {
+                echo "chart must render with no policyEngine set; helm error:" >&2
+                printf '%s\n' "$out" >&2
+                exit 1
+              }
+
+              vap=$(printf '%s' "$out" | awk 'BEGIN{RS="\n---\n"} \
+                /kind: ValidatingAdmissionPolicy/ && /configmaps/ && /sycophant-system/ {print}')
+              [ -n "$vap" ] \
+                || { echo "no ValidatingAdmissionPolicy gating configmap creates in sycophant-system"; exit 1; }
+
+              printf '%s' "$vap" | grep -q 'request.userInfo.username' \
+                || { echo "VAP must authorize on the apiserver-stamped username"; printf '%s\n' "$vap" >&2; exit 1; }
+              printf '%s' "$vap" | grep -q 'startsWith' \
+                || { echo "VAP must require the issuer-prefixed username (startsWith)"; printf '%s\n' "$vap" >&2; exit 1; }
+              printf '%s' "$vap" | grep -q 'sycophant-dex' \
+                || { echo "VAP identity check must render the operator idp.issuer prefix"; printf '%s\n' "$vap" >&2; exit 1; }
+              printf '%s' "$vap" | grep -q 'failurePolicy: Fail' \
+                || { echo "VAP must fail closed"; printf '%s\n' "$vap" >&2; exit 1; }
+
+              printf '%s' "$vap" | grep -Eqi 'userInfo.groups|userInfo.extra|organization|tenant.?scop' \
+                && { echo "VAP must read only the stamped username, no groups/extra/organization claim"; printf '%s\n' "$vap" >&2; exit 1; }
+              true

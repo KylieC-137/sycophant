@@ -1,0 +1,26 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: lifecycle-artifacts-omit-saas-vocab
+spec:
+  description: |
+    The rendered cluster chart names tenants and workspaces only; no SaaS
+    identity (organization, customer) leaks into the public framework artifacts.
+  steps:
+    - name: assert-no-saas-vocab
+      try:
+        - script:
+            content: |
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
+                -n sycophant-system \
+                --api-versions policies.kyverno.io/v1/ValidatingPolicy 2>&1) || {
+                echo "chart must render with no policyEngine set; helm error:" >&2
+                printf '%s\n' "$out" >&2
+                exit 1
+              }
+
+              hit=$(printf '%s' "$out" | grep -Eni 'organization|customer' || true)
+              [ -z "$hit" ] \
+                || { echo "framework artifacts must carry no SaaS identity:"; printf '%s\n' "$hit" >&2; exit 1; }
+              true

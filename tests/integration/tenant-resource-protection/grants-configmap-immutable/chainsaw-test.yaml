@@ -32,7 +32,7 @@ spec:
     who is the only one allowed to write it.
 
     Mutation guard: delete the `protect-relay-access-grants` rule from
-    charts/sycophant-cluster/templates/kyverno-cpol.yaml and all three deny
+    charts/sycophant-cluster/templates/kyverno-kpol.yaml and all three deny
     steps go green (admitted). Add a `relay-ctrl` carve-out to its precondition
     and only the relay step goes green.
   bindings:

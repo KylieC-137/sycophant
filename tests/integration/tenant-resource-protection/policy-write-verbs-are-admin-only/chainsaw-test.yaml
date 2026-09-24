@@ -1,0 +1,134 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: policy-write-verbs-are-admin-only
+spec:
+  description: |
+    No sycophant identity can write the Kyverno policies that enforce the
+    threat model. Break-glass stays with cluster-chart-admin, which is bound to
+    nobody.
+
+    This is the control that keeps the policy machinery from being disarmed.
+    Admission cannot hold it: a policy guarding its own kind would have to
+    exempt its legitimate editors, and the only honest way to name them is by
+    ClusterRole membership, which CEL cannot read. THREAT_MODEL clause 5 names
+    RBAC absence as the mechanism, so RBAC is what this asserts.
+
+    Scoped to the roles this chart owns and to the identities a tenant can
+    reach. The Kyverno controllers and the built-in Kubernetes controllers hold
+    write verbs on these kinds by construction -- they are the engine and the
+    garbage collector -- and are not what clause 5 is about.
+
+    Mutation guard: granting a policy write verb to any sycophant ClusterRole
+    reds step one; removing the grant from cluster-chart-admin reds step two,
+    because the break-glass path must stay open; binding cluster-chart-admin
+    reds step three.
+  bindings:
+    - name: tenant_ns
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
+  steps:
+    - name: sycophant-roles-do-not-write-policies
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              # Read from the chart, not the cluster: which roles sycophant
+              # grants is a property of what it ships, and it must hold before
+              # the upgrade that would install it lands.
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
+                -n sycophant-system \
+                --api-versions policies.kyverno.io/v1/ValidatingPolicy \
+                | python3 -c '
+              import sys, yaml
+
+              items = [
+                  d for d in yaml.safe_load_all(sys.stdin)
+                  if d and d.get("kind") in ("ClusterRole", "Role")
+              ]
+              print(f"scanned {len(items)} rendered roles", file=sys.stderr)
+
+              WRITE = {"*", "create", "update", "patch", "delete", "deletecollection"}
+              KINDS = {
+                  "validatingpolicies",
+                  "mutatingpolicies",
+                  "generatingpolicies",
+                  "deletingpolicies",
+              }
+
+              offenders = []
+              chart_admin_writes = False
+              for role in items:
+                  name = role["metadata"]["name"]
+                  for rule in role.get("rules") or []:
+                      groups = rule.get("apiGroups") or []
+                      resources = rule.get("resources") or []
+                      verbs = set(rule.get("verbs") or [])
+                      if not ("*" in groups or "policies.kyverno.io" in groups):
+                          continue
+                      if not ("*" in resources or KINDS & set(resources)):
+                          continue
+                      if not (WRITE & verbs):
+                          continue
+                      if name == "cluster-chart-admin":
+                          chart_admin_writes = True
+                      else:
+                          offenders.append(f"{name}: {sorted(groups)} {sorted(resources)} {sorted(verbs)}")
+
+              if offenders:
+                  print("sycophant ClusterRoles other than cluster-chart-admin grant policy writes:")
+                  for o in sorted(offenders):
+                      print("  " + o)
+                  sys.exit(1)
+
+              if not chart_admin_writes:
+                  print("cluster-chart-admin must keep the break-glass policy write grant")
+                  sys.exit(1)
+
+              print("OK")
+              '
+            check:
+              ($error == null): true
+    - name: tenant-identities-cannot-write-policies
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -euo pipefail
+              # Authorization is evaluated from the name, so these need not exist.
+              for sa in \
+                "system:serviceaccount:${TENANT_NS}:unprivileged-probe" \
+                "system:serviceaccount:${TENANT_NS}:harness-probe" \
+                "system:serviceaccount:${TENANT_NS}:relay-ctrl" \
+                "system:serviceaccount:sycophant-system:tenant-deployer"; do
+                for kind in validatingpolicies mutatingpolicies generatingpolicies deletingpolicies; do
+                  for verb in create update patch delete; do
+                    ans=$(kubectl auth can-i "$verb" "${kind}.policies.kyverno.io" --as="$sa" 2>/dev/null || true)
+                    [ "$ans" = "no" ] \
+                      || { echo "$sa can $verb $kind (got '$ans'); the policy machinery is reachable from a tenant"; exit 1; }
+                  done
+                done
+              done
+              echo OK
+            check:
+              ($error == null): true
+    - name: break-glass-role-is-unbound
+      try:
+        - script:
+            content: |
+              set -euo pipefail
+              bound=$(kubectl get clusterrolebindings -o json | python3 -c '
+              import json, sys
+              print(" ".join(
+                  b["metadata"]["name"]
+                  for b in json.load(sys.stdin)["items"]
+                  if b.get("roleRef", {}).get("name") == "cluster-chart-admin"
+              ))
+              ')
+              [ -z "$bound" ] \
+                || { echo "cluster-chart-admin must stay unbound; bound by: $bound"; exit 1; }
+              echo OK
+            check:
+              ($error == null): true

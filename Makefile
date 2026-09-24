@@ -19,13 +19,13 @@ lint-rust: ## rustfmt + clippy, warnings are errors
 	cargo fmt --all --check
 	cargo clippy --workspace -- -D warnings
 
-# The cluster chart's values schema requires policyEngine; the policy tests
-# exercise kyverno rendering, and the default idp keeps the always-on
-# apiserver-trust render valid, so lint the same shape.
+# The default idp keeps the always-on apiserver-trust render valid, so lint the
+# same shape. The Kyverno policies always render; helm lint has no cluster
+# capabilities, so it logs the CRD-absent guard but still passes.
 .PHONY: lint-k8s
 lint-k8s: ## helm lint + zero-match sweep gates
 	helm lint charts/sycophant-tenant
-	helm lint charts/sycophant-cluster --set policyEngine=kyverno
+	helm lint charts/sycophant-cluster
 	@for g in $(SWEEP_GATES); do echo "== $$g =="; bash "$$g" || exit 1; done
 
 .PHONY: test-unit
@@ -41,11 +41,12 @@ test-unit-rust: ## Inline #[cfg(test)] units across the workspace
 # looks for; no cluster is contacted.
 .PHONY: test-unit-k8s
 test-unit-k8s: ## Re-render offline policy fixtures from the chart, then run them
-	@helm template c charts/sycophant-cluster -n kyverno \
-		--set policyEngine=kyverno \
-		--api-versions kyverno.io/v1/ClusterPolicy \
-		--show-only templates/capability-job-gate-cpol.yaml \
-		> tests/unit/kyverno-policies/capability-job-gate-as-harness/policy.yaml
+	@for d in capability-job-gate-as-harness capability-job-gate-envelope-stamp; do \
+		helm template c charts/sycophant-cluster -n kyverno \
+			--api-versions policies.kyverno.io/v1/ValidatingPolicy \
+			--show-only templates/capability-job-gate-kpol.yaml \
+			> "tests/unit/kyverno-policies/$$d/policy.yaml"; \
+	done
 	@kyverno test tests/unit/kyverno-policies
 
 .PHONY: test-integration

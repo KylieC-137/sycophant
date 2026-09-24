@@ -1,16 +1,17 @@
 # Cluster-scoped permissions for the tenant-deployer SA. INTENTIONALLY
 # narrow — the per-tenant resource grants (Secrets, Deployments, etc.)
 # are NOT here. Those are granted per-tenant-namespace by the
-# RoleBinding that `tenant-rolebinding-generator.yaml` creates when a
+# RoleBinding that `tenant-rolebinding-kpol.yaml` creates when a
 # tenant namespace is admitted. This split keeps the deployer's
 # blast-radius bounded: no read access to kube-system or other
 # operator-controlled namespaces.
 #
 # What tenant-deployer can do cluster-wide:
-#   - Lifecycle: create/delete namespaces. Names are unconstrained; the
-#     deployer sets the `part-of=sycophant-tenant` label at create time,
-#     and that label (not the name) triggers the per-tenant wiring via
-#     `tenant-rolebinding-generator.yaml`.
+#   - Lifecycle: read and delete namespaces. Namespace create is not held here;
+#     it belongs to the Kyverno background-controller aggregated role, which
+#     generates the tenant Namespace from the provision marker. The
+#     `part-of=sycophant-tenant` label (not the name) triggers the per-tenant
+#     wiring via `tenant-rolebinding-kpol.yaml`.
 #   - Observability: read pod state + events across all namespaces (for
 #     status polling). NOTE: `pods/log` is explicitly NOT granted —
 #     pod logs can leak Secret values via stdout.
@@ -24,11 +25,12 @@ metadata:
     {{- include "sycophant.labels" . | nindent 4 }}
     app.kubernetes.io/component: tenant-deployer
 rules:
-  # Namespace lifecycle. Names unconstrained; the part-of=sycophant-tenant
-  # label (set at create) is what marks a namespace as a tenant.
+  # Namespace read + delete. Create is not held here — the Kyverno
+  # background-controller generates the tenant Namespace from the provision
+  # marker. The part-of=sycophant-tenant label marks a namespace as a tenant.
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["create", "get", "list", "watch", "delete"]
+    verbs: ["get", "list", "watch", "delete"]
 
   # Pod state + events for status polling. No pods/log — pod logs can
   # leak Secret values, so tenant-deployer must not read them.

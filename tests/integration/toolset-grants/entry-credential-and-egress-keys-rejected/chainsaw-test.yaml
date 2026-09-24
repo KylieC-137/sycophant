@@ -57,7 +57,7 @@ spec:
               REPO_ROOT=$(git rev-parse --show-toplevel)
               prompt=$(cat "$REPO_ROOT/tests/integration/fixtures/model-openrouter.json")
               rendered=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
-                --show-only templates/inference-egress-netpol.yaml \
+                --show-only templates/inference-egress-cnp.yaml \
                 --set-json 'toolsets={"notion":{"image":"toolset:local"}}' \
                 --set-json "model=$prompt")
               rc=$?

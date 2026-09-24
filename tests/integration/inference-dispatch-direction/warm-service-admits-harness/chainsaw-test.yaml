@@ -7,7 +7,7 @@ spec:
     For a local model call the harness dials the warm model ClusterIP Service
     directly; no job is created, so no prompt-job caller exists. The warm
     Service's ingress fence must therefore admit the harness, the party that now
-    dials it. Today `inference-netpol.yaml` admits the prompt job by its
+    dials it. Today `inference-cnp.yaml` admits the prompt job by its
     `sycophant.md/toolset` label and names the harness nowhere, so this is red
     until the ingress is retargeted to the harness component.
 
@@ -17,7 +17,7 @@ spec:
     on the port literal (the port is derived from the profile `baseUrl`), pinned
     only on the caller the fence admits.
 
-    Pure chart-render assertion: renders `inference-netpol.yaml` with a declared
+    Pure chart-render assertion: renders `inference-cnp.yaml` with a declared
     local inference entry and its matching profile, the same fixtures the
     inference-workload buckets use. The live L4 behavior is Cilium's, out of
     scope.
@@ -41,7 +41,7 @@ spec:
               PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               render=$(mktemp)
               helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
-                --show-only templates/inference-netpol.yaml \
+                --show-only templates/inference-cnp.yaml \
                 -n "$TENANT_NS" \
                 --set-json "inference=$INFERENCE_VALUES" \
                 --set-json "model=$PROFILE_VALUES" > "$render"

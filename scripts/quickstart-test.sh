@@ -32,14 +32,14 @@ step "Step 1+2: syco setup (k3d cluster sycophant + gVisor + Cilium + Kyverno + 
 ok "syco setup complete"
 
 step "Step 3: Verify CRDs Established"
-for crd in clusterpolicies.kyverno.io; do
+for crd in validatingpolicies.policies.kyverno.io; do
   kubectl wait --for=condition=Established "crd/$crd" --timeout=30s >/dev/null
   ok "crd/$crd Established"
 done
 
 step "Step 4: Cilium FQDN egress enforcement (toolset-shaped CNP)"
 # Mirrors the per-model CNP shape rendered by
-# charts/sycophant-tenant/templates/inference-egress-netpol.yaml.
+# charts/sycophant-tenant/templates/inference-egress-cnp.yaml.
 # Proves the security promise that toolsets depend on -- toFQDNs allowlist
 # actually blocks traffic to non-allowlisted hosts.
 
@@ -142,47 +142,45 @@ fi
 chainsaw "${chainsaw_args[@]}"
 ok "chainsaw tests passed"
 
-step "Step 6: helm uninstall preserves user-data CRDs and ClusterPolicy"
+step "Step 6: helm uninstall preserves user-data CRDs and policies"
 
-# Plant a witness ClusterPolicy authored by the user (not by helm).
+# Plant a witness policy authored by the user (not by helm).
 # If it survives helm uninstall, the sibling kyverno-crds chart is
 # doing its job.
 kubectl apply -f - >/dev/null <<'EOF'
-apiVersion: kyverno.io/v1
-kind: ClusterPolicy
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
 metadata:
   name: test-uninstall-witness
 spec:
-  validationFailureAction: Audit
-  rules:
-    - name: noop
-      match:
-        any:
-          - resources:
-              kinds: [Pod]
-      validate:
-        message: noop
-        pattern:
-          metadata:
-            name: "?*"
+  validationActions: [Audit]
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+  validations:
+    - expression: "has(object.metadata.name)"
+      message: noop
 EOF
-ok "user-authored ClusterPolicy planted"
+ok "user-authored policy planted"
 
 # Capture diagnostics if the assertions below fail (cleanup trap nukes
 # the cluster on exit).
 DIAG="/tmp/quickstart-test-uninstall-diag.$$"
-trap 'rc=$?; if [ $rc -ne 0 ]; then kubectl get all,clusterpolicy,validatingwebhookconfiguration,mutatingwebhookconfiguration -A > "$DIAG" 2>&1 || true; warn "diagnostics captured at $DIAG"; fi; cleanup' EXIT
+trap 'rc=$?; if [ $rc -ne 0 ]; then kubectl get all,vpol,mpol,gpol,dpol,validatingwebhookconfiguration,mutatingwebhookconfiguration -A > "$DIAG" 2>&1 || true; warn "diagnostics captured at $DIAG"; fi; cleanup' EXIT
 
 helm uninstall sycophant -n sycophant-system --timeout=5m >/dev/null
 ok "helm uninstall (cluster scope) completed cleanly"
 
 # CRDs from the sibling kyverno-crds chart must survive.
-kubectl get crd clusterpolicies.kyverno.io >/dev/null
-ok "clusterpolicies.kyverno.io CRD survived uninstall"
+kubectl get crd validatingpolicies.policies.kyverno.io >/dev/null
+ok "validatingpolicies.policies.kyverno.io CRD survived uninstall"
 
-# The witness ClusterPolicy (user-authored CR) must survive.
-kubectl get clusterpolicy test-uninstall-witness >/dev/null
-ok "user-authored ClusterPolicy survived uninstall"
+# The witness policy (user-authored CR) must survive.
+kubectl get validatingpolicy test-uninstall-witness >/dev/null
+ok "user-authored policy survived uninstall"
 
 # Kyverno is a separate helm release (installed by syco setup, not by the
 # cluster-scope release), so its webhooks should STILL be present after
@@ -197,6 +195,6 @@ if [ "$kyverno_webhooks" = "0" ]; then
 fi
 ok "Kyverno webhooks still present (Kyverno is its own helm release, survives test uninstall)"
 
-kubectl delete clusterpolicy test-uninstall-witness --ignore-not-found >/dev/null
+kubectl delete validatingpolicy test-uninstall-witness --ignore-not-found >/dev/null
 
 printf '\n\033[1;32m==> quickstart-test passed\033[0m\n'

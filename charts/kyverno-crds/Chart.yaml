@@ -7,5 +7,5 @@ description: |
   doesn't cascade-delete every ClusterPolicy in the cluster. Linkerd /
   Karpenter sibling-crds pattern.
 type: application
-version: 0.2.0
-appVersion: "3.5.3"
+version: 0.3.0
+appVersion: "3.9.1"

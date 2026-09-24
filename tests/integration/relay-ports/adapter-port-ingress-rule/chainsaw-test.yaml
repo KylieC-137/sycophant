@@ -9,7 +9,7 @@ spec:
     ingress CiliumNetworkPolicy — `relay-ingress` — beside the harness rule.
     The chart renders no second ingress CNP selecting the relay pod.
 
-    Implemented by charts/sycophant-tenant/templates/relay-ctrl-netpol.yaml
+    Implemented by charts/sycophant-tenant/templates/relay-ctrl-cnp.yaml
     (append a second `fromEndpoints` rule inside the same object) and
     charts/sycophant-tenant/templates/relay-ctrl.yaml (a `grpc-adapter`
     containerPort plus a matching Service port).

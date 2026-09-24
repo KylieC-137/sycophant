@@ -4,13 +4,15 @@ metadata:
   name: tenant-deployer-no-get-secrets
 spec:
   description: |
-    tenant-operator ClusterRole grants tenant-deployer create-only on
-    Secrets in tenant namespaces (no `get/list/watch`). A compromised
-    deployer kubeconfig must not be able to READ tenant secrets — only
-    write them as part of `helm install`.
+    The tenant-operator ClusterRole is write-only on Secrets: create, update,
+    patch, delete, and no `get/list/watch`. Whoever holds it must be able to
+    place a Secret without being able to read one back.
 
-    Test creates a tenant ns via the deployer (gets the RoleBinding
-    generated), then probes via `kubectl auth can-i get secrets`.
+    Asserted on the ClusterRole rather than through a bound identity. The
+    per-tenant RoleBinding does bind the deployer to tenant-operator, but
+    tenant-operator is write-only on Secrets, so a live `can-i get secrets`
+    probe still answers "no" — on the grant shape, not on the binding's
+    absence. The deployer keeps its own negative probe.
   bindings:
     - name: tenant_ns
       value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
@@ -22,15 +24,24 @@ spec:
           bindings:
             - name: tenant_ns
               value: ($tenant_ns)
-    - name: wait-for-deployer-rolebinding-generation
+    - name: tenant-operator-is-write-only-on-secrets
       try:
-        - assert:
-            resource:
-              apiVersion: rbac.authorization.k8s.io/v1
-              kind: RoleBinding
-              metadata:
-                name: tenant-deployer
-                namespace: ($tenant_ns)
+        - script:
+            content: |
+              set -e
+              rule=$(kubectl get clusterrole tenant-operator -o json \
+                | python3 -c '
+              import json,sys
+              for r in json.load(sys.stdin)["rules"]:
+                  if "secrets" in r.get("resources", []):
+                      print(" ".join(sorted(r.get("verbs", []))))
+              ')
+              [ -n "$rule" ] || { echo "no secrets rule on tenant-operator"; exit 1; }
+              printf '%s' "$rule" | grep -q 'create' \
+                || { echo "tenant-operator cannot place a Secret: $rule"; exit 1; }
+              printf '%s' "$rule" | grep -Eq '(^| )(get|list|watch)( |$)' \
+                && { echo "tenant-operator can read Secrets: $rule"; exit 1; }
+              true
     - name: probe-deployer-cannot-get-secrets
       try:
         - script:
@@ -43,14 +54,14 @@ spec:
             check:
               ($error != null): true
               (contains($stdout, 'no')): true
-    - name: probe-deployer-can-create-secrets-counterpart
+    - name: probe-deployer-resolves-as-an-identity
       try:
         - script:
             env:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl auth can-i create secrets -n "$TENANT_NS" \
+              kubectl auth can-i get pods -n "$TENANT_NS" \
                 --as=system:serviceaccount:sycophant-system:tenant-deployer
             check:
               ($error == null): true

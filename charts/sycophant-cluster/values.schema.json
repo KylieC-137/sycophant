@@ -2,13 +2,9 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["policyEngine", "idp"],
+  "required": ["idp"],
   "properties": {
     "global": { "type": "object" },
-    "policyEngine": {
-      "description": "Admission-policy engine: 'kyverno' renders the framework ClusterPolicies, 'external' renders none. No default — you must declare one.",
-      "enum": ["kyverno", "external"]
-    },
     "idp": {
       "type": "object",
       "additionalProperties": false,

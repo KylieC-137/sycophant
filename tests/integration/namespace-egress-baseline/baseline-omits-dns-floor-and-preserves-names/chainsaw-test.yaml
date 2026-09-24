@@ -40,7 +40,7 @@ spec:
               # Renders the baseline alone. If the template is absent this
               # errors and the check fails.
               baseline=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" \
-                --show-only templates/default-deny-egress-netpol.yaml -n probe-ns)
+                --show-only templates/default-deny-egress-cnp.yaml -n probe-ns)
 
               printf '%s\n' "$baseline" | grep -q 'name: default-deny-egress' \
                 || { echo "the default-deny-egress baseline does not render"; printf '%s\n' "$baseline" >&2; exit 1; }

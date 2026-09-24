@@ -7,8 +7,8 @@ description: |
   recipe).
 
   Capability-job (and adapter) pods get `runtimeClassName: gvisor` stamped on
-  them at admission by the cluster-runtime-class Kyverno mutate
-  ClusterPolicy (`charts/sycophant-cluster/templates/runtime-class-cpol.yaml`).
+  them at admission by the cluster-runtime-class Kyverno MutatingPolicy
+  (`charts/sycophant-cluster/templates/runtime-class-kpol.yaml`).
   The harness and relay components run on the
   kubelet-default runtime.
 version: 0.1.0

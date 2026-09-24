@@ -7,7 +7,7 @@ cluster-scoped wiring the creating credential is not permitted to make itself.
 
 | Test                               | Loads on                                                                                                  |
 |------------------------------------|-----------------------------------------------------------------------------------------------------------|
-| tenant-tokenreview-crbs-generated/ | Label-matched generate rules in `tenant-rolebinding-generator` (3 tokenreview CRBs + the pod VAP binding)  |
+| tenant-tokenreview-crbs-generated/ | Label-matched generate in `tenant-rolebinding-generator` (relay tokenreview ClusterRoleBinding + pod VAP binding + tenant-deployer RoleBinding) |
 | tenant-ns-labels-rendered/         | Chart `templates/tenant-ns.yaml` renders the namespace + perimeter/PSA labels (gated on `namespace.create`) |
 | tenant-ns-requires-psa/            | `cluster-tenant-ns-psa-required` VAP rejects a tenant-labeled namespace missing `enforce=restricted`         |
 

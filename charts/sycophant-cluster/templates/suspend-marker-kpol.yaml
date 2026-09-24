@@ -1,0 +1,97 @@
+{{- if include "sycophant.renderKyverno" . }}
+# Suspend reactor. Suspend acts on a namespace that already exists, so its
+# marker lands inside the target namespace where RBAC bounds a writer to the
+# single namespace it holds. This fires on the reserved suspend marker
+# and scales the sycophant-tenant namespace's Deployments to zero replicas,
+# then stamps a reap-after TTL (now plus the marker's keepalive) on the
+# namespace. Delete is a separate condition the reap DeletingPolicy drives off
+# that TTL; nothing sequences the two.
+#
+# Two policies rather than one: a CEL mutating policy resolves a single set of
+# targets, and these two act on different kinds. The split keeps the keepalive
+# gate on the TTL stamp alone: a marker with a free-form keepalive still scales
+# the tenant down but stamps no TTL, so it is never reaped on a value nobody
+# chose.
+#
+# Targets are resolved off the trigger's own namespace, which is what bounds a
+# marker to the tenant it was written in.
+apiVersion: policies.kyverno.io/v1
+kind: MutatingPolicy
+metadata:
+  name: tenant-suspend-reactor
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  evaluation:
+    mutateExisting:
+      enabled: true
+    # Defaults true, which bypasses the background controller and suppresses
+    # mutateExisting entirely. It must be false for the reactor to fire.
+    skipBackgroundRequests: false
+  matchConstraints:
+    objectSelector:
+      matchLabels:
+        {{ include "sycophant.lifecycleMarkerLabel" . }}: "true"
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["configmaps"]
+        resourceNames: ["{{ include "sycophant.suspendMarkerName" . }}"]
+  targetMatchConstraints:
+    expression: >-
+      resource.list("apps/v1", "deployments", object.metadata.namespace)
+  mutations:
+    - patchType: ApplyConfiguration
+      applyConfiguration:
+        expression: >-
+          Object{ spec: Object.spec{ replicas: 0 } }
+---
+apiVersion: policies.kyverno.io/v1
+kind: MutatingPolicy
+metadata:
+  name: tenant-suspend-reap-ttl
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  evaluation:
+    mutateExisting:
+      enabled: true
+    # Defaults true, which bypasses the background controller and suppresses
+    # mutateExisting entirely. It must be false for the TTL stamp to fire.
+    skipBackgroundRequests: false
+  matchConstraints:
+    objectSelector:
+      matchLabels:
+        {{ include "sycophant.lifecycleMarkerLabel" . }}: "true"
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["configmaps"]
+        resourceNames: ["{{ include "sycophant.suspendMarkerName" . }}"]
+  matchConditions:
+    - name: keepalive-is-a-policy-value
+      expression: >-
+        object.?data["keepalive"].orValue("") in ["0", "30", "60", "90"]
+  variables:
+    # Keepalive is a day count; the annotation is an absolute RFC3339 instant
+    # so the reap policy compares against it without re-reading the marker.
+    - name: reapAfter
+      expression: >-
+        string(time.now() + duration(string(int(request.object.data["keepalive"]) * 24) + "h"))
+  targetMatchConstraints:
+    expression: >-
+      resource.get("v1", "namespaces", "", object.metadata.namespace)
+  mutations:
+    - patchType: ApplyConfiguration
+      applyConfiguration:
+        expression: >-
+          Object{
+            metadata: Object.metadata{
+              annotations: {"{{ include "sycophant.reapAfterAnnotation" . }}": variables.reapAfter}
+            }
+          }
+{{- end }}

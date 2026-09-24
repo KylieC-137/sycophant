@@ -10,11 +10,53 @@ use crate::commands::common::{ok, step};
 use crate::runner::{run_output, run_passthrough, run_silent};
 use crate::scope::Scope;
 
-const KYVERNO_CPOLS: &[&str] = &[
-    "cluster-protect-security",
-    "cluster-runtime-class",
-    "tenant-rolebinding-generator",
+// Every Kyverno policy the cluster chart renders, paired with the resource that
+// resolves it. A policy missing from this list is one the gate would let a
+// broken cluster carry through an upgrade, so it tracks the chart's policy set
+// exactly. Resources are spelled in full: the CEL policy types are split across
+// four kinds and no one short name covers them.
+const KYVERNO_POLICIES: &[(&str, &str)] = &[
+    (
+        "validatingpolicies.policies.kyverno.io",
+        "cluster-capability-job-gate",
+    ),
+    (
+        "validatingpolicies.policies.kyverno.io",
+        "cluster-protect-security",
+    ),
+    (
+        "mutatingpolicies.policies.kyverno.io",
+        "cluster-capability-job-gate-envelope",
+    ),
+    (
+        "mutatingpolicies.policies.kyverno.io",
+        "cluster-runtime-class",
+    ),
+    (
+        "mutatingpolicies.policies.kyverno.io",
+        "tenant-suspend-reactor",
+    ),
+    (
+        "mutatingpolicies.policies.kyverno.io",
+        "tenant-suspend-reap-ttl",
+    ),
+    (
+        "generatingpolicies.policies.kyverno.io",
+        "tenant-provision-reactor",
+    ),
+    (
+        "generatingpolicies.policies.kyverno.io",
+        "tenant-rolebinding-generator",
+    ),
 ];
+
+// The reap policy is checked for presence, not readiness. The cleanup
+// controller never writes `conditionStatus.ready` on a DeletingPolicy — it
+// records only `lastExecutionTime` — so a readiness check would fail forever.
+// Presence is still worth asserting: the policy is compiled by the admission
+// webhook when it is applied, so an object that exists is an object that built.
+const KYVERNO_SCHEDULED_POLICIES: &[(&str, &str)] =
+    &[("deletingpolicies.policies.kyverno.io", "tenant-reap")];
 
 pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
     let scope = Scope::global()?;
@@ -31,9 +73,19 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
     );
     require(
         &mut cluster_fails,
-        "Kyverno ClusterPolicies ready",
-        KYVERNO_CPOLS.iter().all(|p| cpol_ready(p)),
-        "Kyverno policies not Ready \u{2014} check `kubectl get cpol`",
+        "Kyverno policies ready",
+        KYVERNO_POLICIES
+            .iter()
+            .all(|(resource, name)| policy_ready(resource, name)),
+        "Kyverno policies not Ready \u{2014} check `kubectl get vpol,mpol,gpol`",
+    );
+    require(
+        &mut cluster_fails,
+        "Kyverno scheduled policies present",
+        KYVERNO_SCHEDULED_POLICIES
+            .iter()
+            .all(|(resource, name)| policy_present(resource, name)),
+        "reap policy missing \u{2014} check `kubectl get dpol`",
     );
     // No-downgrade guard: `syco upgrade` applies the charts bundled in THIS
     // binary, so a syco older than the cluster would roll the platform back.
@@ -98,9 +150,9 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
     step("Upgrading cluster");
     let dir = scope.cluster_chart_dir();
     let cluster_chart = dir.to_string_lossy().into_owned();
-    // `--reuse-values` carries the operator's setup-time policyEngine choice
-    // (kyverno|external, no chart default) forward; a bare upgrade re-renders
-    // from chart values.yaml and fails the schema's `required` policyEngine.
+    // `--reuse-values` carries the operator's setup-time overrides forward; a
+    // bare upgrade re-renders from chart values.yaml and drops the `idp` values
+    // the schema marks `required`.
     run_passthrough(
         "helm",
         &[
@@ -196,19 +248,41 @@ fn kubectl_tenant_namespaces() -> Result<String, String> {
     .map_err(|e| format!("aborting: cannot list tenant namespaces ({e}); nothing applied"))
 }
 
-fn cpol_ready(name: &str) -> bool {
+/// Readiness of one Kyverno policy, reported as a boolean at
+/// `.status.conditionStatus.ready` by every kind that reports it at all.
+fn policy_ready(resource: &str, name: &str) -> bool {
     run_output(
         "kubectl",
         &[
             "get",
-            "cpol",
+            resource,
             name,
             "-o",
-            "jsonpath={.status.conditions[?(@.type=='Ready')].status}",
+            "jsonpath={.status.conditionStatus.ready}",
         ],
     )
-    .map(|s| s == "True")
+    .map(|s| parse_ready(&s))
     .unwrap_or(false)
+}
+
+/// True when the readiness field reads exactly `true` (whitespace trimmed).
+fn parse_ready(s: &str) -> bool {
+    s.trim() == "true"
+}
+
+/// Whether one Kyverno policy exists, for the kinds that report no readiness.
+fn policy_present(resource: &str, name: &str) -> bool {
+    run_output(
+        "kubectl",
+        &["get", resource, name, "-o", "jsonpath={.metadata.name}"],
+    )
+    .map(|s| parse_present(&s, name))
+    .unwrap_or(false)
+}
+
+/// True when the returned resource name (whitespace trimmed) matches the query.
+fn parse_present(s: &str, name: &str) -> bool {
+    s.trim() == name
 }
 
 /// The `sycophant` cluster release's appVersion from helm metadata, or `None`
@@ -280,6 +354,23 @@ mod tests {
         );
         // Mutant returning [] unconditionally would silently upgrade nothing.
         assert!(tenant_namespaces("   \n").is_empty());
+    }
+
+    #[test]
+    fn parse_ready_true_only_for_trimmed_true() {
+        assert!(parse_ready("true"));
+        assert!(parse_ready("  true\n"));
+        assert!(!parse_ready("false"));
+        assert!(!parse_ready(""));
+        assert!(!parse_ready("True"));
+    }
+
+    #[test]
+    fn parse_present_true_only_on_trimmed_name_match() {
+        assert!(parse_present("tenant-reap", "tenant-reap"));
+        assert!(parse_present("  tenant-reap\n", "tenant-reap"));
+        assert!(!parse_present("", "tenant-reap"));
+        assert!(!parse_present("other-policy", "tenant-reap"));
     }
 
     #[test]

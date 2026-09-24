@@ -1,0 +1,38 @@
+{{- if include "sycophant.renderKyverno" . }}
+# Delete reactor. Reap is an independent condition from suspend: when a tenant
+# Namespace carries a reap-after annotation whose time has passed, the cleanup
+# controller deletes the Namespace. Deletion cascades to the tenant PVCs and
+# their disks; the disks are purged with the namespace.
+#
+# Cluster-scoped, because a Namespace is. The policy runs on its schedule
+# against resources already present, so it has no match condition on a
+# requesting identity and needs none: only the suspend reactor writes the
+# annotation it keys on.
+apiVersion: policies.kyverno.io/v1
+kind: DeletingPolicy
+metadata:
+  name: tenant-reap
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  schedule: "*/10 * * * *"
+  matchConstraints:
+    objectSelector:
+      matchLabels:
+        app.kubernetes.io/part-of: sycophant-tenant
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["namespaces"]
+  variables:
+    # The reap-after annotation the suspend reactor stamps (now plus
+    # keepalive). Only a namespace that has been suspended carries it.
+    - name: reapAfter
+      expression: >-
+        object.metadata.?annotations["{{ include "sycophant.reapAfterAnnotation" . }}"].orValue("")
+  conditions:
+    - name: reap-after-ttl-has-passed
+      expression: >-
+        variables.reapAfter != "" && timestamp(variables.reapAfter) < time.now()
+{{- end }}

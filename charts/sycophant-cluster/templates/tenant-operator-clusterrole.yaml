@@ -1,5 +1,5 @@
 # Per-tenant grants for the tenant-deployer SA. NEVER directly bound
-# via a ClusterRoleBinding — `tenant-rolebinding-generator.yaml`
+# via a ClusterRoleBinding — `tenant-rolebinding-kpol.yaml`
 # generates a per-namespace RoleBinding pointing tenant-deployer at
 # this ClusterRole when each tenant namespace is admitted. RBAC's
 # namespacing rules then scope these verbs to that one namespace only.
@@ -29,7 +29,7 @@ rules:
 
   # Secrets: WRITE-ONLY. Deployer creates/updates/deletes but cannot
   # read existing values. A compromised deployer kubeconfig can wipe or
-  # forge but not exfiltrate the backlog. Customer LLM API keys arrive
+  # forge but not exfiltrate the backlog. Tenant LLM API keys arrive
   # via SealedSecret (sealed-secrets controller decrypts and produces
   # the actual Secret). Server-side apply works without `get` because
   # the verb checked is `patch`. See
@@ -41,7 +41,7 @@ rules:
       - "secrets"
     verbs: ["create", "update", "patch", "delete"]
 
-  # SealedSecret CRD (Bitnami sealed-secrets). The customer-paste flow
+  # SealedSecret CRD (Bitnami sealed-secrets). The secret-paste flow
   # creates SealedSecrets here; the controller decrypts and writes the
   # actual K8s Secret in the same tenant ns.
   - apiGroups: ["bitnami.com"]

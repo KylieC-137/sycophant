@@ -1,8 +1,13 @@
 # Shared escape-hatch ClusterRole. Stable name; install once at cluster
-# bring-up. Other Kyverno policy rules in `kyverno-cpol.yaml` exempt
-# holders of this ClusterRole from various tenant-namespace
-# restrictions, so it remains as a documented bypass for cluster
-# operators who need to break-glass into a tenant ns.
+# bring-up. The tenant-namespace restrictions in `kyverno-kpol.yaml` select
+# tenant-scoped callers only: a ServiceAccount inside the namespace, or an
+# issuer-prefixed identity the cluster's IdP minted. A holder of this
+# ClusterRole breaks glass into a tenant ns by being neither, and these verbs
+# are what let it edit the policy machinery itself.
+#
+# That makes the break-glass credential the cluster kubeconfig, not an IdP
+# login. Binding this role to a Dex identity grants the verbs but not the
+# reach: the policy still selects that caller and denies the write.
 #
 # Not bound to anyone by default — operators bind it manually when
 # they need to use it.
@@ -19,8 +24,15 @@ rules:
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles", "rolebindings"]
     verbs: ["*"]
-  - apiGroups: ["kyverno.io"]
-    resources: ["clusterpolicies"]
+  # The security policies this chart installs. Named by kind rather than by a
+  # wildcard so the grant stays as narrow as the set actually shipped; adding a
+  # policy of a new kind means adding it here.
+  - apiGroups: ["policies.kyverno.io"]
+    resources:
+      - "validatingpolicies"
+      - "mutatingpolicies"
+      - "generatingpolicies"
+      - "deletingpolicies"
     verbs: ["*"]
   # VAP verbs are the legitimate edit path for the workspace admission
   # rule; chainsaw asserts only this ClusterRole + cluster-admin hold

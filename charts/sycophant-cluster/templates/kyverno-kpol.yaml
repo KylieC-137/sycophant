@@ -1,0 +1,135 @@
+{{- if include "sycophant.renderKyverno" . }}
+# Shared across all sycophant tenants. Stable name; install once at
+# cluster bring-up. Match rules scope to any namespace carrying the
+# `app.kubernetes.io/part-of=sycophant-tenant` label (applied by the
+# namespace's creator: the sycophant-tenant chart, or the provisioner).
+#
+# Trust thesis: the security boundary is structural — the namespace
+# label is set at admission and cannot be changed by tenant code (no
+# tenant SA has `update namespaces` perms). For per-resource
+# protections, the match condition below matches "requesting SA's
+# namespace == target resource's namespace." A workload INSIDE the
+# tenant ns cannot mutate its own protected resources; external
+# callers (chart deployers, the operator, kyverno controllers) live
+# in other namespaces and are allowed by structural exclusion. No
+# enumerated installer trust list — adding new install paths
+# (additional deployers, CI bots, Argo) requires zero policy edits.
+#
+# CEL policies have no named rules, so each per-resource protection is
+# one validation: every expression passes unless the request is that
+# protection's own shape, which keeps one message per protected
+# resource. The kind gate lives in the expression rather than a
+# policy-level objectSelector because the network and RBAC protections
+# cover every object of their kind while the ConfigMap and
+# ServiceAccount ones cover only a labelled subset.
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: cluster-protect-security
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  validationActions: [Deny]
+  failurePolicy: Fail
+  evaluation:
+    background:
+      enabled: false
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        app.kubernetes.io/part-of: sycophant-tenant
+    resourceRules:
+      - apiGroups: ["networking.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["networkpolicies"]
+      - apiGroups: ["cilium.io"]
+        apiVersions: ["v2"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["ciliumnetworkpolicies"]
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["roles", "rolebindings"]
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["configmaps", "serviceaccounts"]
+  {{- include "sycophant.kyvernoTenantScopedCallerMatchCondition" . | nindent 2 }}
+  variables:
+    # DELETE carries the resource in oldObject; every other operation
+    # carries it in object.
+    - name: res
+      expression: "object != null ? object : oldObject"
+    - name: kind
+      expression: "request.kind.kind"
+    - name: group
+      expression: "request.kind.group"
+    - name: typeLabel
+      expression: >-
+        variables.res.metadata.?labels["sycophant.md/type"].orValue("")
+  validations:
+    - expression: >-
+        !(variables.group == "networking.k8s.io" && variables.kind == "NetworkPolicy")
+      message: >-
+        NetworkPolicy in a sycophant tenant namespace cannot be
+        modified by workloads inside the namespace. External callers
+        (chart deployers, the operator) are permitted.
+    - expression: >-
+        !(variables.group == "cilium.io" && variables.kind == "CiliumNetworkPolicy")
+      message: >-
+        CiliumNetworkPolicy in a sycophant tenant namespace cannot be
+        modified by workloads inside the namespace. External callers
+        (chart deployers, the operator) are permitted.
+    # NOTE: The workspace ValidatingAdmissionPolicy cannot be guarded at
+    # the admission layer — neither Kyverno nor an in-tree VAP will
+    # enforce rules whose target is in the admissionregistration.k8s.io
+    # API group. Protection is RBAC-absence + chainsaw regression test
+    # (tests/integration/tenant-resource-protection/workspace-admission-rule-immutable).
+    - expression: >-
+        !(variables.group == "rbac.authorization.k8s.io"
+          && variables.kind in ["Role", "RoleBinding"])
+      message: >-
+        RBAC resources in a sycophant tenant namespace cannot be
+        modified by workloads inside the namespace. External callers
+        (chart deployers, the operator) are permitted to manage
+        RBAC during tenant install/upgrade lifecycle.
+    # The relay-toolset-grants ConfigMap is the grant names the gateway serves
+    # on ListGrants. The relay is the internet-facing pod and is denied too: a
+    # relay that could write the names it offers could advertise a grant the
+    # manifest never bound.
+    - expression: >-
+        !(variables.kind == "ConfigMap" && variables.typeLabel == "relay-toolset-grants")
+      message: >-
+        The relay-toolset-grants ConfigMap in a sycophant tenant namespace
+        cannot be modified by workloads inside the namespace.
+    - expression: >-
+        !(variables.kind == "ConfigMap" && variables.typeLabel == "capability-grants")
+      message: >-
+        The capability-grants ConfigMap in a sycophant tenant namespace
+        cannot be modified by workloads inside the namespace.
+    # Workspace SAs are chart-rendered at helm install time by the
+    # tenant-deployer SA (different namespace; skipped by the same-namespace
+    # match condition). The check blocks runtime-driven creation of workspace-SA-
+    # labeled SAs from inside the tenant namespace.
+    - expression: >-
+        !(variables.kind == "ServiceAccount" && variables.typeLabel == "workspace-sa")
+      message: >-
+        Workspace ServiceAccounts in a sycophant tenant namespace
+        cannot be modified by workloads inside the namespace.
+    - expression: >-
+        !(variables.kind == "ConfigMap" && variables.typeLabel == "toolset-config")
+      message: >-
+        Toolset config ConfigMaps in a sycophant tenant namespace cannot be
+        modified by workloads inside the namespace.
+    # The relay-access-grants ConfigMap is the relay's authorization table and
+    # the operator is its only writer. No per-subject carve-out: the relay is
+    # denied too. A relay that could write the table it reads could mint
+    # itself a row into any workspace, and every downstream check would then
+    # be checking a table the attacker wrote.
+    - expression: >-
+        !(variables.kind == "ConfigMap" && variables.typeLabel == "relay-access-grants")
+      message: >-
+        Grant rows in a sycophant tenant namespace cannot be modified by
+        workloads inside the namespace.
+{{- end }}

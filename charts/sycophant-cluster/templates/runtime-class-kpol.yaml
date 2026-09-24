@@ -1,0 +1,45 @@
+{{- if include "sycophant.renderKyverno" . }}
+# Stamps runtimeClassName=gvisor on capability-job and adapter pods.
+# Tool jobs execute LLM-selected, operator-supplied tool code -- the
+# load-bearing case for the syscall sandbox. Adapters terminate a foreign
+# protocol and parse whatever the outside world sends them, so they carry
+# the same sandbox. One value covers every channel; this list does not grow
+# per channel. The harness and relay pods run trusted
+# first-party Rust and stay on the kubelet-default runtime; their
+# containment is the broad VAP envelope (drop-ALL + ROFS +
+# automountSA=false + seccomp + runAsNonRoot) plus per-component Cilium
+# egress allowlists and single-audience tokens.
+#
+# The value is set unconditionally: a pod naming another runtime class is
+# overridden, not admitted.
+apiVersion: policies.kyverno.io/v1
+kind: MutatingPolicy
+metadata:
+  name: cluster-runtime-class
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  evaluation:
+    background:
+      enabled: false
+  matchConstraints:
+    objectSelector:
+      matchExpressions:
+        - key: app.kubernetes.io/part-of
+          operator: In
+          values: [sycophant]
+        - key: app.kubernetes.io/component
+          operator: In
+          values: [adapter, capability-job]
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  mutations:
+    - patchType: ApplyConfiguration
+      applyConfiguration:
+        expression: >-
+          Object{ spec: Object.spec{ runtimeClassName: "gvisor" } }
+{{- end }}

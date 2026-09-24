@@ -90,7 +90,7 @@ gate "no controller code reads an entry axis or delivers a credential as env" \
 # The per-toolset egress policy that rendered from the axis. The per-model
 # egress template survives.
 gate "no CiliumNetworkPolicy renders from a toolset entry" \
-  "inference-egress-netpol.yaml iterates models only." \
+  "inference-egress-cnp.yaml iterates models only." \
   -- --include=*.tpl --include=*.yaml "${GUARD_EXCLUDES[@]}" -e '\$entry\.egress' -e 'range \$toolset, \$entry := \.Values\.toolsets'
 
 printf '\n'
