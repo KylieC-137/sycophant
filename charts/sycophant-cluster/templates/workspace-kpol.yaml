@@ -1,0 +1,10 @@
+{{- /*
+The workspace lifecycle: the provision-workspace installer, its grant, and the
+reap of the installer's ServiceAccount and RoleBinding.
+*/}}
+{{- if include "sycophant.renderKyverno" . }}
+---
+{{ include "sycophant.provisionInstaller" (dict "ctx" $ "kind" "workspace") }}
+---
+{{ include "sycophant.provisionReap" (dict "ctx" $ "kind" "workspace") }}
+{{- end }}

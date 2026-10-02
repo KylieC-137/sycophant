@@ -9,7 +9,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: kyverno:rolebindings:background-controller
+  name: kyverno:sycophant:provision
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
     rbac.kyverno.io/aggregate-to-admission-controller: "true"
@@ -115,7 +115,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: kyverno:reap-tenant:cleanup-controller
+  name: kyverno:sycophant:reap
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
     rbac.kyverno.io/aggregate-to-cleanup-controller: "true"

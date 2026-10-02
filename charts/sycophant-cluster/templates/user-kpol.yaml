@@ -1,0 +1,10 @@
+{{- /*
+The user lifecycle: the provision-user installer, its grant, and the
+reap of the installer's ServiceAccount and RoleBinding.
+*/}}
+{{- if include "sycophant.renderKyverno" . }}
+---
+{{ include "sycophant.provisionInstaller" (dict "ctx" $ "kind" "user") }}
+---
+{{ include "sycophant.provisionReap" (dict "ctx" $ "kind" "user") }}
+{{- end }}

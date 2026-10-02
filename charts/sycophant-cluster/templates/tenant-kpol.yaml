@@ -1,0 +1,216 @@
+{{- /*
+The tenant lifecycle: provision (Namespace, quota, installer and its grant),
+suspend, and the reap of the namespace and the installer's identity.
+*/}}
+{{- /*
+Fires only on markers inside a tenant namespace. Without the namespace bound a
+suspend marker in sycophant-system would scale the system Deployments to zero.
+*/}}
+{{- define "sycophant.suspendMarkerMatch" -}}
+matchConstraints:
+  namespaceSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: sycophant-tenant
+  objectSelector:
+    matchLabels:
+      {{ include "sycophant.lifecycleMarkerLabel" . }}: "true"
+      app.kubernetes.io/part-of: sycophant
+  resourceRules:
+    - apiGroups: [""]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["configmaps"]
+      resourceNames: ["{{ include "sycophant.suspendMarkerName" . }}"]
+{{- end -}}
+{{- if include "sycophant.renderKyverno" . }}
+# Provision reactor. Fires on lifecycle-marker configmaps created in
+# sycophant-system and gates the reserved provision name in its own match block
+# (RBAC ignores resourceNames on create, so the name gate lives here). It
+# materializes the tenant Namespace, a nested ResourceQuota sized from the
+# marker's capacity, and a LimitRange, under Kyverno's own ServiceAccount
+# rights, and generates nothing else. The quota rejects a container that sets no
+# memory, so the LimitRange gives one a 64Mi request and a 256Mi limit. The generated Namespace carries the part-of=sycophant-tenant
+# label, which chains into the relay tokenreview and pod-VAP bindings the
+# tenant-rolebinding-generator policy produces, and the restricted Pod Security
+# labels the tenant-namespace-psa-required VAP demands.
+#
+# The keepalive match condition constrains the marker's keepalive to the policy
+# set 0, 30, 60, 90 days; a free-form value does not match and the marker
+# generates nothing.
+apiVersion: policies.kyverno.io/v1
+kind: GeneratingPolicy
+metadata:
+  name: provision-tenant-base
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  evaluation:
+    generateExisting:
+      enabled: false
+    synchronize:
+      enabled: false
+  {{- include "sycophant.provisionMarkerSystemMatchConstraints" . | nindent 2 }}
+  variables:
+    - name: tenant
+      expression: '"{{ include "sycophant.tenantNsPrefix" . }}" + object.data["tenant"]'
+    - name: capacity
+      expression: 'object.data["capacity"]'
+  generate:
+    - template:
+        interpolate: cel
+        value: |
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: (( variables.tenant ))
+            labels:
+              {{- include "sycophant.baseLabels" . | nindent 14 }}
+              app.kubernetes.io/part-of: sycophant-tenant
+              pod-security.kubernetes.io/enforce: restricted
+              pod-security.kubernetes.io/warn: restricted
+              pod-security.kubernetes.io/audit: restricted
+          ---
+          apiVersion: v1
+          kind: ResourceQuota
+          metadata:
+            name: (( variables.tenant ))-capacity
+            namespace: (( variables.tenant ))
+            labels:
+              {{- include "sycophant.labels" . | nindent 14 }}
+          spec:
+            hard:
+              requests.memory: (( variables.capacity ))
+              limits.memory: (( variables.capacity ))
+          ---
+          apiVersion: v1
+          kind: LimitRange
+          metadata:
+            name: (( variables.tenant ))-memory-default
+            namespace: (( variables.tenant ))
+            labels:
+              {{- include "sycophant.labels" . | nindent 14 }}
+          spec:
+            limits:
+              - type: Container
+                defaultRequest:
+                  memory: 64Mi
+                default:
+                  memory: 256Mi
+---
+{{ include "sycophant.provisionInstaller" (dict "ctx" $ "kind" "tenant") }}
+---
+# Delete reactor. Each object dies on its own reap-after annotation. Cluster-scoped
+# because it reaps kinds of mixed scope: the tenant Namespace (deleting it cascades
+# to the tenant PVCs and their disks) and the tenant installer's ServiceAccount and
+# RoleBinding (removing the scoped apply-capable identity behind the installer Job). A
+# per-object condition branches on kind to select those, never a sibling installer's.
+apiVersion: policies.kyverno.io/v1
+kind: DeletingPolicy
+metadata:
+  name: reap-tenant
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.reap.schedule | quote }}
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["namespaces"]
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["serviceaccounts"]
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["rolebindings"]
+  variables:
+    # The reap-after annotation the suspend reactor stamps on the namespace (now
+    # plus keepalive) and the provision generator stamps on the installer's
+    # ServiceAccount and RoleBinding. Only an object carrying it is a candidate.
+    - name: reapAfter
+      expression: >-
+        object.metadata.?annotations["{{ include "sycophant.reapAfterAnnotation" . }}"].orValue("")
+  conditions:
+    # One objectSelector cannot select the namespace by part-of and the SA/RB by
+    # component at once, so the label gate branches on kind here. A Namespace is
+    # reaped only when it is the tenant namespace; a ServiceAccount or RoleBinding
+    # only when it belongs to the tenant installer.
+    - name: selector-matches-by-kind
+      expression: >-
+        object.kind == "Namespace"
+          ? object.metadata.?labels["app.kubernetes.io/part-of"].orValue("") == "sycophant-tenant"
+          : object.metadata.?labels["app.kubernetes.io/component"].orValue("") == "provision-tenant"
+    - name: reap-after-ttl-has-passed
+      expression: >-
+        variables.reapAfter != "" && timestamp(variables.reapAfter) < time.now()
+---
+# Suspend scales the tenant namespace's Deployments to zero; a second policy
+# stamps a reap-after TTL (now plus keepalive) on the namespace, which the reap
+# DeletingPolicy acts on. Two policies because a CEL mutating policy resolves
+# one set of targets. The keepalive gate is a target match condition: as a
+# trigger condition it would move the policy into Kyverno's per-policy webhook
+# and the marker would be admitted twice. A free-form keepalive still scales
+# down but stamps no TTL. Targets resolve off the trigger's own namespace,
+# which bounds a marker to its tenant.
+apiVersion: policies.kyverno.io/v1
+kind: MutatingPolicy
+metadata:
+  name: suspend-tenant
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  evaluation:
+    mutateExisting:
+      enabled: true
+    # Defaults true, which suppresses mutateExisting entirely.
+    skipBackgroundRequests: false
+  {{- include "sycophant.suspendMarkerMatch" . | nindent 2 }}
+  targetMatchConstraints:
+    expression: >-
+      resource.list("apps/v1", "deployments", object.metadata.namespace)
+  mutations:
+    - patchType: ApplyConfiguration
+      applyConfiguration:
+        expression: >-
+          Object{ spec: Object.spec{ replicas: 0 } }
+---
+apiVersion: policies.kyverno.io/v1
+kind: MutatingPolicy
+metadata:
+  name: reap-tenant-ttl
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  evaluation:
+    mutateExisting:
+      enabled: true
+    # See above.
+    skipBackgroundRequests: false
+  {{- include "sycophant.suspendMarkerMatch" . | nindent 2 }}
+  variables:
+    # Keepalive is in days; the annotation is an absolute RFC3339 instant.
+    - name: reapAfter
+      expression: >-
+        string(time.now() + duration(string(int(request.object.data["keepalive"]) * 24) + "h"))
+  targetMatchConstraints:
+    expression: >-
+      resource.get("v1", "namespaces", "", object.metadata.namespace)
+  targetMatchConditions:
+    - name: keepalive-is-a-policy-value
+      expression: >-
+        request.object.?data["keepalive"].orValue("") in ["0", "30", "60", "90"]
+  mutations:
+    - patchType: ApplyConfiguration
+      applyConfiguration:
+        expression: >-
+          Object{
+            metadata: Object.metadata{
+              annotations: {"{{ include "sycophant.reapAfterAnnotation" . }}": variables.reapAfter}
+            }
+          }
+{{- end }}

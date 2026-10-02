@@ -1,0 +1,10 @@
+{{- /*
+The toolset lifecycle: the provision-toolset installer, its grant, and the
+reap of the installer's ServiceAccount and RoleBinding.
+*/}}
+{{- if include "sycophant.renderKyverno" . }}
+---
+{{ include "sycophant.provisionInstaller" (dict "ctx" $ "kind" "toolset") }}
+---
+{{ include "sycophant.provisionReap" (dict "ctx" $ "kind" "toolset") }}
+{{- end }}

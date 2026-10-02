@@ -1,5 +1,5 @@
 # Shared escape-hatch ClusterRole. Stable name; install once at cluster
-# bring-up. The tenant-namespace restrictions in `kyverno-kpol.yaml` select
+# bring-up. The tenant-namespace restrictions in `protect-security-kpol.yaml` select
 # tenant-scoped callers only: a ServiceAccount inside the namespace, or an
 # issuer-prefixed identity the cluster's IdP minted. A holder of this
 # ClusterRole breaks glass into a tenant ns by being neither, and these verbs

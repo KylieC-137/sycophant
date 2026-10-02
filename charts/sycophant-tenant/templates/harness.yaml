@@ -238,7 +238,7 @@ spec:
             # Read-only instructions volume. The harness reads AGENTS.md / agents /
             # skills from INSTRUCTIONS_ROOT/WORKSPACE_NAME. It is an emptyDir the init
             # container populated from object storage — no hostPath, no PV — so
-            # the gvisor-pod-vap hostPath ban holds and the serving container
+            # the pod-hardening-vap hostPath ban holds and the serving container
             # mounts no credential.
             - { name: instructions-{{ $name }}, mountPath: {{ printf "/etc/instructions/%s" $name | quote }}, readOnly: true }
             - name: toolset-config

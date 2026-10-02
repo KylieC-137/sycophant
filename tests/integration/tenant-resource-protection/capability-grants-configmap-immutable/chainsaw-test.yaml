@@ -32,7 +32,7 @@ spec:
     bucket.
 
     Mutation guard: without the new capability-grants rule in
-    charts/sycophant-cluster/templates/kyverno-kpol.yaml all three deny steps go
+    charts/sycophant-cluster/templates/protect-security-kpol.yaml all three deny steps go
     green (admitted).
   bindings:
     - name: tenant_ns

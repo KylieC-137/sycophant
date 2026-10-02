@@ -13,7 +13,7 @@ spec:
               REPO_ROOT=$(git rev-parse --show-toplevel)
               doc=$(helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
                 --api-versions policies.kyverno.io/v1/ValidatingPolicy \
-                --show-only templates/tenant-user-clusterrole.yaml)
+                --show-only templates/provision-identity-clusterrole.yaml)
               printf '%s\n' "$doc" | python3 -c '
               import sys, yaml
               docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
