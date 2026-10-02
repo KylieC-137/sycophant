@@ -8,6 +8,7 @@ pub(crate) fn extract_assets(scope: &Scope) -> Result<(), String> {
         (scope.cluster_chart_dir(), &assets::CLUSTER_CHART),
         (scope.tenant_chart_dir(), &assets::TENANT_CHART),
         (scope.gvisor_chart_dir(), &assets::GVISOR_CHART),
+        (scope.dex_chart_dir(), &assets::DEX_CHART),
         (scope.kyverno_crds_chart_dir(), &assets::KYVERNO_CRDS_CHART),
     ] {
         // Remove first so files deleted from the embedded chart don't linger from a

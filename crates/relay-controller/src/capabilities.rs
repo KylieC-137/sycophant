@@ -1,13 +1,19 @@
-//! The per-workspace toolset grants, read once at startup from the
-//! chart-rendered relay-toolset-grants file. Names only, and the file itself
-//! carries nothing else: the relay is the internet-facing pod, so no grant's
-//! Secret name, mount path, or egress domain is rendered into what it mounts. A
-//! change to the grants rolls the pod through the chart's checksum annotation.
+//! The per-workspace toolset grants the gateway serves on ListGrants. Names
+//! only: the relay is the internet-facing pod, so no grant's Secret name, mount
+//! path, or egress domain is ever rendered into what it reads.
+//!
+//! Merged from the per-workspace `relay-toolset-grants-<workspace>` ConfigMaps
+//! labelled `sycophant.md/type: relay-toolset-grants`.
 
 use std::collections::{BTreeMap, HashMap};
 
+use k8s_openapi::api::core::v1::ConfigMap;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
+use shared::configmap_watcher::merge_configmaps;
+
+/// The `data` key each per-workspace ConfigMap carries its bindings block under.
+pub const GRANTS_DATA_KEY: &str = "grants.yaml";
 
 /// One workspace's toolset list entry as the bindings file writes it: a bare
 /// toolset name, or a named entry carrying its grants. Grant specs beyond
@@ -59,10 +65,14 @@ pub struct CapabilityGrants {
 }
 
 impl CapabilityGrants {
-    pub fn load(path: &str) -> Result<Self, String> {
-        let raw =
-            std::fs::read_to_string(path).map_err(|e| format!("read bindings file {path}: {e}"))?;
-        Self::parse(&raw)
+    /// Merge every per-workspace ConfigMap into one table.
+    pub fn merge_configmaps<'a, I>(cms: I) -> (Self, Vec<String>)
+    where
+        I: IntoIterator<Item = &'a ConfigMap>,
+    {
+        let (map, errors) =
+            merge_configmaps(cms, GRANTS_DATA_KEY, |raw| Self::parse(raw).map(|g| g.map));
+        (Self { map }, errors)
     }
 
     fn parse(yaml: &str) -> Result<Self, String> {

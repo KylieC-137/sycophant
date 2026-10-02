@@ -1,0 +1,119 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: provision-workspace-marker-materializes-installer
+spec:
+  timeouts:
+    assert: 120s
+  description: An admitted provision-workspace marker materializes the installer ServiceAccount and Job in sycophant-system and the RoleBinding in the tenant namespace.
+  bindings:
+    - name: tenant_ns
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
+    - name: handle
+      value: (random('[a-f0-9]{10}'))
+  steps:
+    - name: preflight-kyverno-ready
+      try:
+        - assert:
+            resource:
+              apiVersion: policies.kyverno.io/v1
+              kind: GeneratingPolicy
+              metadata:
+                name: provision-workspace
+              status:
+                conditionStatus:
+                  ready: true
+        - assert:
+            resource:
+              apiVersion: policies.kyverno.io/v1
+              kind: GeneratingPolicy
+              metadata:
+                name: provision-workspace-grant
+              status:
+                conditionStatus:
+                  ready: true
+    - name: create-tenant-ns
+      use:
+        template: ../../step-templates/tenant.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+    - name: grant-marker-write
+      use:
+        template: ../../step-templates/marker-writer.yaml
+        with:
+          bindings:
+            - name: marker_ns
+              value: ($tenant_ns)
+    - name: write-workspace-marker
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: HANDLE
+                value: ($handle)
+            content: |
+              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+              cat <<MANIFEST | kubectl create --as="${ISSUER}#operator" -n "$TENANT_NS" -f -
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: provision-workspace
+                namespace: ${TENANT_NS}
+                labels:
+                  app.kubernetes.io/part-of: sycophant
+                  sycophant.md/lifecycle-marker: "true"
+              data:
+                workspace: agent-one
+                handle: "${HANDLE}"
+                values: "{}"
+              MANIFEST
+    - name: assert-installer-set
+      try:
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: (join('-', ['provision-workspace', $handle]))
+                namespace: sycophant-system
+                labels:
+                  app.kubernetes.io/component: provision-workspace
+                (annotations."sycophant.md/reap-after" != null): true
+        - assert:
+            resource:
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: (join('-', ['provision-workspace', $handle]))
+                namespace: sycophant-system
+                labels:
+                  app.kubernetes.io/component: provision-workspace
+        - assert:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: (join('-', ['provision-workspace', $handle]))
+                namespace: ($tenant_ns)
+                labels:
+                  app.kubernetes.io/component: provision-workspace
+                (annotations."sycophant.md/reap-after" != null): true
+              subjects:
+                - kind: ServiceAccount
+                  name: (join('-', ['provision-workspace', $handle]))
+                  namespace: sycophant-system
+              roleRef:
+                apiGroup: rbac.authorization.k8s.io
+                kind: ClusterRole
+                name: provision-write
+      cleanup:
+        - script:
+            env:
+              - name: HANDLE
+                value: ($handle)
+            content: |
+              kubectl delete serviceaccount "provision-workspace-${HANDLE}" -n sycophant-system --ignore-not-found
+              kubectl delete job "provision-workspace-${HANDLE}" -n sycophant-system --ignore-not-found

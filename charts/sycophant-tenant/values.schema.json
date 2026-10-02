@@ -3,10 +3,15 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
+    "render": {
+      "type": "string",
+      "enum": ["base", "workspace", "user", "toolset"],
+      "description": "Which slice of the chart this release renders; see values.yaml."
+    },
     "users": {
       "type": "array",
-      "description": "Full issuer-prefixed identity subjects `<issuer>#<sub>`, operator-supplied, one per identity granted this tenant. When non-empty, the chart renders a RoleBinding granting those users the tenant-user ClusterRole in this namespace. Empty renders no binding. The prefix is enforced: cluster-protect-security selects tenant-scoped callers by it, so a subject without one would hold the tenant-user verbs while sitting outside the policy's reach.",
-      "items": { "type": "string", "pattern": "^https?://[^#]+#.+$" }
+      "description": "Full issuer-prefixed identity subjects `<issuer>#<sub>`, operator-supplied, one per identity granted this tenant. When non-empty, the chart renders a RoleBinding granting those users the provision-identity ClusterRole in this namespace. Empty renders no binding. The prefix is enforced: cluster-protect-security selects tenant-scoped callers by it, so a subject without one would hold the provision-identity verbs while sitting outside the policy's reach. Neither the issuer nor the sub may carry a quote, backslash, control character, or Unicode line or paragraph separator, matching the user marker's admission rule.",
+      "items": { "type": "string", "pattern": "^https?://[^#\"\\\\\\p{Cc}\\x{2028}\\x{2029}]+#[^\"\\\\\\p{Cc}\\x{2028}\\x{2029}]+$" }
     },
     "namespace": {
       "type": "object",
@@ -19,16 +24,9 @@
       "type": "string",
       "description": "StorageClass for all tenant PVCs. Empty uses the cluster default StorageClass."
     },
-    "vpa": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": { "type": "boolean" }
-      }
-    },
     "toolsets": {
       "type": "object",
-      "description": "Toolset entries rendered into the toolset-config ConfigMap. Keyed by toolset name.",
+      "description": "Toolset entries, each rendered into its own `toolset-<name>` ConfigMap the harness watches and merges live. Keyed by toolset name.",
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
@@ -199,7 +197,7 @@
           "properties": {
             "endpoint": { "type": "string", "description": "Cross-namespace Service address (host:port) of the shared cluster object store the sync init container reaches. The harness egress netpol reads the store namespace from this host." },
             "bucket": { "type": "string", "description": "Bucket holding every workspace's instruction tree." },
-            "credentialName": { "type": "string", "description": "Name of the (Sealed)Secret carrying the read-only, prefix-scoped sync credential (produced SaaS-side). Mounted into the init container only." },
+            "credentialName": { "type": "string", "description": "Name of the Secret carrying the read-only, prefix-scoped sync credential, which the operator creates in the tenant namespace. Mounted into the init container only." },
             "syncImage": { "type": "string", "description": "Image for the object-storage sync init container (carries the sync client)." }
           }
         }

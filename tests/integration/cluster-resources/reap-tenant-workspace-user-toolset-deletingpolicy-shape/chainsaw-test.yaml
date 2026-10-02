@@ -1,0 +1,38 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: reap-tenant-workspace-user-toolset-deletingpolicy-shape
+spec:
+  description: Each reap-<kind> DeletingPolicy runs on a schedule, selects component=provision-<kind>, reaps past reap-after, and has no PV-Retain step.
+  steps:
+    - name: assert-reap-policy
+      try:
+        - script:
+            content: |
+              out=$(helm template probe "$(git rev-parse --show-toplevel)/charts/sycophant-cluster" -n sycophant-system \
+                --api-versions policies.kyverno.io/v1/ValidatingPolicy 2>&1) || { printf '%s\n' "$out" >&2; exit 1; }
+
+              for kind in tenant workspace user toolset; do
+                dp=$(printf '%s' "$out" | awk -v k="$kind" 'BEGIN{RS="\n---\n"} \
+                  /kind: DeletingPolicy/ && $0 ~ ("name: reap-" k "\n") {print}')
+                [ -n "$dp" ] \
+                  || { echo "[$kind] reap-$kind DeletingPolicy did not render"; exit 1; }
+
+                printf '%s' "$dp" | grep -q 'schedule:' \
+                  || { echo "[$kind] reap runs on a schedule, not on admission"; printf '%s\n' "$dp" >&2; exit 1; }
+                printf '%s' "$dp" | grep -q "component.*provision-${kind}" \
+                  || { echo "[$kind] reap must select the installer objects by component=provision-$kind"; printf '%s\n' "$dp" >&2; exit 1; }
+                printf '%s' "$dp" | grep -q 'reap-after' \
+                  || { echo "[$kind] reap must key on the reap-after instant"; printf '%s\n' "$dp" >&2; exit 1; }
+                printf '%s' "$dp" | grep -qi 'Retain' \
+                  && { echo "[$kind] namespace reap cascades to PVCs; no PV-Retain step"; printf '%s\n' "$dp" >&2; exit 1; }
+                [ "$kind" = tenant ] && tenant_dp=$dp
+              done
+
+              for r in namespaces serviceaccounts rolebindings; do
+                printf '%s' "$tenant_dp" | grep -q "resources: \[\"$r\"\]" \
+                  || { echo "reap-tenant must match $r"; printf '%s\n' "$tenant_dp" >&2; exit 1; }
+              done
+              printf '%s' "$tenant_dp" | grep -q '"sycophant-tenant"' \
+                || { echo "reap-tenant must select the namespace by part-of=sycophant-tenant"; printf '%s\n' "$tenant_dp" >&2; exit 1; }
+              true

@@ -91,57 +91,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // request), the startup rebuild, and each redemption.
     let client_verifier = Arc::new(ClientSignatureVerifier::new(DEFAULT_WINDOW));
 
-    // The per-workspace toolset grants, from the chart-mounted
-    // relay-toolset-grants file. Names only. A configured-but-unreadable file
-    // is a startup failure; an unconfigured one leaves the grants empty.
-    let capabilities = match std::env::var("RELAY_TOOLSET_GRANTS_FILE") {
-        Ok(path) => relay_controller::capabilities::CapabilityGrants::load(&path)?,
-        Err(_) => {
-            tracing::info!("RELAY_TOOLSET_GRANTS_FILE unset; capability grants are empty");
-            relay_controller::capabilities::CapabilityGrants::default()
-        }
-    };
+    let state = Arc::new(GatewayState::new(
+        client_verifier.clone(),
+        Some(kube_client.clone()),
+        namespace.clone(),
+    ));
 
-    let state = Arc::new(
-        GatewayState::new(
-            client_verifier.clone(),
-            Some(kube_client.clone()),
-            namespace.clone(),
-        )
-        .with_capabilities(capabilities),
-    );
+    // The live ListGrants table. An unsynced table serves an empty ListGrants
+    // for every workspace, so a timeout crashes the process and lets the
+    // kubelet's restart backoff retry rather than answer discovery blank.
+    shared::watcher_retry::spawn_and_await_ready(
+        "relay-toolset-grants",
+        "toolset-grants",
+        kube_client.clone(),
+        namespace.clone(),
+        state.capabilities(),
+        |client, ns, table, tx| async move {
+            shared::configmap_watcher::watch_configmaps(
+                client,
+                &ns,
+                "sycophant.md/type=relay-toolset-grants",
+                "toolset-grants",
+                table,
+                tx,
+                |cms| {
+                    relay_controller::capabilities::CapabilityGrants::merge_configmaps(cms.values())
+                },
+            )
+            .await
+        },
+    )
+    .await?;
 
     // Grants watch: the live authorization table. Hot reload is the whole
     // revocation promise — a removed row must cut access within seconds,
     // without a pod restart.
     let grants = state.grants();
-    {
-        let (grants_ready_tx, mut grants_ready_rx) = tokio::sync::watch::channel(false);
-        let watcher_ns = namespace.clone();
-        let watcher_client = kube_client.clone();
-        let watcher_grants = grants.clone();
-        shared::watcher_retry::spawn_watcher_task("relay-access-grants", move || {
-            let ns = watcher_ns.clone();
-            let client = watcher_client.clone();
-            let table = watcher_grants.clone();
-            let tx = grants_ready_tx.clone();
-            async move { relay_controller::grants_watcher::watch_grants(client, &ns, table, tx).await }
-        });
-
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            grants_ready_rx.wait_for(|&v| v),
-        )
-        .await
-        {
-            Ok(_) => tracing::info!("grants watcher initial sync complete"),
-            // Serving past this point is useless and silent: an unsynced
-            // grants table is empty, so it authorizes nobody, and the key
-            // load below installs nothing against it. Crash instead, and
-            // let the kubelet's restart backoff retry.
-            Err(_) => return Err("grants watcher initial sync did not complete within 10s".into()),
-        };
-    }
+    // Serving past this point is useless and silent: an unsynced grants table
+    // is empty, so it authorizes nobody, and the key load below installs
+    // nothing against it. A timeout crashes the process instead and lets the
+    // kubelet's restart backoff retry.
+    shared::watcher_retry::spawn_and_await_ready(
+        "relay-access-grants",
+        "grants",
+        kube_client.clone(),
+        namespace.clone(),
+        grants.clone(),
+        |client, ns, table, tx| async move {
+            relay_controller::grants_watcher::watch_grants(client, &ns, table, tx).await
+        },
+    )
+    .await?;
 
     // Rebuild the verifier from the relay-owned registered-key Secret, so a
     // redeemed device survives a pod roll. Narrowed by the live grants

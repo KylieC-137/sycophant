@@ -1,5 +1,5 @@
-# The operator-owned system namespace: holds the tenant-deployer ServiceAccount
-# and the shared SeaweedFS object store (a running Deployment, installed by the
+# The operator-owned system namespace: holds the shared SeaweedFS object store
+# (a running Deployment, installed by the
 # sycophant-objectstore chart). PSA-restricted, so any pod admitted here must
 # satisfy the restricted profile; the SeaweedFS spec does. Applied out-of-band
 # (embedded by `syco setup`, applied by scripts/e2e.sh) rather than as a chart

@@ -156,10 +156,10 @@ pub struct GatewayState {
     /// Pool of per-workspace harness clients for the tool forwards
     /// (`WatchTools`/`CallTool`) and the conversation-lifecycle forwards.
     harness_clients: Arc<HarnessClientPool>,
-    /// Per-workspace capability grants, read from the mounted
-    /// relay-toolset-grants file at startup. Names only; empty when no such
-    /// file is mounted.
-    capabilities: crate::capabilities::CapabilityGrants,
+    /// Per-workspace capability grants the gateway serves on ListGrants,
+    /// swapped by the toolset-grants watcher on every ConfigMap delivery. Names
+    /// only; empty when no workspace has minted its ConfigMap yet.
+    capabilities: Arc<RwLock<crate::capabilities::CapabilityGrants>>,
 }
 
 impl GatewayState {
@@ -179,21 +179,24 @@ impl GatewayState {
             kube_client,
             namespace,
             harness_clients,
-            capabilities: crate::capabilities::CapabilityGrants::default(),
+            capabilities: Arc::new(RwLock::new(crate::capabilities::CapabilityGrants::default())),
         }
     }
 
-    /// Install the startup-loaded capability grants.
-    pub fn with_capabilities(
-        mut self,
-        capabilities: crate::capabilities::CapabilityGrants,
-    ) -> Self {
-        self.capabilities = capabilities;
+    /// Seed the capability grants for test fixtures.
+    #[cfg(test)]
+    pub fn with_capabilities(self, capabilities: crate::capabilities::CapabilityGrants) -> Self {
+        *self
+            .capabilities
+            .try_write()
+            .expect("no watcher holds the capabilities lock at construction") = capabilities;
         self
     }
 
-    pub fn capabilities(&self) -> &crate::capabilities::CapabilityGrants {
-        &self.capabilities
+    /// Shared handle on the live ListGrants table. The toolset-grants watcher
+    /// writes through it; `list_grants` reads through it.
+    pub fn capabilities(&self) -> Arc<RwLock<crate::capabilities::CapabilityGrants>> {
+        self.capabilities.clone()
     }
 
     #[cfg(test)]
@@ -213,7 +216,7 @@ impl GatewayState {
             kube_client,
             namespace,
             harness_clients,
-            capabilities: crate::capabilities::CapabilityGrants::default(),
+            capabilities: Arc::new(RwLock::new(crate::capabilities::CapabilityGrants::default())),
         }
     }
 

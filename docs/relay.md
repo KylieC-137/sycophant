@@ -117,7 +117,7 @@ Proto definitions at `crates/relay-proto/proto/relay/v1/relay.proto`.
 |-----|-------------|
 | `RedeemCode` | Present an operator-verified row's code; register the device public key against that row. |
 | `ListWorkspaces` | The workspace the signing grant row names. |
-| `ListGrants` | The workspace's toolset grants, grouped by toolset. Names only, read from the mounted `relay-toolset-grants` ConfigMap; the gateway reads no Secret. |
+| `ListGrants` | The workspace's toolset grants, grouped by toolset. Names only, merged live from the per-workspace `relay-toolset-grants-<workspace>` ConfigMaps; the gateway reads no Secret. |
 | `MintConversation` / `ListConversations` / `DeleteConversation` / `SetConversationName` / `GetConversationHistory` | Conversation lifecycle; relayed to the Harness. |
 | `GetTurnState` | Current turn-state for a conversation. |
 | `ChannelIngest` | Inbound user message in. |
@@ -136,7 +136,7 @@ Proto definitions at `crates/relay-proto/proto/relay/v1/relay.proto`.
 
 The relay carries no transport. Each channel supplies its own, as a standing Deployment rendered from `.Values.channels`: one Deployment per entry, `replicas: 1`, `strategy: Recreate`, gVisor, its own ServiceAccount, its own fail-closed egress policy, and no workspace mount.
 
-The app channel's adapter is the tailnet terminus. It is `sycophant.md/adapter-class: transport` — transport only, holding no signing identity and mounting no keypair volume — and forwards tailnet TCP :9090 to the relay's app port. Its tailnet node identity persists across restarts in its own `adapter-<channel>-state` Secret (`TS_KUBE_SECRET`). It is the stated exception to dial-out-only: it accepts inbound tailnet connections, so no ingress policy selects it. See [`docs/headscale-self-host-acme.md`](headscale-self-host-acme.md) for the self-hosted control plane.
+The app channel's adapter is the tailnet terminus. It is `sycophant.md/adapter-class: transport` — transport only, holding no signing identity and mounting no keypair volume — and forwards tailnet TCP :9090 to the relay's app port. Its tailnet node identity persists across restarts in the fixed `adapter-state` Secret (`TS_KUBE_SECRET`, one app channel per tenant). It is the stated exception to dial-out-only: it accepts inbound tailnet connections, so no ingress policy selects it. See [`docs/headscale-self-host-acme.md`](headscale-self-host-acme.md) for the self-hosted control plane.
 
 Platform adapters (`sycophant.md/adapter-class: principal`) hold one adapter keypair each and reach the relay on the adapter port. They are dial-out-only.
 
@@ -171,9 +171,9 @@ rules:
     verbs: ["get", "update", "patch"]
 ```
 
-Each app adapter carries its own Role granting `get`/`update`/`patch` on its `adapter-<channel>-state` Secret (and `create` for first start), bound to the adapter's ServiceAccount, not the relay's.
+The app adapter carries a Role granting `get`/`update`/`patch` on the fixed `adapter-state` Secret (and `create` for first start), bound to the adapter's ServiceAccount, not the relay's.
 
-TokenReview is cluster-scoped: a shared `cluster-relay-tokenreview` ClusterRole grants `create` on `tokenreviews`, bound to each tenant's `relay-ctrl` SA by the `tenant-rolebinding-generator` Kyverno policy.
+TokenReview is cluster-scoped: a shared `cluster-relay-tokenreview` ClusterRole grants `create` on `tokenreviews`, bound to each tenant's `relay-controller` SA by the `tenant-rolebinding-generator` Kyverno policy.
 
 ## Security Model
 

@@ -3,32 +3,7 @@ kind: Test
 metadata:
   name: adapter-port-ingress-rule
 spec:
-  description: |
-    The relay serves a port for platform adapters (9092), and
-    the rule admitting it lives in the relay's ONE existing
-    ingress CiliumNetworkPolicy — `relay-ingress` — beside the harness rule.
-    The chart renders no second ingress CNP selecting the relay pod.
-
-    Implemented by charts/sycophant-tenant/templates/relay-ctrl-cnp.yaml
-    (append a second `fromEndpoints` rule inside the same object) and
-    charts/sycophant-tenant/templates/relay-ctrl.yaml (a `grpc-adapter`
-    containerPort plus a matching Service port).
-
-    Rendered offline and parsed through `kubectl apply --dry-run=client` so a
-    template-trim bug that glues two documents together cannot pass by leaving
-    the right substrings in the text.
-
-    Why the counting assertion earns its keep: ONE object carries every relay
-    ingress rule. Splitting the adapter rule into a second
-    CNP would leave every per-field assertion green — both objects render, both
-    apply, and the port is reachable — while quietly creating a second place
-    that has to be kept correct, and a second object whose whole-object absence
-    fails open. No per-field test can see that; only the count can.
-
-    Mutation guard: put the adapter rule in a new template file and the
-    relay-selecting ingress count becomes 2. Drop the rule and the 9092
-    assertion reds. Drop the harness rule while adding the adapter rule and the
-    9090 assertion reds.
+  description: The adapter port 9092 rule lives in the single relay-ingress policy.
   steps:
     - name: assert-one-relay-ingress-cnp-carrying-the-adapter-port
       try:
@@ -45,7 +20,7 @@ spec:
                 -o jsonpath='{range .items[?(@.kind=="CiliumNetworkPolicy")]}{.metadata.name}|{.spec.endpointSelector.matchLabels.app\.kubernetes\.io/component}|{.spec.ingress}{"\n"}{end}' 2>&1) \
                 || { echo "render did not parse as resources"; printf '%s\n' "$cnps" >&2; exit 1; }
 
-              relay_ingress=$(printf '%s\n' "$cnps" | awk -F'|' '$2 == "relay-ctrl" && $3 != "" { print }')
+              relay_ingress=$(printf '%s\n' "$cnps" | awk -F'|' '$2 == "relay-controller" && $3 != "" { print }')
               count=$(printf '%s' "$relay_ingress" | grep -c . || true)
               [ "$count" -eq 1 ] \
                 || { echo "expected exactly 1 ingress CNP selecting the relay pod, got $count"; printf '%s\n' "$cnps" >&2; exit 1; }

@@ -1,3 +1,4 @@
+{{- if eq .Values.render "base" }}
 {{/*
 Post-install/upgrade Job that blocks `helm install` until every sycophant
 workload Deployment in the release namespace (relay, per-workspace harness,
@@ -124,3 +125,4 @@ spec:
         - name: tmp
           emptyDir: {}
         {{- include "sycophant.projectedKubeApiToken.volume" . | nindent 8 }}
+{{- end }}

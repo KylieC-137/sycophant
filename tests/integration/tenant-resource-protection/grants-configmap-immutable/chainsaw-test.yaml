@@ -3,38 +3,7 @@ kind: Test
 metadata:
   name: protect-grants-configmap-blocks-same-ns
 spec:
-  description: |
-    `cluster-protect-security` denies CREATE, UPDATE, and DELETE on any
-    ConfigMap labeled `sycophant.md/type: relay-access-grants` from any principal whose
-    ServiceAccount lives inside the tenant namespace. The twin of the existing
-    `protect-toolset-config` rule: same match shape, same same-namespace
-    precondition, and NO per-subject carve-out.
-
-    The relay's own ServiceAccount is in the deny set, and that is the whole
-    security property. The relay watches the grants table; if it could also
-    write it, a captured relay could mint itself a row into any workspace and
-    every downstream authorization check would then be checking a table the
-    attacker wrote. A test that only exercises a generic `attacker` SA would
-    pass on a policy that quietly exempts `relay-ctrl` — which is exactly the
-    exemption someone adds the first time the relay needs to record something.
-
-    RBAC in this test is deliberately permissive (a Role granting the two SAs
-    full CRUD on ConfigMaps) so the requests reach admission and Kyverno is the
-    rule under test rather than RBAC. Same construction as
-    sa-permission-bounds/relay-secret-name-allowlist. The chart's real relay
-    Role holds no ConfigMap write verb at all, asserted separately against the
-    rendered Role in
-    sa-permission-bounds/relay-ctrl-grants-and-key-rbac. RBAC is the first lock;
-    this is the second.
-
-    Paired with an out-of-namespace accept per tests/README.md: a rule that
-    denied every write to the grants ConfigMap would also block the operator,
-    who is the only one allowed to write it.
-
-    Mutation guard: delete the `protect-relay-access-grants` rule from
-    charts/sycophant-cluster/templates/kyverno-kpol.yaml and all three deny
-    steps go green (admitted). Add a `relay-ctrl` carve-out to its precondition
-    and only the relay step goes green.
+  description: An in-namespace ServiceAccount cannot create, update, or delete the relay-access-grants ConfigMap.
   bindings:
     - name: tenant_ns
       value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
@@ -62,7 +31,7 @@ spec:
               apiVersion: v1
               kind: ServiceAccount
               metadata:
-                name: relay-ctrl
+                name: relay-controller
                 namespace: ($tenant_ns)
         - apply:
             template: true
@@ -89,7 +58,7 @@ spec:
                   name: attacker
                   namespace: ($tenant_ns)
                 - kind: ServiceAccount
-                  name: relay-ctrl
+                  name: relay-controller
                   namespace: ($tenant_ns)
               roleRef:
                 kind: Role
@@ -142,7 +111,7 @@ spec:
             content: |
               kubectl patch configmap relay-access-grants -n "$TENANT_NS" --type=merge \
                 -p '{"data":{"relay-minted-row":"channel: app\nidentity: self\nworkspace: family\n"}}' \
-                --as="system:serviceaccount:${TENANT_NS}:relay-ctrl"
+                --as="system:serviceaccount:${TENANT_NS}:relay-controller"
             check:
               ($error != null): true
               (contains($stderr, 'cluster-protect-security')): true

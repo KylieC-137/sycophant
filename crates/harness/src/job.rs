@@ -676,8 +676,7 @@ mod tests {
     }
 
     /// The harness-created capability-job pod runs as `unprivileged-<workspace>`, the
-    /// zero-RBAC run identity the gate pins. The controller copy keeps
-    /// `sa-<workspace>` for its coexisting path.
+    /// zero-RBAC run identity the gate pins.
     #[test]
     fn harness_tool_job_runs_as_unprivileged_workspace_sa() {
         let job = test_job();

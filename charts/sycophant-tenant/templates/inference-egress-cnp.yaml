@@ -1,3 +1,4 @@
+{{- if eq .Values.render "base" }}
 {{/*
 Per-model egress policy for inference-job pods. One CiliumNetworkPolicy per
 model entry, selecting pods by the `sycophant.md/model` label the harness stamps
@@ -52,16 +53,7 @@ spec:
   {{- if eq $dest.class "fqdn" }}
     # DNS: resolve only this model's host. Co-scoped L7 so it unions with the
     # baseline's pinned matchName rule instead of shadowing it.
-    - toEndpoints:
-        - matchLabels:
-            io.kubernetes.pod.namespace: kube-system
-            k8s-app: kube-dns
-      toPorts:
-        - ports:
-            - port: "53"
-              protocol: UDP
-            - port: "53"
-              protocol: TCP
+    {{- include "sycophant.dnsEgress" . | nindent 4 }}
           rules:
             dns:
               - matchName: {{ $dest.host | quote }}
@@ -94,18 +86,10 @@ spec:
               protocol: TCP
     # DNS: resolve only the inference Service FQDN. L7 so it unions with the
     # baseline's controller allowlist instead of L4-shadowing it.
-    - toEndpoints:
-        - matchLabels:
-            io.kubernetes.pod.namespace: kube-system
-            k8s-app: kube-dns
-      toPorts:
-        - ports:
-            - port: "53"
-              protocol: UDP
-            - port: "53"
-              protocol: TCP
+    {{- include "sycophant.dnsEgress" . | nindent 4 }}
           rules:
             dns:
               - matchName: {{ printf "inference-%s.%s.svc.cluster.local" $key $.Release.Namespace | quote }}
   {{- end }}
+{{- end }}
 {{- end }}

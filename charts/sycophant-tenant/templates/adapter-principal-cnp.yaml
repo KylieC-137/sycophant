@@ -1,3 +1,4 @@
+{{- if eq .Values.render "base" }}
 {{/*
 Fail-closed egress for principal-class adapters.
 
@@ -28,22 +29,14 @@ spec:
       sycophant.md/adapter-class: principal
       app.kubernetes.io/part-of: sycophant
   egress:
-    - toEndpoints:
-        - matchLabels:
-            io.kubernetes.pod.namespace: kube-system
-            k8s-app: kube-dns
-      toPorts:
-        - ports:
-            - port: "53"
-              protocol: UDP
-            - port: "53"
-              protocol: TCP
+    {{- include "sycophant.dnsEgress" . | nindent 4 }}
     # The relay's principal socket. This dial is the principal adapter's job.
     - toEndpoints:
         - matchLabels:
-            app.kubernetes.io/component: relay-ctrl
+            app.kubernetes.io/component: relay-controller
             app.kubernetes.io/part-of: sycophant
       toPorts:
         - ports:
             - port: "9092"
               protocol: TCP
+{{- end }}

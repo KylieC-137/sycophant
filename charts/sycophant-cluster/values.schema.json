@@ -29,17 +29,25 @@
         }
       }
     },
-    "deployer": {
+    "provisioner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "tag", "pullPolicy", "chartPath"],
+      "properties": {
+        "image": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string", "minLength": 1 },
+        "pullPolicy": { "type": "string", "minLength": 1 },
+        "chartPath": { "type": "string", "minLength": 1 }
+      }
+    },
+    "reap": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "serviceAccount": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["name"],
-          "properties": {
-            "name": { "type": "string" }
-          }
+        "schedule": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Cron schedule for the cleanup DeletingPolicies that reap suspended tenants past keepalive and installer leftovers. Standard 5-field cron; Kyverno's minimum granularity is 1 minute."
         }
       }
     }

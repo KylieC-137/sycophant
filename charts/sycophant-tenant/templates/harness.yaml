@@ -25,7 +25,7 @@ first harness boot when audience verification fails.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: sa-{{ $name }}
+  name: {{ $name }}-workspace-init
   namespace: {{ $.Release.Namespace }}
   labels:
     {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
@@ -99,13 +99,10 @@ spec:
   template:
     metadata:
       annotations:
-        # Roll the harness on toolset or scheduling config changes (it creates
-        # tool jobs from these). Each checksum hashes this workspace's slice
-        # alone, so a sibling's change never rolls this harness. The capability
-        # manifest needs no checksum here: its ConfigMap is content-addressed
-        # (name carries the manifest hash), so a manifest change swaps the mounted
-        # ConfigMap name below and rolls the pod on its own.
-        checksum/toolsets: {{ include (print $.Template.BasePath "/toolset-config.yaml") $ | sha256sum }}
+        # Roll the harness on model-catalog or scheduling changes (read once at
+        # boot). The toolset map is watched, so it is absent. The capability
+        # manifest ConfigMap name carries its hash, so a change rolls the pod.
+        checksum/model: {{ include (print $.Template.BasePath "/toolset-config.yaml") $ | sha256sum }}
         checksum/scheduling: {{ include (print $.Template.BasePath "/scheduling-cm.yaml") $ | sha256sum }}
       labels:
         {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 8 }}
@@ -141,7 +138,7 @@ spec:
             capabilities:
               drop: [ALL]
           # The pod VAP requires every container in a harness pod (init included)
-          # to set cpu + memory limits. mc mirror of the instruction tree is
+          # to set cpu + memory limits. The sync of the instruction tree is
           # light, so fixed modest limits suffice.
           resources:
             limits:
@@ -150,13 +147,22 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - >
-              mc alias set os "http://{{ $.Values.harness.instructions.endpoint }}" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" &&
-              mc mirror --overwrite "os/{{ $.Values.harness.instructions.bucket }}/{{ $prefix }}" "/etc/instructions/{{ $name }}"
+              rclone sync "os:{{ $.Values.harness.instructions.bucket }}/{{ $prefix }}" "/etc/instructions/{{ $name }}"
           env:
-            # mc writes its config and scratch under HOME; readOnlyRootFilesystem
-            # forces both onto the writable scratch emptyDir below.
+            # readOnlyRootFilesystem: rclone's cache (under HOME) and its config
+            # path both point at the writable scratch emptyDir below.
             - { name: HOME,          value: /tmp }
-            - { name: MC_CONFIG_DIR, value: /tmp/.mc }
+            - { name: RCLONE_CONFIG,  value: /tmp/rclone.conf }
+            # The `os` remote is defined by env alone, not by the config file:
+            # an S3 backend against the SeaweedFS S3 gateway, provider Other,
+            # taking its credential from the AWS env vars below.
+            - { name: RCLONE_CONFIG_OS_TYPE,     value: s3 }
+            - { name: RCLONE_CONFIG_OS_PROVIDER, value: Other }
+            - { name: RCLONE_CONFIG_OS_ENV_AUTH, value: "true" }
+            - { name: RCLONE_CONFIG_OS_ENDPOINT, value: "http://{{ $.Values.harness.instructions.endpoint }}" }
+            # The sync credential is scoped to this prefix, not the bucket, so skip
+            # rclone's bucket existence/create check: it would HeadBucket and 403.
+            - { name: RCLONE_CONFIG_OS_NO_CHECK_BUCKET, value: "true" }
             # The read-only, prefix-scoped sync credential, mounted init-only.
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
@@ -185,18 +191,17 @@ spec:
               cpu: {{ (or $ws.harness dict).cpu | default "500m" | quote }}
               memory: {{ (or $ws.harness dict).memory | default "256Mi" | quote }}
           env:
-            - { name: RELAY_GATEWAY_ADDR,      value: "http://relay-ctrl:9090" }
+            - { name: RELAY_GATEWAY_ADDR,      value: "http://relay-controller:9090" }
             # This harness serves only its own workspace's instructions, read
             # in-process from the read-only volume mounted below at
             # INSTRUCTIONS_ROOT/WORKSPACE_NAME (must match the instructions mountPath).
             - { name: WORKSPACE_NAME, value: {{ $name | quote }} }
             - { name: INSTRUCTIONS_ROOT,    value: "/etc/instructions" }
-            # The harness now creates tool jobs via the kube API from the
-            # toolset + scheduling config, and dials each tool pod directly at
-            # its per-pod record under the headless Service below. It serves no
-            # pod-facing surface, so a popped tool pod can open no socket back.
+            # The harness creates tool jobs via the kube API and dials each tool
+            # pod at its per-pod record under the headless Service below. It
+            # serves no pod-facing surface, so a popped tool pod can open no
+            # socket back. The toolset map is watched in this namespace.
             - { name: TOOLSET_NAMESPACE,        value: {{ $.Release.Namespace | quote }} }
-            - { name: TOOLSET_CONFIG_FILE,      value: "/etc/sycophant/toolset-config/toolsets.yaml" }
             # The harness owns model selection: it resolves the agent
             # definition's model to a config in this catalog and dials the model
             # itself. The catalog rides the toolset-config ConfigMap already
@@ -215,7 +220,7 @@ spec:
             - { name: CAPABILITY_SERVICE_NAME,  value: "capability-{{ $name }}" }
           ports:
             - { name: healthz, containerPort: 8080 }
-            # Relay-facing forward surface (HarnessControl): relay-ctrl only.
+            # Relay-facing forward surface (HarnessControl): relay-controller only.
             - { name: relay-fwd, containerPort: 9091 }
           readinessProbe:
             httpGet: { path: /healthz, port: healthz }

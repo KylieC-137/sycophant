@@ -1,12 +1,15 @@
-//! Toolset config and tool-call validation: the types behind the
-//! chart-rendered `toolset-config` ConfigMap the harness reads at boot.
-//! `CapabilityGrant` pairs one Secret with one egress destination,
-//! `ToolsetConfig`/`ToolsetEntry` carry each toolset's runtime shape, and
-//! `validate_call_input` checks an LLM's arguments against a tool's `ArgDecl`s.
+//! Toolset config and tool-call validation. `CapabilityGrant` pairs one Secret
+//! with one egress destination, `ToolsetConfig`/`ToolsetEntry` carry each
+//! toolset's runtime shape (merged live from the per-toolset `toolset-<name>`
+//! ConfigMaps the harness watches), and `validate_call_input` checks an LLM's
+//! arguments against a tool's `ArgDecl`s.
 
 use std::collections::{HashMap, HashSet};
 
+use k8s_openapi::api::core::v1::ConfigMap;
 use serde::{Deserialize, Serialize};
+
+use crate::configmap_watcher::merge_configmaps;
 
 /// Conventional mount path for the workspace PVC inside every tool Job.
 /// Not configurable: tool images target `/workspace`.
@@ -72,21 +75,27 @@ impl TryFrom<RawGrant> for CapabilityGrant {
     }
 }
 
-/// The operator-authored toolset config, read once at startup from a
-/// chart-rendered ConfigMap. There is no watch: a config change rolls the
-/// reader's pod.
+/// The `data` key each per-toolset ConfigMap carries its one-entry
+/// `{name: entry}` map under.
+pub const TOOLSET_DATA_KEY: &str = "toolset.yaml";
+
+/// The operator-authored toolset config, merged from the per-toolset
+/// `toolset-<name>` ConfigMaps labelled `sycophant.md/type: toolset`.
 #[derive(Clone, Default)]
 pub struct ToolsetConfig {
     map: HashMap<String, ToolsetEntry>,
 }
 
 impl ToolsetConfig {
-    pub fn load(path: &str) -> Result<Self, String> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read toolset config file {path}: {e}"))?;
-        let map: HashMap<String, ToolsetEntry> = serde_yaml::from_str(&content)
-            .map_err(|e| format!("failed to parse toolset config YAML: {e}"))?;
-        Ok(Self { map })
+    /// Merge every per-toolset ConfigMap into one table.
+    pub fn merge_configmaps<'a, I>(cms: I) -> (Self, Vec<String>)
+    where
+        I: IntoIterator<Item = &'a ConfigMap>,
+    {
+        let (map, errors) = merge_configmaps(cms, TOOLSET_DATA_KEY, |raw| {
+            serde_yaml::from_str(raw).map_err(|e| e.to_string())
+        });
+        (Self { map }, errors)
     }
 
     pub fn empty() -> Self {

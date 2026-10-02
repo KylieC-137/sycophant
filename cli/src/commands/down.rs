@@ -1,10 +1,12 @@
-use crate::runner::{run_passthrough, run_silent};
+use crate::commands::common::wait_for;
+use crate::commands::marker;
+use crate::commands::operator::Operator;
+use crate::runner::{run_output, run_silent};
 use crate::scope::Scope;
 
-/// `syco tenant down --ns <t>` — scale the tenant to zero. Stops all compute
-/// (the singleton controllers + the workspace) but leaves the release, PVCs,
-/// secrets, and CRs in place. Reverse with `syco tenant up`. Data is never
-/// touched here; use `syco tenant remove --ns <t>` to remove data.
+/// `syco tenant down --ns <t>` — write the suspend marker. The cluster scales
+/// every tenant Deployment to zero and keeps the release, PVCs, and secrets.
+/// Use `syco tenant remove --ns <t>` to remove data.
 pub(crate) fn run(scope: &Scope) -> Result<(), String> {
     let ns = scope.release_name()?;
 
@@ -13,9 +15,20 @@ pub(crate) fn run(scope: &Scope) -> Result<(), String> {
         return Ok(());
     }
 
-    eprintln!("Scaling tenant '{ns}' to zero...");
-    run_passthrough(
-        "kubectl",
-        &["scale", "deployment", "--all", "-n", &ns, "--replicas=0"],
-    )
+    eprintln!("Suspending tenant '{ns}'...");
+    marker::suspend(&Operator::login(&scope.oidc_dir())?, &ns, None)?;
+    wait_for("tenant Deployments scaled to zero", 120, || {
+        run_output(
+            "kubectl",
+            &[
+                "get",
+                "deploy",
+                "-n",
+                &ns,
+                "-o",
+                "jsonpath={range .items[*]}{.spec.replicas}{\" \"}{end}",
+            ],
+        )
+        .is_ok_and(|r| r.split_whitespace().all(|n| n == "0"))
+    })
 }

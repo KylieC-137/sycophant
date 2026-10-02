@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod client_signature;
+pub mod configmap_watcher;
 pub mod grpc_client;
 pub mod keepalive;
 pub mod podspec;

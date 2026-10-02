@@ -9,6 +9,10 @@ pub(crate) static CLUSTER_CHART: Dir<'static> =
 pub(crate) static TENANT_CHART: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-tenant");
 
+/// Bundled Dex issuer, installed by `syco setup`. Carries the vendored upstream
+/// subchart when it is present at build time.
+pub(crate) static DEX_CHART: Dir<'static> =
+    include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-dex");
 /// gVisor RuntimeClass chart, installed by `syco setup` once the node runtime
 /// is in place.
 pub(crate) static GVISOR_CHART: Dir<'static> =

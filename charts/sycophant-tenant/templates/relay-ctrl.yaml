@@ -1,12 +1,13 @@
+{{- if eq .Values.render "base" }}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: relay-ctrl
+  name: relay-controller
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
-    app.kubernetes.io/component: relay-ctrl
-    app.kubernetes.io/name: relay-ctrl
+    app.kubernetes.io/component: relay-controller
+    app.kubernetes.io/name: relay-controller
 spec:
   replicas: 1
   # Recreate (not RollingUpdate): the gateway holds the live channel and
@@ -16,20 +17,16 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/name: relay-ctrl
+      app.kubernetes.io/name: relay-controller
       app.kubernetes.io/part-of: sycophant
   template:
     metadata:
-      annotations:
-        # Roll the pod when the grants change so the toolset grants the
-        # gateway serves never go stale.
-        checksum/relay-toolset-grants: {{ include (print $.Template.BasePath "/relay-toolset-grants-cm.yaml") . | sha256sum }}
       labels:
         {{- include "sycophant.labels" . | nindent 8 }}
-        app.kubernetes.io/component: relay-ctrl
-        app.kubernetes.io/name: relay-ctrl
+        app.kubernetes.io/component: relay-controller
+        app.kubernetes.io/name: relay-controller
     spec:
-      serviceAccountName: relay-ctrl
+      serviceAccountName: relay-controller
       automountServiceAccountToken: false
       tolerations:
         - key: sycophant.md/workload
@@ -63,15 +60,10 @@ spec:
             # and registered-keys Secret from.
             - name: RELAY_NAMESPACE
               value: "{{ .Release.Namespace }}"
-            # Grant names per workspace, for ListGrants. Deliberately not the
-            # full capability manifest: the gateway is the internet-facing
-            # pod and has no use for a grant's Secret, path, or egress domain.
-            - name: RELAY_TOOLSET_GRANTS_FILE
-              value: "/etc/sycophant/relay-toolset-grants/grants.yaml"
           ports:
             # Internal listener (9090): K8s ServiceAccount tokens via
             # TokenReview. Reachable from in-cluster pods only via the
-            # NetworkPolicy below (harness Subscribe; later DeliverOutbound).
+            # CiliumNetworkPolicy below (harness Subscribe; later DeliverOutbound).
             - name: grpc-internal
               containerPort: 9090
             # App listener (9091): client-signed envelope verified by the
@@ -108,11 +100,6 @@ spec:
             - name: relay-harness-auth
               mountPath: /var/run/secrets/relay/harness
               readOnly: true
-            # The per-workspace toolset grants (ListGrants). Names only — no
-            # Secret name, mount path, or egress domain is rendered into it.
-            - name: relay-toolset-grants
-              mountPath: /etc/sycophant/relay-toolset-grants
-              readOnly: true
             {{- include "sycophant.projectedKubeApiToken.mount" . | nindent 12 }}
       volumes:
         - name: relay-harness-auth
@@ -122,18 +109,15 @@ spec:
                   path: token
                   audience: relay.harness.sycophant.md
                   expirationSeconds: 3600
-        - name: relay-toolset-grants
-          configMap:
-            name: relay-toolset-grants
         {{- include "sycophant.projectedKubeApiToken.volume" . | nindent 8 }}
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: relay-ctrl
+  name: relay-controller
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
-    app.kubernetes.io/component: relay-ctrl
+    app.kubernetes.io/component: relay-controller
 spec:
   type: ClusterIP
   ports:
@@ -151,5 +135,6 @@ spec:
       port: 9092
       targetPort: grpc-adapter
   selector:
-    app.kubernetes.io/name: relay-ctrl
+    app.kubernetes.io/name: relay-controller
     app.kubernetes.io/part-of: sycophant
+{{- end }}

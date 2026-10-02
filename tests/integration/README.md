@@ -1,8 +1,8 @@
 # integration tests
 
 Live-cluster admission and RBAC tests using chainsaw. Each directory is a
-named security property. Tests inside route through real sycophant code via
-the tenant-deployer SA — no fixture short-circuits.
+named security property. Tests inside route through real sycophant code. The
+tenant namespace comes from the tenant-namespace fixture with real perimeter labels.
 
 ## Buckets
 
@@ -10,10 +10,10 @@ the tenant-deployer SA — no fixture short-circuits.
 |---------------------------------|----------------------------------------------------------------------|
 | privileged-workload-rejection/  | PSA rejects privileged pods in sycophant namespaces (orthogonality)  |
 | harness-pod-shape/            | Harness VAP enforces every required field on harness pods    |
-| tenant-namespace-creation/      | Only deployer can create tenant ns; perimeter label required         |
+| tenant-namespace-creation/      | Perimeter label triggers per-tenant wiring; any name, any creator    |
 | tenant-resource-protection/     | Same-ns SAs cannot tamper with their own NetworkPolicy/RBAC/etc.     |
 | job-egress-baselines/           | toolset (capability-job) egress shape: chart fail-closed floor is L7, not L4-only |
-| sa-permission-bounds/           | tenant-deployer + controller SAs hold only the verbs/names claimed   |
+| sa-permission-bounds/           | provisioner + controller SAs hold only the verbs/names claimed       |
 | sa-token-audience/              | Apiserver enforces SA-token audience: one token, one controller      |
 | cluster-resources/              | Chart-shipped cluster-scoped resources (RuntimeClass, etc.) shape    |
 | gvisor-scope/                   | gVisor runtime scope pinned to toolsets only (capability-job); other components on runc |
@@ -68,7 +68,7 @@ chainsaw test tests/integration/harness-pod-shape/projected-sa-token-rejected --
 
 ## Authoring conventions
 
-- Tenant namespaces are created by the test harness's own kubeconfig (`kubectl create namespace X`, or the shared `step-templates/tenant.yaml`), then the test applies the perimeter labels itself (`app.kubernetes.io/part-of=sycophant-tenant` + the four `pod-security.kubernetes.io/*` labels) — there is no auto-labelling mutate; labeling is the namespace creator's job (chart `tenant-ns.yaml` in prod). The deployer holds no `namespaces:create`; at runtime Kyverno materializes the namespace from the provision marker. The label is what triggers the generate rule that produces the per-tenant VAPBinding + tokenreview CRBs; wait for that wiring before the test workload submits.
+- Tenant namespaces are created by the test harness's own kubeconfig (`kubectl create namespace X`, or the shared `step-templates/tenant.yaml`), then the test applies the perimeter labels itself (`app.kubernetes.io/part-of=sycophant-tenant` + the four `pod-security.kubernetes.io/*` labels) — there is no auto-labelling mutate; labeling is the namespace creator's job (chart `tenant-ns.yaml` in prod). At runtime Kyverno materializes the namespace from the provision marker, and no ServiceAccount holds `namespaces:create` — the Kyverno background controller does. The label is what triggers the generate rule that produces the per-tenant VAPBinding + tokenreview CRBs; wait for that wiring before the test workload submits.
 - Pod fixtures live in `fixtures/` and use `($target_namespace)` for templated namespace. Inline pod manifests in the test file are fine for one-offs.
 - Tenant-namespace setup and teardown go through the shared `step-templates/tenant.yaml` StepTemplate: a `create-tenant-ns` step calls it with `use.template` and passes the name via `with.bindings` (`tenant_ns: ($tenant_ns)`). The template applies `fixtures/tenant-namespace.yaml` and deletes the namespace in `spec.cleanup`, which runs after the whole test. Do not add a namespace-delete `finally:` alongside it. Use the plain `finally:` form only for tests whose setup does more than the bare namespace (extra NetworkPolicy or egress floor) — those stay hand-rolled.
 - Gotcha: a StepTemplate must NOT declare a `spec.bindings` default for a binding it expects from the call site. A `spec.bindings` default SHADOWS the `with.bindings` value the caller passes, so the namespace would be created and deleted under the default name, not the test's. `tenant.yaml` declares no default for `tenant_ns` on purpose.

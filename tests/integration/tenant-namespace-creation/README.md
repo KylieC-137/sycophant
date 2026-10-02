@@ -7,9 +7,9 @@ cluster-scoped wiring the creating credential is not permitted to make itself.
 
 | Test                               | Loads on                                                                                                  |
 |------------------------------------|-----------------------------------------------------------------------------------------------------------|
-| tenant-tokenreview-crbs-generated/ | Label-matched generate in `tenant-rolebinding-generator` (relay tokenreview ClusterRoleBinding + pod VAP binding + tenant-deployer RoleBinding) |
+| tenant-tokenreview-crbs-generated/ | Label-matched generate in `tenant-rolebinding-generator` (relay tokenreview ClusterRoleBinding + pod VAP binding) |
 | tenant-ns-labels-rendered/         | Chart `templates/tenant-ns.yaml` renders the namespace + perimeter/PSA labels (gated on `namespace.create`) |
-| tenant-ns-requires-psa/            | `cluster-tenant-ns-psa-required` VAP rejects a tenant-labeled namespace missing `enforce=restricted`         |
+| tenant-ns-requires-psa/            | `cluster-tenant-namespace-psa-required` VAP rejects a tenant-labeled namespace missing `enforce=restricted`         |
 
 Belongs here: anything about per-tenant wiring keyed on the perimeter label.
 Doesn't belong here: writes INTO an already-created tenant ns

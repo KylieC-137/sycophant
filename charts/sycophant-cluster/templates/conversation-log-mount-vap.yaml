@@ -5,7 +5,7 @@
 # it cannot create a pod at all, let alone mount the log volume. This VAP is
 # defense-in-depth against a chart/author mistake that misroutes the log PVC into
 # a non-harness pod: that pod won't carry the harness component label, so
-# it is denied. It is NOT a control against a compromised deployer or
+# it is denied. It is NOT a control against a compromised provision installer or
 # cluster-admin, who could stamp the label (or delete this policy) outright —
 # that is out of the workspace-adversarial model and defended by kubeconfig
 # custody, not admission.

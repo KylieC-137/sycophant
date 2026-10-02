@@ -1,37 +1,48 @@
 {{- if include "sycophant.renderKyverno" . }}
-# Delete reactor. Reap is an independent condition from suspend: when a tenant
-# Namespace carries a reap-after annotation whose time has passed, the cleanup
-# controller deletes the Namespace. Deletion cascades to the tenant PVCs and
-# their disks; the disks are purged with the namespace.
-#
-# Cluster-scoped, because a Namespace is. The policy runs on its schedule
-# against resources already present, so it has no match condition on a
-# requesting identity and needs none: only the suspend reactor writes the
-# annotation it keys on.
+# Delete reactor. Each object dies on its own reap-after annotation. Cluster-scoped
+# because it reaps kinds of mixed scope: the tenant Namespace (deleting it cascades
+# to the tenant PVCs and their disks) and the tenant installer's ServiceAccount and
+# RoleBinding (removing the scoped apply-capable identity behind the installer Job). A
+# per-object condition branches on kind to select those, never a sibling installer's.
 apiVersion: policies.kyverno.io/v1
 kind: DeletingPolicy
 metadata:
-  name: tenant-reap
+  name: reap-tenant
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
 spec:
-  schedule: "*/10 * * * *"
+  schedule: {{ .Values.reap.schedule | quote }}
   matchConstraints:
-    objectSelector:
-      matchLabels:
-        app.kubernetes.io/part-of: sycophant-tenant
     resourceRules:
       - apiGroups: [""]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["namespaces"]
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["serviceaccounts"]
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["rolebindings"]
   variables:
-    # The reap-after annotation the suspend reactor stamps (now plus
-    # keepalive). Only a namespace that has been suspended carries it.
+    # The reap-after annotation the suspend reactor stamps on the namespace (now
+    # plus keepalive) and the provision generator stamps on the installer's
+    # ServiceAccount and RoleBinding. Only an object carrying it is a candidate.
     - name: reapAfter
       expression: >-
         object.metadata.?annotations["{{ include "sycophant.reapAfterAnnotation" . }}"].orValue("")
   conditions:
+    # One objectSelector cannot select the namespace by part-of and the SA/RB by
+    # component at once, so the label gate branches on kind here. A Namespace is
+    # reaped only when it is the tenant namespace; a ServiceAccount or RoleBinding
+    # only when it belongs to the tenant installer.
+    - name: selector-matches-by-kind
+      expression: >-
+        object.kind == "Namespace"
+          ? object.metadata.?labels["app.kubernetes.io/part-of"].orValue("") == "sycophant-tenant"
+          : object.metadata.?labels["app.kubernetes.io/component"].orValue("") == "provision-tenant"
     - name: reap-after-ttl-has-passed
       expression: >-
         variables.reapAfter != "" && timestamp(variables.reapAfter) < time.now()

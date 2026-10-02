@@ -10,7 +10,7 @@ metadata:
   name: cluster-relay-tokenreview
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
-    app.kubernetes.io/component: relay-ctrl
+    app.kubernetes.io/component: relay-controller
 rules:
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]

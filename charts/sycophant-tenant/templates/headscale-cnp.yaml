@@ -1,3 +1,4 @@
+{{- if eq .Values.render "base" }}
 {{- if .Values.headscale.enabled }}
 {{- $acmeEnabled := and .Values.headscale.acme .Values.headscale.acme.enabled }}
 ---
@@ -17,16 +18,7 @@ spec:
   egress:
     # kube-dns:53 with an L7 allowlist pinned to the control endpoints, so only
     # these names resolve. L7 (never L4-only) closes the DNS-tunnel hole.
-    - toEndpoints:
-        - matchLabels:
-            io.kubernetes.pod.namespace: kube-system
-            k8s-app: kube-dns
-      toPorts:
-        - ports:
-            - port: "53"
-              protocol: UDP
-            - port: "53"
-              protocol: TCP
+    {{- include "sycophant.dnsEgress" . | nindent 4 }}
           rules:
             dns:
               - matchName: controlplane.tailscale.com
@@ -42,4 +34,5 @@ spec:
         - ports:
             - port: "443"
               protocol: TCP
+{{- end }}
 {{- end }}

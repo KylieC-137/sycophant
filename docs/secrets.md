@@ -129,46 +129,7 @@ Same chart values reference as Recipe 1.
 
 Reference: <https://external-secrets.io/latest/api/externalsecret/>
 
-## Recipe 3: Bitnami sealed-secrets
-
-Right for GitOps workflows where encrypted secret manifests live in a public git repo, or for browser-direct customer-paste flows (a controller-encrypted manifest is committed; the cluster decrypts on apply).
-
-Install the controller:
-
-```sh
-helm install sealed-secrets sealed-secrets/sealed-secrets -n sycophant-system --create-namespace
-```
-
-Encrypt a value with `kubeseal` against the controller's public cert:
-
-```sh
-echo -n "$OPENROUTER_API_KEY" | kubeseal \
-  --controller-namespace=infra \
-  --raw \
-  --namespace=tenant-foo \
-  --name=sycophant-llm-openrouter
-```
-
-Wrap the resulting ciphertext in a SealedSecret manifest (or use `kubeseal -f secret.yaml -o yaml` to produce one from a regular Secret manifest):
-
-```yaml
-apiVersion: bitnami.com/v1alpha1
-kind: SealedSecret
-metadata:
-  name: sycophant-llm-openrouter
-  namespace: tenant-foo
-spec:
-  encryptedData:
-    sycophant-llm-openrouter: <ciphertext-from-kubeseal-output>
-```
-
-Apply the SealedSecret. The controller decrypts and creates the matching K8s Secret. Same chart values reference as Recipe 1.
-
-**Scope note**: kubeseal's default `strict` scope binds the encrypted value to `namespace/name`. A SealedSecret encrypted for `tenant-foo/sycophant-llm-openrouter` cannot be unsealed in any other namespace or under any other name. Keep `strict` for tenant isolation; don't relax to `namespace-wide` or `cluster-wide` without a specific reason.
-
-Reference: <https://github.com/bitnami-labs/sealed-secrets>
-
-## Recipe 4: Vault Agent Injector (HashiCorp Vault or OpenBao)
+## Recipe 3: Vault Agent Injector (HashiCorp Vault or OpenBao)
 
 Right for operators with an existing Vault deployment who want runtime sidecar-based secret delivery (secrets stay in pod memory, never materialize as K8s Secret objects).
 
@@ -202,10 +163,10 @@ References:
 
 ## What the chart does not do
 
-- The chart does not install ESO, sealed-secrets, Vault, Vault Agent Injector, OpenBao, or any other secrets backend.
+- The chart does not install ESO, Vault, Vault Agent Injector, OpenBao, or any other secrets backend.
 - The chart does not assume which backend produced the K8s Secret it consumes.
-- The chart does not advise. Picking a backend is the deployer's decision based on their existing infrastructure, compliance posture, and operational preference.
+- The chart does not advise. Picking a backend is the operator's decision based on their existing infrastructure, compliance posture, and operational preference.
 
 ## Migrating between backends
 
-Because the chart consumes only the resulting K8s Secret, migrating from one backend to another (e.g., `kubectl` → sealed-secrets, or sealed-secrets → ESO+Vault) is a deployer-side operation. The profile's or the grant's `secret` reference doesn't change. The chart doesn't need a release event. Migrate one tenant at a time if you want; the chart doesn't know the difference.
+Because the chart consumes only the resulting K8s Secret, migrating from one backend to another (e.g., `kubectl` to ESO+Vault) is an operator-side operation. The profile's or the grant's `secret` reference doesn't change. The chart doesn't need a release event. Migrate one tenant at a time if you want; the chart doesn't know the difference.

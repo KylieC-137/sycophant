@@ -1,5 +1,5 @@
-# The e2e pre-creates + labels $NAMESPACE itself (step_2/step_3), so the chart
-# installs into the existing ns rather than creating it (the SaaS deployer path).
+# The provision reactor generates the tenant namespace, so the chart installs
+# into it rather than creating it. The installers force this off as well.
 namespace:
   create: false
 

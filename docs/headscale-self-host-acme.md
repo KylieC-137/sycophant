@@ -2,7 +2,7 @@
 
 For self-host operators who want a phone (or any external Tailscale client) to connect to a sycophant deployment running on their own machine. Headscale gets a real Let's Encrypt cert via the bundled chart's ACME support; clients reach it over the public internet via a domain the operator controls.
 
-This is the operator-side dance Phase 2 was designed to support. It's also the most operationally heavy of the deployment shapes. **For DevOps deployments** (cluster on cloud K8s with proper ingress + cert-manager), most of this isn't needed — you just point an Ingress with a managed cert at the headscale Service and you're done. **For SaaS deployments**, the tsnet bridge + headscale stack is bypassed entirely (customers get a subdomain on `*.sycophant.md` with a wildcard cert).
+This is the most operationally heavy of the deployment shapes. **For DevOps deployments** (cluster on cloud K8s with proper ingress + cert-manager), most of this isn't needed — you point an Ingress with a managed cert at the headscale Service and you're done.
 
 ## Prerequisites
 
@@ -11,7 +11,7 @@ This is the operator-side dance Phase 2 was designed to support. It's also the m
 - Home router admin access for port-forwarding
 - Residential ISP that doesn't block inbound :80 / :443 (Orange France works; some US ISPs block these on residential)
 - macOS with `kubectl`, `helm`, `k3d`, `flutter` (for Flutter testing) — see [`e2e-test.md`](e2e-test.md) for the full e2e-side prereqs
-- Sycophant cluster + chart deployed per the e2e bootstrap (Steps 0-3 of `e2e-test.md`)
+- Sycophant cluster and a tenant deployed with `syco setup` and `syco tenant up` (see `e2e-test.md`)
 
 ## DNS setup
 
@@ -42,25 +42,34 @@ Find your Mac's LAN IP with `ipconfig getifaddr en0` (or `en1` for secondary int
 
 ISP sanity check: from a phone on cellular data (NOT your home WiFi), browse to `http://hs.<domain>`. You should get *something* — even a "connection refused" / "no service listening" response from your Mac means the router forward is reaching it. Total timeout means the router isn't forwarding or the ISP is blocking.
 
-## Helm upgrade with ACME enabled
+## Deploy with ACME enabled
+
+Add headscale and the app channel to the tenant values file at `$SYCO_CONFIG_DIR/tenants/tenant-<name>/values.yaml` (default `~/.config/sycophant/tenants/tenant-<name>/values.yaml`):
+
+```yaml
+headscale:
+  enabled: true
+  serverUrl: https://hs.<domain>
+  acme:
+    enabled: true
+    email: you@<domain>
+channels:
+  app:
+    kind: app
+    loginServer: https://hs.<domain>
+```
+
+Then provision the tenant, or re-run the same command on an existing tenant to apply the change:
 
 ```sh
-helm upgrade --install <release> charts/sycophant-tenant/ \
-  -n <namespace> \
-  -f <your values files> \
-  --set headscale.enabled=true \
-  --set headscale.serverUrl=https://hs.<domain> \
-  --set headscale.acme.enabled=true \
-  --set headscale.acme.email=you@<domain> \
-  --set tsnetBridge.enabled=true \
-  --set tsnetBridge.loginServer=https://hs.<domain>
+syco tenant up --ns tenant-<name> --capacity <quantity>
 ```
 
 The chart will:
 - Configure headscale's `tls_letsencrypt_*` keys
 - Switch the headscale Service to expose ports `:443` (HTTPS API) and `:80` (HTTP-01 challenge), in addition to `:9090` (metrics)
 - Add `CAP_NET_BIND_SERVICE` to the headscale container so non-root can bind privileged ports
-- Re-roll headscale and the tsnet bridge to use the new URL
+- Re-roll headscale, and the app adapter when `channels.app.loginServer` changes, to use the new URL
 
 ## Bridge to your Mac (sudo port-forward)
 
@@ -68,7 +77,7 @@ The cluster's headscale Service is `ClusterIP`, only reachable from inside the c
 
 ```sh
 sudo kubectl port-forward --address 0.0.0.0 \
-  -n <namespace> svc/headscale 80:80 443:443
+  -n tenant-<name> svc/headscale 80:80 443:443
 ```
 
 `sudo` is required because :80 and :443 are privileged ports. `--address 0.0.0.0` is required so the router-incoming traffic on your en0 interface reaches it (default `127.0.0.1` only listens on loopback).
@@ -86,7 +95,7 @@ The first request triggers headscale's autocert flow: it talks to Let's Encrypt,
 Confirm in headscale logs:
 
 ```sh
-kubectl logs -n <namespace> deploy/headscale | grep -E '(obtained|certificate)'
+kubectl logs -n tenant-<name> deploy/headscale | grep -E '(obtained|certificate)'
 ```
 
 ## Sign a Tailscale client into your headscale
@@ -94,10 +103,10 @@ kubectl logs -n <namespace> deploy/headscale | grep -E '(obtained|certificate)'
 Mint a pre-auth key for the client (any external device — your Mac, a phone running the official Tailscale Android app, etc.):
 
 ```sh
-kubectl exec -n <namespace> deploy/headscale -- headscale users create caleb
-USER_ID=$(kubectl exec -n <namespace> deploy/headscale -- \
+kubectl exec -n tenant-<name> deploy/headscale -- headscale users create caleb
+USER_ID=$(kubectl exec -n tenant-<name> deploy/headscale -- \
   headscale users list -o json | jq '.[] | select(.name=="caleb") | .id')
-kubectl exec -n <namespace> deploy/headscale -- \
+kubectl exec -n tenant-<name> deploy/headscale -- \
   headscale preauthkeys create -u "$USER_ID" -e 24h | tail -1
 ```
 
@@ -122,7 +131,7 @@ For a phone: install the official Tailscale Android app, **Settings** → kebab 
 The Flutter app (sycophant's e2e-testing client) inherits the host's network when run on the emulator, so once the Mac is on your headscale tailnet, `relay.ts.local:9090` (the app adapter's MagicDNS hostname) resolves and routes through the tailnet. Authorize the device by writing its grant row, inventing the code yourself:
 
 ```sh
-kubectl patch configmap relay-access-grants -n <namespace> --type=merge -p '{"data":{
+kubectl patch configmap relay-access-grants -n tenant-<name> --type=merge -p '{"data":{
   "<row-key>": "channel: app\nidentity: <an unguessable string>\nworkspace: <ws>\n"
 }}'
 ```
@@ -131,11 +140,11 @@ Paste that string into the Flutter app's sign-in screen (along with the workspac
 
 ## Gotchas
 
-- **Port-forward dies on every helm rollout.** Whenever `helm upgrade` rolls the headscale pod (config changes, cert refresh, etc.), the existing port-forward terminates with a stale-pod error. Restart the `sudo kubectl port-forward` command after any helm operation that touches headscale.
-- **The tailnet node takes ~10s to register after pod roll.** After helm upgrade, the `adapter-app` pod restarts and its `tailscale` container re-registers with headscale. `headscale nodes list` will show no node for ~10 seconds; logs will show the registration handshake. Wait it out.
+- **Port-forward dies on every headscale rollout.** Whenever the headscale pod rolls (a `syco tenant up` that changes its config, cert refresh, etc.), the existing port-forward terminates with a stale-pod error. Restart the `sudo kubectl port-forward` command after any change that touches headscale.
+- **The tailnet node takes ~10s to register after pod roll.** After a `syco tenant up` that changes the app channel, the `adapter-app` pod restarts and its `tailscale` container re-registers with headscale. `headscale nodes list` will show no node for ~10 seconds; logs will show the registration handshake. Wait it out.
 - **Tailscale Mac CLI logout drops your existing tailnet.** `sudo tailscale logout` followed by `sudo tailscale up --login-server=...` switches your Mac off whatever Tailscale account it was on. If you have a personal hosted Tailscale tailnet you use for other things, log back into it when done testing here. The Tailscale Mac GUI may support multiple accounts simultaneously; the CLI's account model is single-tenant.
 - **Cloudflare DNS proxy must stay off.** If you (or someone else managing the zone) flips on the orange-cloud Proxied mode after initial setup, the next ACME renewal will fail. The cert will expire after 90 days. Periodic verification: `curl -v https://hs.<domain>/health` should report a Let's Encrypt-issued cert, not a Cloudflare-managed one.
-- **First ACME issuance can take a minute.** If you `curl https://hs.<domain>/health` immediately after the helm upgrade, you may get a TLS handshake failure for ~30s while autocert negotiates the challenge. Wait and retry.
+- **First ACME issuance can take a minute.** If you `curl https://hs.<domain>/health` immediately after `syco tenant up`, you may get a TLS handshake failure for ~30s while autocert negotiates the challenge. Wait and retry.
 - **headscale 0.28+ needs numeric user ID for preauthkeys.** Don't pass a username to `headscale preauthkeys create -u …`. Look up the ID from `headscale users list -o json` first.
 
 ## What doesn't work (and why)

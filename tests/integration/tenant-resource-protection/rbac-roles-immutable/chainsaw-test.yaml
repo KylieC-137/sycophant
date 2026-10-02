@@ -6,7 +6,7 @@ spec:
   description: |
     cluster-protect-security/protect-rbac: a SA in a tenant ns
     cannot CRUD Roles/RoleBindings in that ns. External callers
-    (deployer, cluster-admin) manage RBAC during install — same-ns
+    (the provision installer, cluster-admin) manage RBAC during install — same-ns
     code cannot self-elevate.
 
     To exercise the KYVERNO rule (not K8s built-in RBAC escalation

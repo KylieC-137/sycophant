@@ -23,8 +23,10 @@ pub(crate) enum Command {
 // --- setup / destroy (cluster — no --ns) ---
 
 /// Stand up a sycophant-ready cluster from nothing: ensure the k3d cluster
-/// `sycophant`, install the gVisor node runtime, Cilium, Kyverno, and the
-/// sycophant cluster layer; scaffold the global config. Idempotent.
+/// `sycophant` with the apiserver trusting the bundled Dex, install the gVisor
+/// node runtime, Cilium, Kyverno, the sycophant cluster layer, and Dex with the
+/// operator as its one password user (prompted on first run); scaffold the
+/// global config. Idempotent.
 #[derive(Args)]
 pub(crate) struct SetupCmd {}
 
@@ -33,10 +35,13 @@ pub(crate) struct SetupCmd {}
 #[derive(Args)]
 pub(crate) struct DestroyCmd {}
 
-// --- upgrade (validate cluster + all tenants, then upgrade everything) ---
+// --- upgrade (validate the cluster, upgrade it, re-provision every tenant) ---
 
-/// Validate the cluster and every tenant, then upgrade the whole platform in
-/// one shot (cluster first). `--check` runs validation only, making no changes.
+/// Validate the cluster, upgrade the cluster chart, then re-provision every
+/// tenant through its lifecycle markers. Prompts for the operator password. Any
+/// failed cluster or tenant check exits non-zero with nothing applied, and the
+/// first failure while applying stops the run. `--check` runs validation only,
+/// making no changes.
 #[derive(Args)]
 pub(crate) struct UpgradeCmd {
     /// run validation only; make no changes
@@ -67,15 +72,26 @@ pub(crate) enum TenantSub {
     Audit(AuditCmd),
 }
 
-/// Deploy or update the tenant (data-safe)
+/// Provision or re-provision a tenant through lifecycle markers. `--ns` must be
+/// `tenant-<name>`. Prompts for the operator password. Writes the tenant marker
+/// with the base settings, then one marker per workspace, user, and toolset in
+/// the tenant values file; each installer upgrades its release in place. A
+/// tenant installed as one helm release is migrated onto the markers. The
+/// capacity quota is set on first provision and not resized after
 #[derive(Args)]
-pub(crate) struct TenantUp {}
+pub(crate) struct TenantUp {
+    /// tenant memory quota (a Kubernetes quantity, e.g. 2Gi)
+    #[arg(long)]
+    pub capacity: String,
+}
 
-/// Scale the tenant to zero — stops compute, keeps all data
+/// Suspend the tenant: scales it to zero, keeps all data. Prompts for the
+/// operator password
 #[derive(Args)]
 pub(crate) struct TenantDown {}
 
-/// Delete the tenant completely, including its PVCs/data (irreversible)
+/// Delete the tenant completely, including its PVCs/data (irreversible). The
+/// cluster reaps it on its next sweep. Prompts for the operator password
 #[derive(Args)]
 pub(crate) struct TenantRemove {}
 

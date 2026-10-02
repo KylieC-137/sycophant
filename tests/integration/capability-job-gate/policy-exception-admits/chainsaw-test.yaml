@@ -3,30 +3,7 @@ kind: Test
 metadata:
   name: policy-exception-admits
 spec:
-  description: |
-    The operator-owned exemption path: a Job the gate would otherwise deny admits
-    only when a matching Kyverno PolicyException lives in the operator-owned
-    sycophant-system namespace. The gate is a Kyverno validate, so PolicyException
-    is its exemption mechanism (not a native admission-policy binding). Kyverno is
-    configured to honor exceptions ONLY in sycophant-system, so a tenant cannot
-    author a self-exemption in its own namespace.
-
-    The vehicle for "otherwise denied" is a wrong pinned ServiceAccount. First the
-    control: the same Job with no exception is denied by the gate; this reds now
-    where the gate does not yet exist (the Job admits). Then the tenant-residence
-    probe: an equivalent PolicyException placed in the tenant namespace, given time
-    to load, still does NOT admit the Job -- residence, not just match, is
-    load-bearing. Finally the operator grant: the same exception placed in
-    sycophant-system, still selecting the tenant Job, admits it.
-
-    Live-cluster test: the gate keys on the creating identity, PolicyException
-    handling is an admission-time behavior, and the honored-namespace scoping is a
-    Kyverno controller flag (--enablePolicyException + --exceptionNamespace).
-
-    Mutation guards: honoring exceptions cluster-wide (dropping the namespace scope)
-    admits the Job in the tenant-residence step and fails its deny check; an
-    exclusion that ignores PolicyException (baking the carve-out into the policy)
-    fails the operator admit step; a missing gate fails the control deny step.
+  description: A gated Job admits only under a PolicyException in sycophant-system, never under one in the tenant namespace.
   bindings:
     - name: tenant_ns
       value: (join('-', ['tenant', random('[a-z0-9]{8}')]))

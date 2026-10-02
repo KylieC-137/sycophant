@@ -3,16 +3,7 @@ kind: Test
 metadata:
   name: psa-rejects-privileged-tenant-ns-no-workspace-label
 spec:
-  description: |
-    Load-bearing orthogonality test. The tenant namespace is created via
-    the tenant-deployer SA (the real production path); the test applies the
-    perimeter labels (part-of + PSA) and the label-triggered generate rule
-    produces the per-tenant VAPBinding. THEN a privileged pod with NO workspace label
-    is submitted: PSA must reject; the workspace VAP must not fire.
-
-    The test applies the perimeter labels itself (there is no auto-labelling
-    mutate). Delete the VAPBinding generate rule and the assertion on its
-    existence fails; delete PSA enforcement and the privileged pod admits.
+  description: PSA rejects a privileged non-workspace pod in a tenant namespace and the workspace VAP does not fire.
   bindings:
     - name: tenant_ns
       value: (join('-', ['tenant', random('[a-z0-9]{8}')]))

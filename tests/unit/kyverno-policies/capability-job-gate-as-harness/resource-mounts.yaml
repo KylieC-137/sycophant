@@ -1,15 +1,3 @@
-# Synthetic admission inputs for the mount-name rules. Every Job is created in
-# tenant-offline by harness-research (see user-harness-research.yaml), so the
-# only variable across them is which volume or env reference they carry.
-#
-# Each Job carries the full isolation envelope inline. A CEL policy reports one
-# result per policy rather than one per rule, so a Job missing the envelope
-# would be denied for that reason and the mount-name check under test would
-# never be reached. Carrying the envelope keeps each case failing for exactly
-# the reason it is named for, and makes the passing case prove compliance with
-# every check at once rather than with one rule in isolation.
----
-# The one mount a tool job legitimately makes: its own workspace's data PVC.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -23,8 +11,6 @@ spec:
     spec:
       restartPolicy: Never
       serviceAccountName: unprivileged-research
-      runtimeClassName: gvisor
-      automountServiceAccountToken: false
       volumes:
         - name: workspace
           persistentVolumeClaim:
@@ -32,20 +18,10 @@ spec:
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9
-          securityContext:
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            runAsNonRoot: true
-            capabilities:
-              drop: [ALL]
-            seccompProfile:
-              type: RuntimeDefault
           volumeMounts:
             - name: workspace
               mountPath: /workspace
 ---
-# A sibling workspace's data PVC. The name is a real PVC in the same namespace,
-# so nothing but the gate stands between this Job and another agent's files.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -56,16 +32,10 @@ spec:
     metadata:
       labels:
         sycophant.md/job-kind: tool
-        # Names the workspace whose PVC this Job reaches for. The approved
-        # claim name is derived from the creating identity, so this label
-        # changes nothing -- unless an implementation reads the workspace off
-        # the template, which is what makes this mount admit.
         sycophant.md/workspace: other
     spec:
       restartPolicy: Never
       serviceAccountName: unprivileged-research
-      runtimeClassName: gvisor
-      automountServiceAccountToken: false
       volumes:
         - name: workspace
           persistentVolumeClaim:
@@ -73,21 +43,10 @@ spec:
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9
-          securityContext:
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            runAsNonRoot: true
-            capabilities:
-              drop: [ALL]
-            seccompProfile:
-              type: RuntimeDefault
           volumeMounts:
             - name: workspace
               mountPath: /workspace
 ---
-# This workspace's own conversation history. Owned solely by the harness and
-# never mounted by a tool job: the untrusted runtime must not be able to forge
-# or overwrite the conversation log.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -101,8 +60,6 @@ spec:
     spec:
       restartPolicy: Never
       serviceAccountName: unprivileged-research
-      runtimeClassName: gvisor
-      automountServiceAccountToken: false
       volumes:
         - name: history
           persistentVolumeClaim:
@@ -110,20 +67,10 @@ spec:
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9
-          securityContext:
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            runAsNonRoot: true
-            capabilities:
-              drop: [ALL]
-            seccompProfile:
-              type: RuntimeDefault
           volumeMounts:
             - name: history
               mountPath: /var/lib/harness
 ---
-# A ConfigMap mounted as a volume. The volume KIND is on the safe set, so only
-# the reference ban stops it.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -137,8 +84,6 @@ spec:
     spec:
       restartPolicy: Never
       serviceAccountName: unprivileged-research
-      runtimeClassName: gvisor
-      automountServiceAccountToken: false
       volumes:
         - name: bindings
           configMap:
@@ -146,20 +91,10 @@ spec:
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9
-          securityContext:
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            runAsNonRoot: true
-            capabilities:
-              drop: [ALL]
-            seccompProfile:
-              type: RuntimeDefault
           volumeMounts:
             - name: bindings
               mountPath: /etc/sycophant/capability-manifest
 ---
-# The same read through env instead of a volume. A ban that covered only
-# volumes would leave this open.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -173,19 +108,9 @@ spec:
     spec:
       restartPolicy: Never
       serviceAccountName: unprivileged-research
-      runtimeClassName: gvisor
-      automountServiceAccountToken: false
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9
-          securityContext:
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            runAsNonRoot: true
-            capabilities:
-              drop: [ALL]
-            seccompProfile:
-              type: RuntimeDefault
           env:
             - name: BINDINGS
               valueFrom:
@@ -193,7 +118,6 @@ spec:
                   name: capability-manifest
                   key: bindings.yaml
 ---
-# The same read through envFrom, the third reference site.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -207,19 +131,9 @@ spec:
     spec:
       restartPolicy: Never
       serviceAccountName: unprivileged-research
-      runtimeClassName: gvisor
-      automountServiceAccountToken: false
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9
-          securityContext:
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-            runAsNonRoot: true
-            capabilities:
-              drop: [ALL]
-            seccompProfile:
-              type: RuntimeDefault
           envFrom:
             - configMapRef:
                 name: capability-manifest

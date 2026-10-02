@@ -1,8 +1,29 @@
-//! Helpers shared across `syco` subcommands: progress output and the `kubectl`
-//! CR-delete idiom the content-tier commands repeat. The tenant namespace is
-//! created declaratively by the chart (`syco tenant up`), never here.
+//! Helpers shared across `syco` subcommands: progress output, polling, and the
+//! `kubectl` CR-delete idiom the content-tier commands repeat.
+
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 use crate::runner::run_output;
+
+/// Poll `check` every 2s until it holds or `secs` pass.
+pub(crate) fn wait_for(
+    desc: &str,
+    secs: u64,
+    mut check: impl FnMut() -> bool,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        if check() {
+            ok(desc);
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("timed out after {secs}s waiting for: {desc}"));
+        }
+        sleep(Duration::from_secs(2));
+    }
+}
 
 /// Print a cyan `==> step` heading to stderr.
 pub(crate) fn step(msg: &str) {

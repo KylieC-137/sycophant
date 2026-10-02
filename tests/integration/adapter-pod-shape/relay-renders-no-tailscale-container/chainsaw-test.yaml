@@ -3,25 +3,7 @@ kind: Test
 metadata:
   name: relay-renders-no-tailscale-container
 spec:
-  description: |
-    The rendered relay pod contains no tailscale or tsnet container for any
-    values combination. The tailnet terminus lives on the app channel's own
-    adapter Deployment; the relay carries no sidecar, no serve ConfigMap, and no
-    tsnet volumes.
-
-    "Any values combination" is what one render cannot prove. Two renders —
-    channels populated, and `channels: {}` — is the minimum honest test, because
-    a gated sidecar is exactly what would survive a half-done move.
-
-    This also pins the relay's Secret RBAC split: the
-    `relay-tsnet-bridge` Role granting `secrets: [get, update, patch]` binds to
-    the app adapter's ServiceAccount, not `relay-ctrl`, leaving the relay SA
-    with no update or patch on any Secret.
-
-    Mutation guard: leave the sidecar block in relay-ctrl.yaml under any gate
-    and the container assertion reds. Leave the `relay-tsnet-bridge` RoleBinding
-    pointed at `relay-ctrl` and the RBAC assertion reds — which matters because
-    a relay holding `patch` on Secrets can rotate its own signing key.
+  description: The rendered relay pod has no tailscale or tsnet container for any values combination.
   steps:
     - name: assert-no-tailscale-container-with-a-channel-configured
       try:
@@ -69,10 +51,10 @@ spec:
                 || { echo "tenant chart must render with a channel configured"; printf '%s\n' "$out" >&2; exit 1; }
 
               # Every RoleBinding subject that is bound to a Role granting write
-              # verbs on Secrets. The relay-ctrl SA must appear in none of them.
+              # verbs on Secrets. The relay-controller SA must appear in none of them.
               bindings=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
                 -o jsonpath='{range .items[?(@.kind=="RoleBinding")]}{.metadata.name}|{.roleRef.name}|{range .subjects[*]}{.name},{end}{"\n"}{end}' 2>&1)
 
-              printf '%s\n' "$bindings" | grep '^relay-tsnet-bridge|' | grep -q 'relay-ctrl,' \
+              printf '%s\n' "$bindings" | grep '^relay-tsnet-bridge|' | grep -q 'relay-controller,' \
                 && { echo "the tsnet state-Secret Role is still bound to the relay SA; the relay would keep update+patch on Secrets"; printf '%s\n' "$bindings" >&2; exit 1; }
               true

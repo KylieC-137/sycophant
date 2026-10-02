@@ -1,3 +1,4 @@
+{{- if eq .Values.render "base" }}
 {{- /*
 One Deployment plus one ClusterIP Service per `inference` entry: the tenant's
 own in-cluster model server. The pod carries `component: inference`, which the
@@ -221,4 +222,5 @@ spec:
   selector:
     app.kubernetes.io/name: {{ $key }}
     app.kubernetes.io/part-of: sycophant
+{{- end }}
 {{- end }}

@@ -1,19 +1,10 @@
 {{- if include "sycophant.renderKyverno" . }}
-# Shared across all sycophant tenants. Stable name; install once at
-# cluster bring-up. Match rules scope to any namespace carrying the
-# `app.kubernetes.io/part-of=sycophant-tenant` label (applied by the
-# namespace's creator: the sycophant-tenant chart, or the provisioner).
+# Scoped to namespaces labelled part-of=sycophant-tenant.
 #
-# Trust thesis: the security boundary is structural — the namespace
-# label is set at admission and cannot be changed by tenant code (no
-# tenant SA has `update namespaces` perms). For per-resource
-# protections, the match condition below matches "requesting SA's
-# namespace == target resource's namespace." A workload INSIDE the
-# tenant ns cannot mutate its own protected resources; external
-# callers (chart deployers, the operator, kyverno controllers) live
-# in other namespaces and are allowed by structural exclusion. No
-# enumerated installer trust list — adding new install paths
-# (additional deployers, CI bots, Argo) requires zero policy edits.
+# The boundary is structural: no tenant ServiceAccount can update the
+# namespace label, and a caller inside the tenant namespace cannot mutate
+# its own protected resources. External callers live in other namespaces
+# and pass by exclusion, so there is no installer allowlist to maintain.
 #
 # CEL policies have no named rules, so each per-resource protection is
 # one validation: every expression passes unless the request is that
@@ -55,7 +46,15 @@ spec:
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE", "DELETE"]
         resources: ["configmaps", "serviceaccounts"]
-  {{- include "sycophant.kyvernoTenantScopedCallerMatchCondition" . | nindent 2 }}
+  # Applies to callers a tenant can reach: a ServiceAccount in the request
+  # namespace, or an IdP user. Everyone else (the chart installer, Kyverno, the
+  # operator's own kubeconfig) falls through unmatched and is admitted.
+  matchConditions:
+    - name: caller-is-scoped-to-this-tenant
+      expression: >-
+        (request.userInfo.username.startsWith("system:serviceaccount:")
+          && parseServiceAccount(request.userInfo.username).Namespace == request.namespace)
+          || request.userInfo.username.startsWith("{{ include "sycophant.idpUserPrefix" . }}")
   variables:
     # DELETE carries the resource in oldObject; every other operation
     # carries it in object.
@@ -74,13 +73,13 @@ spec:
       message: >-
         NetworkPolicy in a sycophant tenant namespace cannot be
         modified by workloads inside the namespace. External callers
-        (chart deployers, the operator) are permitted.
+        (the provision installer, the operator) are permitted.
     - expression: >-
         !(variables.group == "cilium.io" && variables.kind == "CiliumNetworkPolicy")
       message: >-
         CiliumNetworkPolicy in a sycophant tenant namespace cannot be
         modified by workloads inside the namespace. External callers
-        (chart deployers, the operator) are permitted.
+        (the provision installer, the operator) are permitted.
     # NOTE: The workspace ValidatingAdmissionPolicy cannot be guarded at
     # the admission layer — neither Kyverno nor an in-tree VAP will
     # enforce rules whose target is in the admissionregistration.k8s.io
@@ -92,7 +91,7 @@ spec:
       message: >-
         RBAC resources in a sycophant tenant namespace cannot be
         modified by workloads inside the namespace. External callers
-        (chart deployers, the operator) are permitted to manage
+        (the provision installer, the operator) are permitted to manage
         RBAC during tenant install/upgrade lifecycle.
     # The relay-toolset-grants ConfigMap is the grant names the gateway serves
     # on ListGrants. The relay is the internet-facing pod and is denied too: a
@@ -108,10 +107,8 @@ spec:
       message: >-
         The capability-grants ConfigMap in a sycophant tenant namespace
         cannot be modified by workloads inside the namespace.
-    # Workspace SAs are chart-rendered at helm install time by the
-    # tenant-deployer SA (different namespace; skipped by the same-namespace
-    # match condition). The check blocks runtime-driven creation of workspace-SA-
-    # labeled SAs from inside the tenant namespace.
+    # Workspace ServiceAccounts come from the provision installer, which lives
+    # outside the tenant namespace; this blocks minting them from inside it.
     - expression: >-
         !(variables.kind == "ServiceAccount" && variables.typeLabel == "workspace-sa")
       message: >-
@@ -122,6 +119,15 @@ spec:
       message: >-
         Toolset config ConfigMaps in a sycophant tenant namespace cannot be
         modified by workloads inside the namespace.
+    # Each per-toolset ConfigMap names the tool's container image, which the
+    # harness watches and runs. A namespace writer that could rewrite it could
+    # repoint a toolset at a malicious image and get code execution in the
+    # tenant. The harness SA holds only list/watch; this denies the rest.
+    - expression: >-
+        !(variables.kind == "ConfigMap" && variables.typeLabel == "toolset")
+      message: >-
+        Toolset ConfigMaps in a sycophant tenant namespace cannot be
+        modified by callers inside the namespace.
     # The relay-access-grants ConfigMap is the relay's authorization table and
     # the operator is its only writer. No per-subject carve-out: the relay is
     # denied too. A relay that could write the table it reads could mint

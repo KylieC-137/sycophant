@@ -3,24 +3,7 @@ kind: Test
 metadata:
   name: relay-ingress-carries-three-rules
 spec:
-  description: |
-    Once the app channel is configured, `relay-ingress` is still exactly ONE
-    object and it carries three
-    ingress rules: the harness rule (9090), the app-port rule (9091), and the
-    adapter-port rule (9092). No second ingress CiliumNetworkPolicy selects the
-    relay pod.
-
-    The app port admits only the app adapter pod. The rule names `component: adapter` + `adapter-class: transport` +
-    `part-of: sycophant`, key equals value — never `sycophant.md/channel`, and
-    never a bare component match, which would let a phase-3 platform adapter
-    onto the app port.
-
-    This is the stage-B counterpart of relay-ports/adapter-port-ingress-rule,
-    which asserts the same one-object property while only two rules exist.
-
-    Mutation guard: split any rule into its own CNP and the count becomes 2.
-    Drop a port and the port set assertion reds. Widen the app-port rule to
-    `component: adapter` alone and the transport-class assertion reds.
+  description: With an app channel, relay-ingress stays one object carrying the harness (9090), app (9091), and adapter (9092) ingress rules.
   steps:
     - name: assert-one-object-three-rules
       try:
@@ -35,7 +18,7 @@ spec:
 
               cnps=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
                 -o jsonpath='{range .items[?(@.kind=="CiliumNetworkPolicy")]}{.metadata.name}|{.spec.endpointSelector.matchLabels.app\.kubernetes\.io/component}|{.spec.ingress}{"\n"}{end}')
-              relay_ingress=$(printf '%s\n' "$cnps" | awk -F'|' '$2 == "relay-ctrl" && $3 != "" { print }')
+              relay_ingress=$(printf '%s\n' "$cnps" | awk -F'|' '$2 == "relay-controller" && $3 != "" { print }')
               count=$(printf '%s' "$relay_ingress" | grep -c . || true)
               [ "$count" -eq 1 ] \
                 || { echo "expected exactly 1 ingress CNP selecting the relay pod, got $count"; printf '%s\n' "$cnps" >&2; exit 1; }
@@ -70,7 +53,7 @@ spec:
               printf '%s' "$selector" | grep -q '"app.kubernetes.io/component":"adapter"' \
                 || { echo "app-port rule does not name component=adapter"; printf '%s\n' "$selector" >&2; exit 1; }
               printf '%s' "$selector" | grep -q '"sycophant.md/adapter-class":"transport"' \
-                || { echo "app-port rule does not name adapter-class=transport; a bare component match would admit every adapter, including phase-3 platform adapters"; printf '%s\n' "$selector" >&2; exit 1; }
+                || { echo "app-port rule does not name adapter-class=transport; a bare component match would admit every adapter, including platform adapters"; printf '%s\n' "$selector" >&2; exit 1; }
               printf '%s' "$selector" | grep -q 'sycophant.md/channel' \
                 && { echo "app-port rule names the per-instance channel label, which is barred from every policy selector"; exit 1; }
               true

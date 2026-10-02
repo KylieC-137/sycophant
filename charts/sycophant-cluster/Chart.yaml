@@ -2,13 +2,13 @@ apiVersion: v2
 name: sycophant-cluster
 description: |
   Sycophant cluster-wide platform install. Ships once per cluster:
-  CRDs, Kyverno security policy, ValidatingAdmissionPolicy, shared
-  ClusterRoles, the per-tenant deployer SA + Kyverno generators that
-  wire each tenant namespace into the framework's security model.
+  Kyverno security policy, ValidatingAdmissionPolicy, shared
+  ClusterRoles, and the Kyverno generators that wire each tenant
+  namespace into the framework's security model.
 
-  After this is installed, per-tenant workloads are deployed via the
-  separate `sycophant-tenant` chart, run by the `tenant-deployer`
-  ServiceAccount (or any external SA the operator chooses).
+  After this is installed, an admitted provision marker triggers a
+  scoped, ephemeral Job that runs the separate `sycophant-tenant` chart
+  into the new tenant namespace.
 version: 0.1.0
 appVersion: "0.1.0"
 kubeVersion: ">=1.30.0-0"

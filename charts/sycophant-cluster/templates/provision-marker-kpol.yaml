@@ -2,12 +2,13 @@
 # Provision reactor. Fires on lifecycle-marker configmaps created in
 # sycophant-system and gates the reserved provision name in its own match block
 # (RBAC ignores resourceNames on create, so the name gate lives here). It
-# materializes the tenant Namespace and a nested ResourceQuota sized from the
-# marker's capacity, under Kyverno's own ServiceAccount rights, and generates
-# nothing else. The generated Namespace carries the part-of=sycophant-tenant
+# materializes the tenant Namespace, a nested ResourceQuota sized from the
+# marker's capacity, and a LimitRange, under Kyverno's own ServiceAccount
+# rights, and generates nothing else. The quota rejects a container that sets no
+# memory, so the LimitRange gives one a 64Mi request and a 256Mi limit. The generated Namespace carries the part-of=sycophant-tenant
 # label, which chains into the relay tokenreview and pod-VAP bindings the
 # tenant-rolebinding-generator policy produces, and the restricted Pod Security
-# labels the tenant-ns-psa-required VAP demands.
+# labels the tenant-namespace-psa-required VAP demands.
 #
 # The keepalive match condition constrains the marker's keepalive to the policy
 # set 0, 30, 60, 90 days; a free-form value does not match and the marker
@@ -15,7 +16,7 @@
 apiVersion: policies.kyverno.io/v1
 kind: GeneratingPolicy
 metadata:
-  name: tenant-provision-reactor
+  name: provision-tenant-base
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
 spec:
@@ -24,26 +25,10 @@ spec:
       enabled: false
     synchronize:
       enabled: false
-  matchConstraints:
-    namespaceSelector:
-      matchLabels:
-        kubernetes.io/metadata.name: sycophant-system
-    objectSelector:
-      matchLabels:
-        {{ include "sycophant.lifecycleMarkerLabel" . }}: "true"
-    resourceRules:
-      - apiGroups: [""]
-        apiVersions: ["v1"]
-        operations: ["CREATE", "UPDATE"]
-        resources: ["configmaps"]
-        resourceNames: ["{{ include "sycophant.provisionMarkerName" . }}"]
-  matchConditions:
-    - name: keepalive-is-a-policy-value
-      expression: >-
-        object.?data["keepalive"].orValue("") in ["0", "30", "60", "90"]
+  {{- include "sycophant.provisionMarkerSystemMatchConstraints" . | nindent 2 }}
   variables:
     - name: tenant
-      expression: 'object.data["tenant"]'
+      expression: '"{{ include "sycophant.tenantNsPrefix" . }}" + object.data["tenant"]'
     - name: capacity
       expression: 'object.data["capacity"]'
   generate:
@@ -72,4 +57,19 @@ spec:
             hard:
               requests.memory: (( variables.capacity ))
               limits.memory: (( variables.capacity ))
+          ---
+          apiVersion: v1
+          kind: LimitRange
+          metadata:
+            name: (( variables.tenant ))-memory-default
+            namespace: (( variables.tenant ))
+            labels:
+              {{- include "sycophant.labels" . | nindent 14 }}
+          spec:
+            limits:
+              - type: Container
+                defaultRequest:
+                  memory: 64Mi
+                default:
+                  memory: 256Mi
 {{- end }}

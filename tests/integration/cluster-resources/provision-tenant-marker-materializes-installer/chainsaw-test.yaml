@@ -1,0 +1,168 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: provision-tenant-marker-materializes-installer
+spec:
+  # provision-tenant is one fixed name in sycophant-system, shared by every
+  # tenant-marker test, so these run alone.
+  concurrent: false
+  timeouts:
+    assert: 120s
+  description: An admitted provision-tenant marker materializes the installer ServiceAccount, Job, and tenant-namespace RoleBinding, the generated namespace chains into the relay TokenReview and pod VAP bindings, and its values reach the base release unchanged, `$` and quotes included.
+  bindings:
+    - name: token
+      value: (random('[a-z0-9]{8}'))
+    - name: handle
+      value: (random('[a-f0-9]{10}'))
+  steps:
+    - name: preflight-kyverno-ready
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: kyverno-background-controller
+                namespace: kyverno
+              status:
+                (readyReplicas > `0`): true
+        - assert:
+            resource:
+              apiVersion: policies.kyverno.io/v1
+              kind: GeneratingPolicy
+              metadata:
+                name: provision-tenant-stack
+              status:
+                conditionStatus:
+                  ready: true
+        - assert:
+            resource:
+              apiVersion: policies.kyverno.io/v1
+              kind: GeneratingPolicy
+              metadata:
+                name: provision-tenant-grant
+              status:
+                conditionStatus:
+                  ready: true
+    - name: grant-marker-write
+      use:
+        template: ../../step-templates/marker-writer.yaml
+        with:
+          bindings:
+            - name: marker_ns
+              value: sycophant-system
+    - name: write-provision-marker
+      try:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+              - name: HANDLE
+                value: ($handle)
+            content: |
+              set -eu
+              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+              kubectl create configmap provision-tenant -n sycophant-system \
+                --from-literal=tenant="$TOKEN" --from-literal=handle="$HANDLE" \
+                --from-literal=capacity=2Gi --from-literal=keepalive=0 \
+                --from-file=values=/dev/stdin --dry-run=client -o yaml <<'VALUES' \
+                | kubectl label --local -f - -o yaml \
+                    app.kubernetes.io/part-of=sycophant sycophant.md/lifecycle-marker=true \
+                | kubectl create --as="${ISSUER}#operator" -f -
+              storageClass: |-
+                one $$ $(HOME) ${HOME} "dq" 'sq'
+                two $HOME
+              VALUES
+    - name: assert-installer-set
+      try:
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: (join('-', ['provision-tenant', $handle]))
+                namespace: sycophant-system
+                labels:
+                  app.kubernetes.io/component: provision-tenant
+                (annotations."sycophant.md/reap-after" != null): true
+        - assert:
+            resource:
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: (join('-', ['provision-tenant', $handle]))
+                namespace: sycophant-system
+                labels:
+                  app.kubernetes.io/component: provision-tenant
+        - assert:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: (join('-', ['provision-tenant', $handle]))
+                namespace: (join('-', ['tenant', $token]))
+                labels:
+                  app.kubernetes.io/component: provision-tenant
+                (annotations."sycophant.md/reap-after" != null): true
+              subjects:
+                - kind: ServiceAccount
+                  name: (join('-', ['provision-tenant', $handle]))
+                  namespace: sycophant-system
+              roleRef:
+                apiGroup: rbac.authorization.k8s.io
+                kind: ClusterRole
+                name: provision-write
+        - assert:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRoleBinding
+              metadata:
+                name: (join('-', ['tenant', $token, 'relay-tokenreview']))
+                ownerReferences:
+                  - kind: Namespace
+                    name: (join('-', ['tenant', $token]))
+              roleRef:
+                name: cluster-relay-tokenreview
+        - assert:
+            resource:
+              apiVersion: admissionregistration.k8s.io/v1
+              kind: ValidatingAdmissionPolicyBinding
+              metadata:
+                name: (join('-', ['tenant', $token, 'sycophant-pod-binding']))
+                ownerReferences:
+                  - kind: Namespace
+                    name: (join('-', ['tenant', $token]))
+              spec:
+                policyName: cluster-gvisor-pod-policy
+        - script:
+            timeout: 300s
+            env:
+              - name: TOKEN
+                value: ($token)
+              - name: HANDLE
+                value: ($handle)
+            content: |
+              set -eu
+              for i in $(seq 1 140); do
+                [ "$(kubectl get job "provision-tenant-${HANDLE}" -n sycophant-system -o jsonpath='{.status.succeeded}')" = 1 ] && break
+                sleep 2
+              done
+              got=$(HELM_DRIVER=configmap helm get values "tenant-${TOKEN}" -n "tenant-${TOKEN}" -o json | jq -r .storageClass)
+              want=$(cat <<'WANT'
+              one $$ $(HOME) ${HOME} "dq" 'sq'
+              two $HOME
+              WANT
+              )
+              [ "$got" = "$want" ] || { printf 'values changed in transit:\n%s\n' "$got"; exit 1; }
+      cleanup:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+              - name: HANDLE
+                value: ($handle)
+            content: |
+              kubectl delete configmap provision-tenant -n sycophant-system --ignore-not-found
+              kubectl delete serviceaccount "provision-tenant-${HANDLE}" -n sycophant-system --ignore-not-found
+              kubectl delete job "provision-tenant-${HANDLE}" -n sycophant-system --ignore-not-found
+              kubectl delete namespace "tenant-${TOKEN}" --ignore-not-found --wait=false

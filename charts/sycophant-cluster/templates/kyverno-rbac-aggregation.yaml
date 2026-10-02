@@ -21,12 +21,9 @@ rules:
     verbs: ["*"]
 
   # K8s anti-privilege-escalation: when Kyverno generates a RoleBinding
-  # that grants any permission, Kyverno itself must hold that permission
-  # cluster-wide. The resources below are pulled from the shared helpers
-  # in `_helpers.tpl` (`sycophant.operatorCrds` / `Statuses`) — the same
-  # lists `tenant-operator` consumes — so the two roles stay byte-equal.
-  # None of these verbs are USED by Kyverno directly; they're only
-  # present to satisfy the escalation check.
+  # to provision-write, Kyverno itself must hold every verb it grants,
+  # cluster-wide. The rules below mirror provision-write; Kyverno does not
+  # use them directly.
   - apiGroups: [""]
     resources:
       - "configmaps"
@@ -35,7 +32,7 @@ rules:
       - "serviceaccounts"
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
 
-  # Mirrors tenant-operator's write-only-secrets rule. Kyverno's
+  # Mirrors provision-write's write-only-secrets rule. Kyverno's
   # background-controller must hold AT LEAST the verbs it grants via
   # generate-rules; tightening Kyverno to write-only too means a Kyverno
   # compromise also can't read existing tenant Secrets.
@@ -44,41 +41,37 @@ rules:
       - "secrets"
     verbs: ["create", "update", "patch", "delete"]
 
-  - apiGroups: ["bitnami.com"]
+  # Mirrors provision-write's two readable Secrets (relay-controller device
+  # public keys and the app adapter's tailnet node state) and its events
+  # rule. Kyverno binds provision-write via the generated provision-tenant
+  # RoleBinding, so anti-escalation requires it to hold these too: the
+  # generated bind is rejected for any pinned `get` name the mirror omits,
+  # so this list must match provision-write's pinned names exactly.
+  - apiGroups: [""]
     resources:
-      - "sealedsecrets"
-    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+      - "secrets"
+    resourceNames: ["relay-registered-keys", "adapter-state"]
+    verbs: ["get"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+
   - apiGroups: ["apps"]
-    resources:
-      - "deployments"
-      - "statefulsets"
-      - "daemonsets"
-      - "replicasets"
+    resources: ["deployments"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
   - apiGroups: ["batch"]
-    resources: ["jobs", "cronjobs"]
+    resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
-  - apiGroups: ["sycophant.md"]
-    resources:
-      {{- include "sycophant.operatorCrds" . | nindent 6 }}
-    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
-  - apiGroups: ["sycophant.md"]
-    resources:
-      {{- include "sycophant.operatorCrdStatuses" . | nindent 6 }}
-    verbs: ["patch"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles"]
     verbs: ["*"]
-  - apiGroups: ["networking.k8s.io"]
-    resources: ["networkpolicies"]
-    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
   - apiGroups: ["cilium.io"]
     resources: ["ciliumnetworkpolicies"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
 
   # Cluster-scoped resources Kyverno generates per-tenant when a
   # tenant-* namespace is created. These are the load-bearing additions
-  # for the multi-tenant trust model: tenant-deployer never writes
+  # for the multi-tenant trust model: the provision installer never writes
   # ClusterRoleBindings or VAP Bindings; Kyverno reconciles them from
   # the generate policy.
   - apiGroups: ["rbac.authorization.k8s.io"]
@@ -88,46 +81,48 @@ rules:
     resources: ["validatingadmissionpolicybindings"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
 
-  # Kyverno watches tenant namespaces — matched by the
-  # `app.kubernetes.io/part-of=sycophant-tenant` label, applied by the
-  # namespace creator (tenant chart or deployer), not an auto-labelling
-  # mutate — to drive the generate rules. Without this label the tenant
-  # is structurally outside policy enforcement. `create` lets the
+  # Kyverno watches tenant namespaces (part-of=sycophant-tenant) to drive
+  # the generate rules. `create` lets the
   # background-controller materialize the tenant Namespace from the
   # provision marker; `update`/`patch` let the suspend reactor stamp the
-  # reap-after annotation on that namespace. No web-tier-reachable
+  # reap-after annotation on that namespace. No tenant-reachable
   # ServiceAccount holds these.
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
 
   # ResourceQuota the provision generate policy sizes from the marker's
-  # capacity and nests in the new tenant Namespace.
+  # capacity and nests in the new tenant Namespace, with the LimitRange that
+  # defaults container memory under it.
   - apiGroups: [""]
-    resources: ["resourcequotas"]
+    resources: ["resourcequotas", "limitranges"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
 
   # K8s RBAC anti-escalation: Kyverno cannot grant permissions it does
   # not itself hold. When the generate rule creates a ClusterRoleBinding
-  # pointing at `cluster-toolset-tokenreview` /
-  # `cluster-relay-tokenreview`, Kyverno must hold the verbs those
-  # ClusterRoles grant.
+  # pointing at `cluster-relay-tokenreview`, Kyverno must hold the verbs
+  # that ClusterRole grants.
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
     verbs: ["create"]
 ---
-# The reap policy runs in the cleanup controller, whose own ClusterRole grants
-# only `get/list/watch` on namespaces. Without `delete` the policy matches the
-# expired tenant namespace on every tick and fails the deletion, so reap needs
-# this aggregation to do anything at all.
+# The reap-tenant DeletingPolicy runs in the cleanup controller, whose own
+# ClusterRole grants only `get/list/watch` on namespaces. One policy reaps the
+# tenant namespace plus the tenant installer's ServiceAccount and RoleBinding,
+# so it needs `delete` on all three. Without a verb the policy matches the
+# expired object on every tick and fails the deletion, so reap needs this
+# aggregation to do anything at all.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: kyverno:tenant-reap:cleanup-controller
+  name: kyverno:reap-tenant:cleanup-controller
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
     rbac.kyverno.io/aggregate-to-cleanup-controller: "true"
 rules:
   - apiGroups: [""]
-    resources: ["namespaces"]
+    resources: ["namespaces", "serviceaccounts"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
     verbs: ["get", "list", "watch", "delete"]

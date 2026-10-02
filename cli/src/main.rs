@@ -1,6 +1,7 @@
 mod assets;
 mod cli;
 mod commands;
+mod interrupt;
 mod runner;
 mod scope;
 mod sync;
@@ -46,7 +47,7 @@ fn install_crash_reporter() {
             .unwrap_or(0);
         let name = format!("syco-debug-{secs}.json");
 
-        // Crash reports land under the syco config dir (~/.config/sycophant/crash),
+        // Crash reports land under the syco config dir (<config>/crash),
         // never the operator's cwd. Fall back to the temp dir if HOME is unset or
         // the config dir isn't writable.
         let path = scope::config_dir()

@@ -1,13 +1,12 @@
 # A namespace carrying app.kubernetes.io/part-of=sycophant-tenant switches on all
 # per-tenant policy wiring (RBAC generate, tokenreview CRBs, the pod VAP binding).
-# Since the auto-labelling mutate was removed, labeling is the namespace creator's
-# job — and a creator that adds only the part-of label would get a fully-wired tenant
+# Labeling is the namespace creator's job, and a creator that adds only the part-of label would get a fully-wired tenant
 # namespace with NO Pod Security enforcement. This VAP fails that case closed: a
 # tenant-labeled namespace must also enforce the restricted Pod Security Standard.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
-  name: cluster-tenant-ns-psa-required
+  name: cluster-tenant-namespace-psa-required
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
 spec:
@@ -34,9 +33,9 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
-  name: cluster-tenant-ns-psa-required-binding
+  name: cluster-tenant-namespace-psa-required-binding
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
 spec:
-  policyName: cluster-tenant-ns-psa-required
+  policyName: cluster-tenant-namespace-psa-required
   validationActions: [Deny]

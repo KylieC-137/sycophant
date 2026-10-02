@@ -2,9 +2,9 @@ apiVersion: v2
 name: sycophant-tenant
 description: |
   Per-tenant sycophant install. Run once per tenant in the tenant's
-  namespace, by the tenant-deployer SA (or any external SA the
-  operator chooses). Requires `sycophant-cluster` to have been
-  installed once on the cluster first.
+  namespace, by the provisioner Job a provision marker stamps (or any
+  external SA the operator chooses). Requires `sycophant-cluster` to
+  have been installed once on the cluster first.
 
   Renders the per-tenant relay controller, per-workspace harness Pods,
   per-model inference Pods, per-grant CNPs, and all related per-tenant

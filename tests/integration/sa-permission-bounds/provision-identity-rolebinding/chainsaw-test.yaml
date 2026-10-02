@@ -1,0 +1,61 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: provision-identity-rolebinding
+spec:
+  description: The tenant chart renders no provision-identity RoleBinding without users, one binding of exactly the listed Users to ClusterRole/provision-identity with them, and rejects a subject carrying a quote, backslash, LF, CR, or U+2028.
+  bindings:
+    - name: user_a
+      value: "https://issuer.example#alice"
+    - name: user_b
+      value: "https://issuer.example#bob"
+  steps:
+    - name: assert-no-binding-renders-when-users-unset
+      try:
+        - script:
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns 2>&1) \
+                || { echo "tenant chart must render offline with users unset"; printf '%s\n' "$out" >&2; exit 1; }
+
+              found=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.metadata.name=="provision-identity")]}{.kind}{"\n"}{end}' 2>/dev/null \
+                | grep -c 'RoleBinding' || true)
+              [ "$found" = "0" ] \
+                || { echo "a provision-identity RoleBinding rendered with users unset; an unbound tenant must admit no user"; exit 1; }
+              true
+    - name: assert-binding-renders-once-with-two-user-subjects-and-clusterrole-ref
+      try:
+        - script:
+            env:
+              - name: USER_A
+                value: ($user_a)
+              - name: USER_B
+                value: ($user_b)
+            content: |
+              set -e
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                --set "users[0]=$USER_A" --set "users[1]=$USER_B" 2>&1) \
+                || { echo "tenant chart must accept a users list and render the RoleBinding"; printf '%s\n' "$out" >&2; exit 1; }
+
+              row=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
+                -o jsonpath='{range .items[?(@.metadata.name=="provision-identity")]}{.kind}~{.metadata.namespace}~{range .subjects[*]}{.kind}={.name};{end}~{.roleRef.kind}={.roleRef.name}{"\n"}{end}' 2>/dev/null)
+              want="RoleBinding~probe-ns~User=$USER_A;User=$USER_B;~ClusterRole=provision-identity"
+              [ "$row" = "$want" ] \
+                || { echo "expected exactly one binding '$want', got '$row'"; exit 1; }
+    - name: assert-schema-rejects-unsafe-subject
+      try:
+        - script:
+            content: |
+              set -u
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              for subject in 'https://issuer.example#a\"b' 'https://issuer.example#a\\b' 'https://issuer.example#a\nb' \
+                  'https://issuer.example#a\rb' 'https://issuer.example#a\u2028b'; do
+                if out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+                    --set-json "users=[\"$subject\"]" 2>&1); then
+                  echo "tenant chart accepted unsafe subject $subject"; exit 1
+                fi
+                case "$out" in *users*) ;; *) echo "rejected, but not by the users schema: $out"; exit 1;; esac
+              done

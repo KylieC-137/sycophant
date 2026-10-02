@@ -1,6 +1,3 @@
-# The gate keys every rule on the authenticated creator. Impersonating
-# harness-research is what makes `workspace` resolve to `research`, so the
-# approved PVC name the rules derive is `workspace-data-research`.
 apiVersion: cli.kyverno.io/v1alpha1
 kind: UserInfo
 metadata:

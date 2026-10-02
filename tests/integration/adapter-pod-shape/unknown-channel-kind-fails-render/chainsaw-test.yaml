@@ -4,13 +4,13 @@ metadata:
   name: unknown-channel-kind-fails-render
 spec:
   description: |
-    Each `.Values.channels` entry carries a `kind`. Phase 1
-    supports only `kind: app`, and an unrecognized kind must fail the render
-    non-zero, naming the kind.
+    Each `.Values.channels` entry carries a `kind`. Only `kind: app` is
+    supported, and an unrecognized kind must fail the render non-zero, naming
+    the kind.
 
     Why this is not a nicety: presence-in-the-map is the enable signal,
-    with no `enabled` bool. So a typo'd `kind` — `ap`, `App`, `telegram` before
-    phase 3 lands — would otherwise render NOTHING and read exactly like
+    with no `enabled` bool. So a typo'd `kind` — `ap`, `App`, or the
+    not-yet-supported `telegram` — would otherwise render NOTHING and read exactly like
     "channel not configured yet". The operator sees a healthy install with no
     adapter and no error, and the person they invited simply cannot connect.
     Failing the render is what turns a silent misconfiguration into a

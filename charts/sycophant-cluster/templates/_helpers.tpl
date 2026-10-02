@@ -17,16 +17,18 @@ true
 {{- end -}}
 
 {{/*
-Tenant lifecycle marker contract. The marker is a plain ConfigMap identified by
-the well-known label below; the reserved name in each reactor's match block
-selects the operation. Schema keys are tenant, capacity, keepalive; there is no
-authority field. One source so the provision VAP and the reactor policies stay
-in step.
+Lifecycle marker contract: a ConfigMap carrying the label below, whose reserved
+name selects the reactor. The tenant prefix keeps every provisioned namespace
+out of the reserved ones.
 */}}
 {{- define "sycophant.lifecycleMarkerLabel" -}}sycophant.md/lifecycle-marker{{- end -}}
-{{- define "sycophant.provisionMarkerName" -}}sycophant-tenant-provision{{- end -}}
-{{- define "sycophant.suspendMarkerName" -}}sycophant-tenant-suspend{{- end -}}
+{{- define "sycophant.provisionMarkerName" -}}provision-tenant{{- end -}}
+{{- define "sycophant.workspaceProvisionMarkerName" -}}provision-workspace{{- end -}}
+{{- define "sycophant.userProvisionMarkerName" -}}provision-user{{- end -}}
+{{- define "sycophant.toolsetProvisionMarkerName" -}}provision-toolset{{- end -}}
+{{- define "sycophant.suspendMarkerName" -}}suspend-tenant{{- end -}}
 {{- define "sycophant.reapAfterAnnotation" -}}sycophant.md/reap-after{{- end -}}
+{{- define "sycophant.tenantNsPrefix" -}}tenant-{{- end -}}
 
 {{/*
 The capability job gate's creating identity, shared by its mutate and its
@@ -59,6 +61,30 @@ variables:
     expression: "variables.containers + variables.initContainers"
 {{- end -}}
 
+{{/*
+Match for the reactors on the tenant marker in sycophant-system. A free-form
+keepalive matches nothing, so nothing is stamped.
+*/}}
+{{- define "sycophant.provisionMarkerSystemMatchConstraints" -}}
+matchConstraints:
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: sycophant-system
+  objectSelector:
+    matchLabels:
+      {{ include "sycophant.lifecycleMarkerLabel" . }}: "true"
+  resourceRules:
+    - apiGroups: [""]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["configmaps"]
+      resourceNames: ["{{ include "sycophant.provisionMarkerName" . }}"]
+matchConditions:
+  - name: keepalive-is-a-policy-value
+    expression: >-
+      object.?data["keepalive"].orValue("") in ["0", "30", "60", "90"]
+{{- end -}}
+
 {{- define "sycophant.labels" -}}
 {{ include "sycophant.baseLabels" . }}
 app.kubernetes.io/part-of: sycophant
@@ -76,59 +102,5 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
-{{/*
-The IdP user prefix the apiserver stamps on an OIDC identity, `<issuer>#`.
-Shared so the positive gate in `provision-marker-vap.yaml` and the negative
-gate below cannot drift onto different notions of an IdP user.
-*/}}
+{{/* The IdP user prefix the apiserver stamps on an OIDC identity, `<issuer>#`. */}}
 {{- define "sycophant.idpUserPrefix" -}}{{ .Values.idp.issuer }}#{{- end -}}
-
-{{/*
-Kyverno match condition: the policy applies to the principals a tenant can
-reach, which is a ServiceAccount inside the request namespace or a user
-identity the cluster's IdP minted. Those two classes live inside the blast
-radius. Scopes tenant-operator writes to its own tenant; defends against a
-cross-tenant RoleBinding leak.
-
-Every other caller falls through unmatched and is admitted: the chart
-deployer and the Kyverno controllers, ServiceAccounts in operator-owned
-namespaces, and the operator's own cluster kubeconfig, which is what
-`cluster-chart-admin` break-glass rides on.
-
-An IdP user writes a lifecycle marker and a scoped ServiceAccount does the
-work. The marker carries `sycophant.md/lifecycle-marker`, never
-`sycophant.md/type`, so no validation here fires on it.
-
-`parseServiceAccount` pulls the namespace out of
-`system:serviceaccount:NS:NAME`; the prefix test guards the parse.
-*/}}
-{{- define "sycophant.kyvernoTenantScopedCallerMatchCondition" -}}
-matchConditions:
-  - name: caller-is-scoped-to-this-tenant
-    expression: >-
-      (request.userInfo.username.startsWith("system:serviceaccount:")
-        && parseServiceAccount(request.userInfo.username).Namespace == request.namespace)
-        || request.userInfo.username.startsWith("{{ include "sycophant.idpUserPrefix" . }}")
-{{- end -}}
-
-{{/*
-The sycophant.md CRD resources the per-tenant operator role manages.
-Mirrored verbatim into `kyverno-rbac-aggregation.yaml` so kyverno's
-RoleBinding generate rule passes K8s anti-escalation. Adding a CRD to
-the framework requires updating ONLY this helper (and the
-tenant-deployer ClusterRole separately — its verbs and resource set
-differ).
-*/}}
-{{- define "sycophant.operatorCrds" -}}
-- "clients"
-{{- end -}}
-
-{{/*
-Status subresources matching `sycophant.operatorCrds`. Kept in
-parallel rather than computed from the base list so Helm rendering
-stays trivially predictable; divergence risk is the same as the base
-list (both staked on the same mirror invariant).
-*/}}
-{{- define "sycophant.operatorCrdStatuses" -}}
-- "clients/status"
-{{- end -}}

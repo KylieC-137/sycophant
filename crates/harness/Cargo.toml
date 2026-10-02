@@ -32,6 +32,7 @@ async-trait = { workspace = true }
 arc-swap = { workspace = true }
 thiserror = { workspace = true }
 tokio-stream = { workspace = true }
+futures = { workspace = true }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
@@ -39,7 +40,6 @@ bytes = "1"
 
 [dev-dependencies]
 tempfile = "3"
-futures = { workspace = true }
 tokio-stream = { workspace = true, features = ["net"] }
 
 [lints]

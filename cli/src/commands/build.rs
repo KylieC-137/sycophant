@@ -24,11 +24,12 @@ const CONTROLLER_BINS: [&str; 3] = ["toolset-runtime", "relay-controller", "infe
 // Images loaded straight into the k3d node. toolset-git:local is here (not only
 // in the registry) because the workspace-init Job runs it node-local with
 // pullPolicy=Never (chart default workspaceInit.image=toolset-git, tag=local).
-const IMPORT_IMAGES: [&str; 5] = [
+const IMPORT_IMAGES: [&str; 6] = [
     "inference-runtime:local",
     "sycophant-harness:local",
     "relay-controller:local",
     "sycophant-kubectl:local",
+    "sycophant-provisioner:local",
     "toolset-git:local",
 ];
 
@@ -160,6 +161,20 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
             "images/kubectl/",
             "-t",
             "sycophant-kubectl:local",
+        ],
+    )?;
+
+    // The marker installer bakes the tenant chart, so its context is the repo root.
+    docker_build(
+        repo,
+        &[
+            "--build-arg",
+            &archarg,
+            "-f",
+            "images/provisioner/Dockerfile",
+            ".",
+            "-t",
+            "sycophant-provisioner:local",
         ],
     )?;
 

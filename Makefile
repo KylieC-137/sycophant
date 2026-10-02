@@ -35,18 +35,15 @@ test-unit: test-unit-rust test-unit-k8s ## All unit tests (hermetic, seconds)
 test-unit-rust: ## Inline #[cfg(test)] units across the workspace
 	cargo test --workspace --lib --bins
 
-# The policy fixture is re-rendered from the chart on every run, so an edit to
-# the rules file cannot leave the suite passing against a stale copy.
-# `--api-versions` stands in for the Kyverno CRDs the chart's capability check
-# looks for; no cluster is contacted.
+# The policy fixture is rendered from the chart on every run and is not
+# tracked. `--api-versions` stands in for the Kyverno CRDs; no cluster is
+# contacted.
 .PHONY: test-unit-k8s
-test-unit-k8s: ## Re-render offline policy fixtures from the chart, then run them
-	@for d in capability-job-gate-as-harness capability-job-gate-envelope-stamp; do \
-		helm template c charts/sycophant-cluster -n kyverno \
-			--api-versions policies.kyverno.io/v1/ValidatingPolicy \
-			--show-only templates/capability-job-gate-kpol.yaml \
-			> "tests/unit/kyverno-policies/$$d/policy.yaml"; \
-	done
+test-unit-k8s: ## Render the offline policy fixture from the chart, then run it
+	@helm template c charts/sycophant-cluster -n kyverno \
+		--api-versions policies.kyverno.io/v1/ValidatingPolicy \
+		--show-only templates/capability-job-gate-kpol.yaml \
+		> tests/unit/kyverno-policies/capability-job-gate-as-harness/policy.yaml
 	@kyverno test tests/unit/kyverno-policies
 
 .PHONY: test-integration

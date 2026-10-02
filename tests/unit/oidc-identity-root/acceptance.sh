@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Offline acceptance suite for the apiserver auth-config render (framework half).
+# Offline acceptance suite for the apiserver auth-config render.
 # Renders the sycophant-cluster chart with `helm template` only. No cluster.
 #
 #   bash tests/unit/oidc-identity-root/acceptance.sh
 #
-# Covers the per-identity trust model (spec per-member-cluster-identity, ADR 041):
+# Covers the per-identity trust model:
 # the chart always renders AuthenticationConfiguration off the `idp` contract
 # with no `authEngine` toggle, maps identity as the issuer-prefixed `sub` only,
 # and guards the reserved `system:` prefix on the raw claim. Exits non-zero and

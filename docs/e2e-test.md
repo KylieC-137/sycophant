@@ -35,19 +35,19 @@ The shape:
 ```sh
 syco setup                                            # cluster + images (idempotent)
 # … wire content + workspace per the scenario …
-syco tenant up    --ns <scenario>
+syco tenant up    --ns tenant-<scenario> --capacity <quantity>
 # … from the Flutter client, send a tool-calling message (see the scenario) …
-syco tenant audit <workspace> --ns <scenario>         # 7-check pass/fail (the threat model's six security clauses + the workspace-SA provisioning probe)
+syco tenant audit <workspace> --ns tenant-<scenario>  # 7-check pass/fail (the threat model's six security clauses + the workspace-SA provisioning probe)
 ```
 
 ## What each phase lays down
 
 | Phase | Command | What it lays down |
 |---|---|---|
-| Cluster | `syco setup` | k3d cluster → gVisor (runsc) → Cilium → CoreDNS registry wiring → Kyverno → sycophant cluster layer |
+| Cluster | `syco setup` | Prompt for the operator's Dex email + password → Dex TLS cert + apiserver auth config → k3d cluster (Dex NodePort 30443 mapped to the host) → Dex TLS Secret → gVisor (runsc) → Cilium → CoreDNS registry wiring → Kyverno → sycophant cluster layer (idp = Dex at `https://127.0.0.1:30443/dex`) → Dex with the operator as its one password user (bcrypt hash in the cluster only) → one login to read the operator's `<issuer>#<sub>` → that identity may write the tenant marker |
 | Images | `syco setup` (from a checkout) | Cross-compile Rust → Docker build all images → `k3d image import` + push toolsets to the in-cluster registry |
 | Content | `syco tenant secret set` + the chart's `toolsets` values | LLM creds (Secrets applied from outside the tenant); toolsets, and each workspace's grants and their egress, declared in the tenant values |
-| Deploy | `syco tenant up` | Namespace labelled `part-of=sycophant-tenant` (Kyverno then mints the per-tenant TokenReview CRBs + pod VAP binding) → tenant chart |
+| Deploy | `syco tenant up` | Prompts for the operator password, then writes lifecycle markers, each under a fresh 10-minute Dex ID token: the tenant marker (`tenant`, `handle`, `capacity`, `keepalive`, and `values`, the base settings: every values-file key but `workspaces`, `users`, `toolsets`; Kyverno generates the `part-of=sycophant-tenant` namespace, its quota, and the base-release installer Job), then, once the base relay-controller is Available, one workspace, user, and toolset marker per values-file entry, each waiting on its installer Job |
 | Exercise | Flutter client | A tool-calling message (sent from an enrolled client) lazy-spawns the stdlib toolset pod the audit probes |
 | Audit | `syco tenant audit` | gVisor `dmesg`, secret-scrubbing count, tool `exit_code=0`, egress timeout, L7 DNS block, no LLM creds in the sandbox, workspace SA |
 
@@ -61,13 +61,13 @@ syco tenant audit <workspace> --ns <scenario>         # 7-check pass/fail (the t
 
 **Why kube-proxy stays + Cilium does CNI-only.** Cilium's full kube-proxy replacement (socket-LB based ClusterIP routing) doesn't work cleanly on k3d's containerd-2.0 + cgroup-v2 environment in 1.19.3 — pods can't reach ClusterIPs. With k3s's bundled kube-proxy retained, ClusterIP routing works out of the box. Cilium handles CNI + CiliumNetworkPolicy enforcement only.
 
-**Why Kyverno is mandatory.** The cluster chart ships Kyverno CEL policies and ValidatingAdmissionPolicies. Without Kyverno's admission + background controllers, the policies install but never enforce. The mismatch only surfaces when downstream calls fail (e.g., the `relay-ctrl` SA tries `TokenReview` and the per-tenant ClusterRoleBinding the generator should have created doesn't exist).
+**Why Kyverno is mandatory.** The cluster chart ships Kyverno CEL policies and ValidatingAdmissionPolicies. Without Kyverno's admission + background controllers, the policies install but never enforce. The mismatch only surfaces when downstream calls fail (e.g., the `relay-controller` SA tries `TokenReview` and the per-tenant ClusterRoleBinding the generator should have created doesn't exist).
 
-**Why labelling the namespace provisions it.** The cluster chart's `tenant-rolebinding-generator` Kyverno policy matches any namespace carrying `app.kubernetes.io/part-of=sycophant-tenant` — name-independent, no deployer-SA requirement. Step 3 labels the `e2e-test` namespace after the cluster chart installs, and Kyverno then mints the per-tenant relay TokenReview ClusterRoleBinding, the pod ValidatingAdmissionPolicyBinding, and the tenant-deployer RoleBinding. Generation is asynchronous, so Step 3 waits for the wiring before continuing, then applies a deliberately VAP-violating pod to assert the binding actually enforces.
+**Why the namespace label provisions it.** The cluster chart's `tenant-rolebinding-generator` Kyverno policy matches any namespace carrying `app.kubernetes.io/part-of=sycophant-tenant` — name-independent, needing no dedicated provisioning ServiceAccount. In Step 3, `syco tenant up` writes the tenant marker, and the `provision-tenant-base` reactor generates the `tenant-e2e-test` namespace carrying that label. The label then chains into the generator, which mints the per-tenant relay TokenReview ClusterRoleBinding and the pod ValidatingAdmissionPolicyBinding (it generates no namespaced RoleBinding; the installer's `provision-write` RoleBinding comes from the installer reactor). Generation is asynchronous, so Step 3 waits for the namespace, checks its label, waits for both bindings, then applies a deliberately VAP-violating pod to assert the binding actually enforces.
 
 **Why the registry hostname has no TLD.** k3d's `--registry-create sycophant-registry:0.0.0.0:5555` provisions an in-cluster OCI registry. The hostname `sycophant-registry` (no `.localhost` TLD) avoids RFC 6761's libc loopback-bypass — musl-linked Rust controllers resolve it via CoreDNS like any other in-cluster name. From the host, the same registry is reachable at `localhost:5555`.
 
-**Why `--port "9090:9090@loadbalancer"`.** The cluster's serverlb maps host:9090 → cluster Service `relay-ctrl:9090` (the internal listener). That's enough for the Layer 1 chat sanity.
+**Why `--port "9090:9090@loadbalancer"`.** The cluster's serverlb maps host:9090 → cluster Service `relay-controller:9090` (the internal listener). That's enough for the Layer 1 chat sanity.
 
 **Why the Flutter app uses `relay:9090` over the tailnet.** The relay's app port is never forwarded to the host, so the only way in is the app adapter's tsnet node, reached by its MagicDNS name. Step 5 forwards headscale's HTTP API alone, which is what lets the host's Tailscale join the in-cluster control plane. A client that could dial the relay directly would skip the adapter and leave the assertions that cover it untested.
 
@@ -81,31 +81,31 @@ The full Layer-3 path is operator-network-specific and not in the script. Adding
 
 ### Harness CrashLoopBackOff
 ```sh
-kubectl logs -n e2e-test hello-world -c harness --previous
+kubectl logs -n tenant-e2e-test hello-world -c harness --previous
 ```
-- Boot failure reading the tool catalog: the harness reads `capability-manifest-hello-world` once at startup. Check `kubectl get configmap -n e2e-test capability-manifest-hello-world` and that it mounts at `/etc/sycophant/capability-manifest/manifest.yaml`.
-- Cannot dial a capability job: the harness dials each tool/inference pod directly over the headless `capability-hello-world` Service. Check `kubectl get svc -n e2e-test capability-hello-world` and `kubectl get endpoints -n e2e-test`.
+- Boot failure reading the tool catalog: the harness reads its `capability-manifest-hello-world-<hash>` ConfigMap once at startup. Check `kubectl get configmap -n tenant-e2e-test -l sycophant.md/type=capability-manifest` and that it mounts at `/etc/sycophant/capability-manifest/manifest.yaml`.
+- Cannot dial a capability job: the harness dials each tool/inference pod directly over the headless `capability-hello-world` Service. Check `kubectl get svc -n tenant-e2e-test capability-hello-world` and `kubectl get endpoints -n tenant-e2e-test`.
 
 ### Capability job not starting
 ```sh
-kubectl get jobs -n e2e-test
-kubectl logs -n e2e-test job/<job-name>
+kubectl get jobs -n tenant-e2e-test
+kubectl logs -n tenant-e2e-test job/<job-name>
 ```
-- No Job created: the `harness-hello-world` Role must hold `jobs:create`. Check `kubectl auth can-i create jobs -n e2e-test --as=system:serviceaccount:e2e-test:harness-hello-world`.
-- Job pod pending on gVisor: the capability-job VAP requires the workspace label + `runtimeClassName: gvisor`. Check `kubectl describe pod -n e2e-test <pod>` for an admission denial.
+- No Job created: the `harness-hello-world` Role must hold `jobs:create`. Check `kubectl auth can-i create jobs -n tenant-e2e-test --as=system:serviceaccount:tenant-e2e-test:harness-hello-world`.
+- Job pod pending on gVisor: the capability-job VAP requires the workspace label + `runtimeClassName: gvisor`. Check `kubectl describe pod -n tenant-e2e-test <pod>` for an admission denial.
 
 ### Conversation corruption (API error 400: tool_use without tool_result)
 Can surface if a tool call is mid-flight when the harness crashes — orphaned `tool_use` blocks in the conversation log break subsequent turns:
 ```sh
-kubectl delete pvc --all -n e2e-test
-kubectl rollout restart deployment hello-world -n e2e-test
+kubectl delete pvc --all -n tenant-e2e-test
+kubectl rollout restart deployment hello-world -n tenant-e2e-test
 ```
 
 ### Turn stuck (no response after "received inbound message")
 The remote model call runs in an `inference-runtime` Job the harness creates and dials. Check the harness trace and the inference Job:
 ```sh
-kubectl logs -n e2e-test hello-world -c harness
-kubectl get jobs -n e2e-test
+kubectl logs -n tenant-e2e-test hello-world -c harness
+kubectl get jobs -n tenant-e2e-test
 ```
 - No inference Job created: the harness could not create the Job. Check `harness-hello-world` `jobs:create` RBAC and the harness logs.
 - Inference Job running but no events: the Job dialed its provider but the API call is slow or failing. Check the Job's logs and its `inference-egress-<model-key>` CiliumNetworkPolicy.
@@ -114,25 +114,25 @@ kubectl get jobs -n e2e-test
 Containerd caches images by `name:tag`, not by content. After `docker build -t foo:local .` and a re-import, running pods may keep using the OLD image (visible by mismatched `imageID` in `kubectl describe pod` vs the freshly-built `docker images foo:local`). k3d v5.8.3 doesn't have a `--replace`-style flag, so drop the image from the node's containerd store before re-importing:
 
 ```sh
-docker exec k3d-sycophant-dev-server-0 \
+docker exec k3d-sycophant-server-0 \
   ctr -n k8s.io image rm docker.io/library/<image>:local
-k3d image import <image>:local --cluster sycophant-dev
-kubectl rollout restart deployment/<deploy-using-the-image> -n e2e-test
+k3d image import <image>:local --cluster sycophant
+kubectl rollout restart deployment/<deploy-using-the-image> -n tenant-e2e-test
 ```
 
 For harness pod refresh, restart the Deployment:
 
 ```sh
-kubectl rollout restart -n e2e-test deployment/hello-world
-kubectl rollout status -n e2e-test deployment/hello-world --timeout=60s
+kubectl rollout restart -n tenant-e2e-test deployment/hello-world
+kubectl rollout status -n tenant-e2e-test deployment/hello-world --timeout=60s
 ```
 
-Note: the harness reads its tool catalog once at boot, so tool or grant changes propagate via `helm upgrade` (the harness deployment has `checksum/toolsets`, `checksum/manifest`, and `checksum/scheduling` annotations that change with the ConfigMaps, triggering a rolling restart automatically).
+Note: the harness reads its model catalog and capability manifest once at boot, so changes propagate by re-running `syco tenant up` on the edited values file. The capability manifest ConfigMap name carries its hash, so a manifest change rolls the pod automatically. A model or scheduling change does not; restart the workspace after it with `kubectl rollout restart deployment/<workspace> -n <tenant ns>`. The toolset map is watched, not read at boot.
 
 ### Wipe conversation logs between runs
 The harness persists conversation history to its own `conversation-data-<workspace>` PVC (mounted at `/var/lib/harness/conversations`). Stale entries from a previous run can mislead the LLM on subsequent turns. Delete the PVC and restart the harness so it starts from an empty log:
 
 ```sh
-kubectl delete pvc conversation-data-hello-world -n e2e-test
-kubectl rollout restart deployment hello-world -n e2e-test
+kubectl delete pvc conversation-data-hello-world -n tenant-e2e-test
+kubectl rollout restart deployment hello-world -n tenant-e2e-test
 ```

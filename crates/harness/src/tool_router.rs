@@ -1243,7 +1243,7 @@ mod tests {
             "http://harness:9090".to_string(),
             WS.to_string(),
             SchedulingConfig::default(),
-            ToolsetConfig::from_map(toolsets),
+            Arc::new(tokio::sync::RwLock::new(ToolsetConfig::from_map(toolsets))),
         )
     }
 
@@ -1761,7 +1761,7 @@ mod tests {
             "http://harness:9090".to_string(),
             WS.to_string(),
             SchedulingConfig::default(),
-            ToolsetConfig::from_map(toolsets),
+            Arc::new(tokio::sync::RwLock::new(ToolsetConfig::from_map(toolsets))),
         );
         // Seed a warm (keepalive) active Job so begin_call attaches to it rather
         // than trying to spawn — no kube client is present.

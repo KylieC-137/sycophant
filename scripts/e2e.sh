@@ -20,13 +20,20 @@
 # Required env:
 #   OPENROUTER_API_KEY
 # Optional env:
-#   CLUSTER_NAME (default sycophant), NAMESPACE (default e2e-test),
-#   ARCH (default aarch64), DOCKER_ARCH (default arm64).
+#   CLUSTER_NAME (default sycophant), NAMESPACE (default tenant-e2e-test; the
+#   markers compose tenant-<token>, so it must keep the tenant- prefix),
+#   ARCH (default aarch64), DOCKER_ARCH (default arm64), and the SYCO_* inputs
+#   `syco setup` and the tenant commands read (see "syco inputs" below). syco's
+#   config root is SYCO_CONFIG_DIR (default tmp/syco-config), never ~/.config.
+#
+# The bootstrap is `syco setup`, the main tenant is provisioned with `syco
+# tenant up`, and the lifecycle proof drives `syco tenant up/down/remove`. A cluster from before that switch has no Dex operator login:
+# run with --clean once.
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 CLUSTER_NAME="${CLUSTER_NAME:-sycophant}"
-NAMESPACE="${NAMESPACE:-e2e-test}"
+NAMESPACE="${NAMESPACE:-tenant-e2e-test}"
 ARCH="${ARCH:-aarch64}"
 DOCKER_ARCH="${DOCKER_ARCH:-arm64}"
 RUST_TARGET="${ARCH}-unknown-linux-musl"
@@ -57,17 +64,9 @@ HEADSCALE_USER="e2e"
 # adapter's MagicDNS hostname. Nothing dials the relay's app port directly.
 TAILNET_RELAY_ADDR="relay:9090"
 ADAPTER_AUTHKEY_SECRET="relay-tsnet-authkey"
-# Object-storage instructions delivery. The object store is one shared
-# cluster component in the operator-owned system namespace, installed at
-# bootstrap (install_object_store) alongside cilium/kyverno/gvisor; its admin
-# credential never leaves that namespace. The harness init container syncs its
-# <ns>/<workspace> prefix with a read-only, prefix-scoped credential the e2e
-# mints. The e2e host plays the operator provisioner: it reads the store's admin
-# credential from the system-namespace Secret and reaches the store over
-# `kubectl port-forward` (API-server-mediated, off the pod network). The SaaS
-# provisioner delivers instructions as a ConfigMap and does not deploy an object
-# store; this
-# e2e exercises the object-store delivery path.
+# Object-storage instructions delivery. The store lives in the system namespace
+# and its operator credential never leaves it; the e2e host reaches it over
+# `kubectl port-forward` and mints each harness a read-only, prefix-scoped one.
 INSTRUCTIONS_BUCKET="sycophant-instructions"
 INSTRUCTIONS_CREDENTIAL_NAME="instructions-reader"
 INSTRUCTIONS_READ_ACCESS="e2e-instructions-reader"
@@ -75,18 +74,17 @@ INSTRUCTIONS_READ_SECRET="e2e-instructions-reader-secret"
 S3_PF_PORT=9900
 # SeaweedFS server image (Alpine, multi-arch), pinned by index digest to match
 # the chart default. SEAWEEDFS_IMAGE is imported + installed by
-# install_object_store. MC_IMAGE (the harness sync client) is a tenant workload
-# image still loaded in step_1_build; SeaweedFS ships no mc, so the harness sync
-# client swap is a later change. Both are multi-arch indexes: export one arch to
-# a tar to import.
+# install_object_store. RCLONE_IMAGE (the harness sync client, a neutral S3
+# client run against the SeaweedFS s3 gateway) is a tenant workload image loaded
+# in step_1_build. Both are multi-arch indexes: export one arch to a tar to
+# import.
 SEAWEEDFS_IMAGE="chrislusf/seaweedfs@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882"
-MC_IMAGE="quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727"
+RCLONE_IMAGE="rclone/rclone:1.75.1"
 # Marker the macOS tailnet join writes immediately before its sudo prompt and
 # removes once the join returns. An external monitor watches this path to alert
 # the operator that a password entry is imminent (the run is otherwise headless
 # until Step 5).
 SUDO_PENDING_SENTINEL="/tmp/sycophant-e2e-sudo-pending"
-K3D_NODE="k3d-${CLUSTER_NAME}-server-0"
 # The in-cluster inference model key. Its `model` entry points baseUrl at the
 # inference-<key> Service, and the chart renders the llama.cpp Deployment, its
 # ingress fence (CNP inference-<key>), and the model's in-cluster egress hole
@@ -143,6 +141,15 @@ wait_for() {
   done
 }
 
+# Release $1 has a deployed record in namespace $2. The marker installers keep
+# helm's release records in ConfigMaps labelled owner=helm, name, and status, so
+# this reads the record without running helm against the tenant.
+release_deployed() {
+  local out
+  out="$(kubectl get configmap -n "$2" -l "owner=helm,name=$1,status=deployed" -o name 2>/dev/null)" || true
+  [ -n "$out" ]
+}
+
 # ---- background cleanup (port-forwards, flutter run) ----
 declare -a CLEANUP_PIDS=()
 # Set once the headscale forward is up. The cluster outlives the script but
@@ -166,65 +173,25 @@ trap cleanup EXIT
 # cargo test binaries, abandoned kubectl port-forwards, respawn loops).
 "$REPO_ROOT/scripts/kill-orphans.sh"
 
-# Generate the apiserver's OIDC trust material before the cluster boots: a
-# self-signed serving cert (its own CA) whose SAN is the node loopback, later
-# handed to the bundled Dex as its TLS listener, and the
-# AuthenticationConfiguration the apiserver mounts at start. The apiserver
-# parses the config file at boot but fetches JWKS lazily, so Dex can come up
-# later. Rendered from the same chart and values as the cluster install, so the
-# mounted config and the chart-rendered ConfigMap agree on issuer, audience,
-# CA, and prefix. Dex signs the tokens with its own key, so no signing key is
-# generated here.
-gen_apiserver_oidc_trust() {
+# Generate the second, non-Dex JWT issuer the apiserver trusts beside the Dex
+# issuer `syco setup` renders, so the lifecycle proof can admit a marker written
+# by an identity Dex never signed. Generates the issuer's self-signed TLS cert
+# (the CA the apiserver trusts when it fetches the issuer's JWKS) and an RSA
+# signing keypair (its public half the runtime fixture publishes, its private
+# half mints the caller token offline), and writes the jwt: list entry `syco
+# setup` appends to its rendered auth config before the node boots
+# (SYCO_AUTH_CONFIG_APPEND). Its username prefix matches the Dex issuer's, so
+# its tokens land in the trusted subject namespace.
+gen_second_issuer_trust() {
   local d="$APISERVER_OIDC_DIR"
   rm -rf "$d"; mkdir -p "$d"
-  cat > "$d/san.cnf" <<'EOF'
-[req]
-distinguished_name = dn
-x509_extensions = v3
-prompt = no
-[dn]
-CN = 127.0.0.1
-[v3]
-subjectAltName = IP:127.0.0.1
-basicConstraints = CA:TRUE
-EOF
   openssl req -x509 -newkey rsa:2048 -nodes \
-    -keyout "$d/tls.key" -out "$d/tls.crt" -days 7 \
-    -config "$d/san.cnf" -extensions v3 >/dev/null 2>&1
-  helm template sycophant "$REPO_ROOT/charts/sycophant-cluster" \
-    --api-versions policies.kyverno.io/v1/ValidatingPolicy \
-    --set-string "idp.issuer=$APISERVER_OIDC_ISSUER" \
-    --set-string "idp.audience=$APISERVER_OIDC_AUDIENCE" \
-    --set-file "idp.certificateAuthority=$d/tls.crt" \
-    --show-only templates/apiserver-auth-config.yaml \
-    | kubectl create --dry-run=client -f - -o jsonpath='{.data.auth-config\.yaml}' \
-    > "$d/auth-config.yaml"
-  [ -s "$d/auth-config.yaml" ] || { warn "apiserver auth config render is empty"; exit 1; }
-  gen_second_issuer_trust "$d"
-}
-
-# Append a second, non-Dex JWT issuer to the rendered apiserver auth-config so
-# the lifecycle proof can admit a marker written by an identity Dex never
-# signed. The chart's single-issuer production render is untouched: this edits
-# only the e2e's own boot copy of the file. Generates the issuer's self-signed
-# TLS cert (the CA the apiserver trusts when it fetches the issuer's JWKS) and an
-# RSA signing keypair (its public half the runtime fixture publishes, its private
-# half mints the caller token offline), then appends the issuer as a second jwt:
-# list entry whose username prefix matches the Dex issuer's, so its tokens land
-# in the trusted subject namespace.
-gen_second_issuer_trust() {
-  local d="$1"
-  openssl req -x509 -newkey rsa:2048 -nodes \
-    -keyout "$d/oidc2-tls.key" -out "$d/oidc2-tls.crt" -days 7 \
+    -keyout "$d/oidc2-tls.key" -out "$d/oidc2-tls.crt" -days 90 \
     -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1" >/dev/null 2>&1
   openssl genrsa -out "$d/oidc2-sign.key" 2048 >/dev/null 2>&1
   openssl rsa -in "$d/oidc2-sign.key" -pubout -out "$d/oidc2-sign.pub" >/dev/null 2>&1
 
-  # A blank line first, so the append starts a fresh jwt: list item even if the
-  # extracted block scalar did not end on a newline.
   {
-    printf '\n'
     printf '  - issuer:\n'
     printf '      url: "%s"\n' "$APISERVER_OIDC2_ISSUER"
     printf '      audiences:\n'
@@ -238,79 +205,46 @@ gen_second_issuer_trust() {
     printf '    claimValidationRules:\n'
     printf "      - expression: '!claims.sub.startsWith(\"system:\")'\n"
     printf "        message: 'sub must not use the reserved system: prefix'\n"
-  } >> "$d/auth-config.yaml"
+  } > "$SYCO_AUTH_CONFIG_APPEND"
 }
 
 # ---- step 0: bootstrap ----
+# `syco setup` does the operator's bootstrap: k3d cluster, gVisor, Cilium,
+# CoreDNS registry wiring, Kyverno, the cluster chart, and Dex with the operator
+# as its one password user. The SYCO_* inputs set above add e2e's audit policy,
+# relay port, second issuer, Kyverno and reap tuning, and skip its image build
+# (step 1 builds the full e2e set).
 step_0_bootstrap() {
-  step "Step 0: Bootstrap cluster"
+  step "Step 0: Bootstrap cluster (syco setup)"
 
-  # The apiserver reads its OIDC trust config at process start, so render and
-  # persist it before the node boots.
-  gen_apiserver_oidc_trust
+  # The apiserver reads its OIDC trust config at process start, so the second
+  # issuer is generated before the node boots.
+  gen_second_issuer_trust
 
   k3d cluster delete "$CLUSTER_NAME" 2>/dev/null || true
+  rm -f "$SYCO_PASSWORD_FILE"
+  syco_credentials
 
-  k3d cluster create "$CLUSTER_NAME" \
-    --k3s-arg "--flannel-backend=none@server:*" \
-    --k3s-arg "--disable-network-policy@server:*" \
-    --k3s-arg "--disable=traefik@server:*" \
-    --k3s-arg "--disable=servicelb@server:*" \
-    --k3s-arg "--disable=metrics-server@server:*" \
-    --k3s-arg "--disable=helm-controller@server:*" \
-    --k3s-arg "--secrets-encryption@server:*" \
-    --k3s-arg "--kube-apiserver-arg=audit-policy-file=/etc/rancher/k3s/audit-policy.yaml@server:*" \
-    --k3s-arg "--kube-apiserver-arg=audit-log-path=/var/log/k3s-audit.log@server:*" \
-    --k3s-arg "--kube-apiserver-arg=audit-log-maxage=7@server:*" \
-    --k3s-arg "--kube-apiserver-arg=authentication-config=$APISERVER_OIDC_DIR/auth-config.yaml@server:*" \
-    -v "$REPO_ROOT/tmp:$REPO_ROOT/tmp@all" \
-    -v "$REPO_ROOT/docs/e2e/audit-policy.yaml:/etc/rancher/k3s/audit-policy.yaml@server:0" \
-    --registry-create "sycophant-registry:0.0.0.0:5555" \
-    --port "9090:9090@loadbalancer"
-  ok "k3d cluster created"
-
-  # gVisor must come before Cilium — HUP'ing k3s after Cilium is installed
-  # crashes the cilium-agent (CRI socket disappears mid-restart).
-  install_gvisor
-  install_cilium
-  # Must run after Cilium so CoreDNS pods can actually get IPs (otherwise
-  # the rollout-restart hangs in Pending and times out).
-  patch_coredns_for_registry
+  "$SYCO" setup
+  ok "syco setup: cluster, gVisor, Cilium, Kyverno, cluster chart, Dex"
+  assert_registry_dns
   smoke_gvisor
-  install_kyverno
   install_object_store
 }
 
 # Tool job pods pull their toolset images from the in-cluster
-# `sycophant-registry` container. CoreDNS doesn't know about the
-# `sycophant-registry` container (it's on the k3d Docker network, not in
-# Kubernetes Services), so we patch its NodeHosts to add the entry. Image
-# refs in the toolsets values use `sycophant-registry:5000/...` (in-cluster name +
-# port); without this patch, the hostname is NXDOMAIN and image pulls
-# fail — Step 6 then can't run any toolset tool.
-patch_coredns_for_registry() {
-  step "Step 0.2: CoreDNS NodeHosts for sycophant-registry"
+# `sycophant-registry` container, which `syco setup` maps into CoreDNS
+# NodeHosts. The Corefile reloads NodeHosts on its own (up to ~60s), so gate on
+# the actual resolution from a workload pod, non-fatally: without it the
+# hostname is NXDOMAIN and Step 6 can't run any toolset tool.
+assert_registry_dns() {
+  step "Step 0.2: CoreDNS resolves sycophant-registry"
   local registry_ip
   registry_ip="$(docker inspect sycophant-registry --format '{{ (index .NetworkSettings.Networks "k3d-'"$CLUSTER_NAME"'").IPAddress }}')"
   if [ -z "$registry_ip" ]; then
     warn "could not resolve sycophant-registry IP on k3d-${CLUSTER_NAME} network"
     return 1
   fi
-  local current_hosts
-  current_hosts="$(kubectl get cm coredns -n kube-system -o jsonpath='{.data.NodeHosts}')"
-  if echo "$current_hosts" | grep -q "sycophant-registry"; then
-    ok "CoreDNS NodeHosts already has sycophant-registry"
-    return 0
-  fi
-  kubectl patch cm coredns -n kube-system --type=merge \
-    --patch="{\"data\":{\"NodeHosts\":\"${current_hosts}\n${registry_ip} sycophant-registry\"}}" \
-    >/dev/null
-  # No pod restart: the Corefile mounts NodeHosts via the hosts plugin with
-  # "reload 15s", so CoreDNS re-reads the patched file on its own once the
-  # kubelet syncs the ConfigMap to the mount (up to ~60s). A rollout restart
-  # would gain nothing and would force the fresh pod to re-pull its image, which
-  # turns a transient registry blip into a fatal step. Gate on the actual
-  # resolution instead, non-fatally.
   local dns_deadline=$((SECONDS + 120))
   while (( SECONDS < dns_deadline )); do
     if kubectl run "dns-probe-$$" --rm -i --restart=Never --image=busybox:1.36 \
@@ -321,76 +255,6 @@ patch_coredns_for_registry() {
     sleep 2
   done
   warn "sycophant-registry did not resolve from a workload pod within 120s (continuing; image pulls will retry)"
-}
-
-install_gvisor() {
-  step "Step 0.3: gVisor (runsc) install"
-  # Pinned gVisor release. Bump by hand — release/latest would silently drift
-  # the node runtime.
-  local GVISOR_RELEASE="20260914"
-  local url="https://storage.googleapis.com/gvisor/releases/release/${GVISOR_RELEASE}/${ARCH}"
-  local tmp
-  tmp="$(mktemp -d)"
-  # --retry-all-errors covers a mid-transfer TCP reset (curl error 56), which
-  # plain --retry does not; storage.googleapis.com resets intermittently.
-  local retry='--retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 10'
-  ( cd "$tmp"
-    curl -sSfL $retry -o gvisor.tar.bz2         "$url/gvisor.tar.bz2"
-    curl -sSfL $retry -o gvisor.tar.bz2.sha512  "$url/gvisor.tar.bz2.sha512"
-    sha512sum -c gvisor.tar.bz2.sha512
-    mkdir -p gvisor-extract && tar -xjf gvisor.tar.bz2 -C gvisor-extract
-    chmod +x gvisor-extract/runsc gvisor-extract/containerd-shim-runsc-v1
-    docker exec "$K3D_NODE" mkdir -p /usr/local/bin
-    docker cp gvisor-extract/runsc                    "$K3D_NODE":/usr/local/bin/runsc
-    docker cp gvisor-extract/containerd-shim-runsc-v1 "$K3D_NODE":/usr/local/bin/containerd-shim-runsc-v1
-    docker cp gvisor-extract/gvisor-bin               "$K3D_NODE":/usr/local/bin/gvisor-bin
-  )
-  rm -rf "$tmp"
-
-  docker exec "$K3D_NODE" sh -c 'cat > /var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.tmpl <<TMPL
-{{ template "base" . }}
-
-[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc]
-  runtime_type = "io.containerd.runsc.v1"
-TMPL'
-
-  docker exec "$K3D_NODE" sh -c 'kill -HUP $(pidof k3s)'
-  until kubectl get --raw /healthz 2>/dev/null | grep -q '^ok$'; do sleep 2; done
-
-  helm upgrade --install sycophant-gvisor "$REPO_ROOT/charts/sycophant-gvisor" --wait >/dev/null
-  ok "gVisor + RuntimeClass installed"
-}
-
-install_cilium() {
-  step "Step 0.4: Cilium"
-  local api_host
-  # Index the specific k3d network -- ranging over all networks concatenates
-  # IPs (garbage) when the node is attached to more than one Docker network.
-  api_host="$(docker inspect "$K3D_NODE" -f '{{ (index .NetworkSettings.Networks "k3d-'"$CLUSTER_NAME"'").IPAddress }}')"
-  helm repo add cilium https://helm.cilium.io/ >/dev/null
-  helm repo update >/dev/null
-  # k3d wipes the node image cache on every cluster delete, so the ~240MB Cilium
-  # agent image is re-pulled from quay.io each run; a slow pull (minutes) outlasts
-  # the rollout wait below. Import it from the host Docker cache first (the pull is
-  # a fast no-op once cached, slow only on a cold host) so the install finds it
-  # present by digest and never pulls at run time. The small operator-generic
-  # image is left to pull normally: its multi-arch index references a blob absent
-  # from a single-arch host pull, which breaks the tar import, and its size makes
-  # a run-time pull cheap.
-  docker pull -q quay.io/cilium/cilium:v1.19.3 >/dev/null
-  local cilium_tar; cilium_tar="$(mktemp -t cilium.XXXXXX).tar"
-  docker image save -o "$cilium_tar" quay.io/cilium/cilium:v1.19.3
-  k3d image import "$cilium_tar" --cluster "$CLUSTER_NAME" >/dev/null
-  rm -f "$cilium_tar"
-  # Same Cilium config as `syco install`; only the API endpoint is dynamic.
-  helm upgrade --install cilium cilium/cilium --version 1.19.3 \
-    --namespace kube-system \
-    -f "$REPO_ROOT/cli/values/cilium.yaml" \
-    --set k8sServiceHost="$api_host" \
-    --set k8sServicePort=6443 >/dev/null
-  kubectl rollout status -n kube-system ds/cilium --timeout=300s >/dev/null
-  kubectl rollout status -n kube-system deployment/cilium-operator --timeout=300s >/dev/null
-  ok "Cilium ready"
 }
 
 smoke_gvisor() {
@@ -411,24 +275,10 @@ smoke_gvisor() {
   kubectl delete pod gvisor-smoke --ignore-not-found --grace-period=0 --force >/dev/null 2>&1 || true
 }
 
-install_kyverno() {
-  step "Step 0.7: Kyverno"
-  helm repo add kyverno https://kyverno.github.io/kyverno/ >/dev/null
-  helm repo update >/dev/null
-  # PolicyException is the operator override path for the capability job gate.
-  # Honor exceptions ONLY in the operator-owned sycophant-system namespace so
-  # tenant workloads can never author a self-exemption that escapes the gate.
-  helm upgrade --install kyverno kyverno/kyverno --version 3.9.1 -n kyverno --create-namespace \
-    --set features.policyExceptions.enabled=true \
-    --set features.policyExceptions.namespace=sycophant-system \
-    --wait >/dev/null
-  ok "Kyverno ready"
-}
-
 # Install the shared object store as a core cluster component (same tier as
-# cilium/kyverno/gvisor), modeled on install_cilium: pull + import the SeaweedFS
-# server image inline (multi-arch index, so export one arch to a tar), then
-# `helm upgrade --install` the chart into the operator-owned system namespace.
+# cilium/kyverno/gvisor): pull + import the SeaweedFS server image inline
+# (multi-arch index, so export one arch to a tar), then `helm upgrade --install`
+# the chart into the operator-owned system namespace.
 # The chart generates the admin credential into that namespace and never copies
 # it to a tenant. Must run after Cilium so the CiliumNetworkPolicy CRD exists
 # and the store pod can get an IP.
@@ -490,6 +340,9 @@ step_1_build() {
 
   docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" images/kubectl/ -t sycophant-kubectl:local >/dev/null
 
+  # provisioner bakes the tenant chart, so its build context is the repo root.
+  docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" -f images/provisioner/Dockerfile "$REPO_ROOT" -t sycophant-provisioner:local >/dev/null
+
   # llama-server is a third-party engine: pulled by digest from trusted upstream,
   # never built here. --platform pins one arch so k3d import gets a single-arch
   # manifest, not a multi-arch index with absent per-platform blobs.
@@ -530,7 +383,7 @@ step_1_build() {
   local img
   for img in inference-runtime:local \
              sycophant-harness:local relay-controller:local \
-             sycophant-kubectl:local \
+             sycophant-kubectl:local sycophant-provisioner:local \
              weights:local; do
     k3d image import "$img" --cluster "$CLUSTER_NAME" >/dev/null
   done
@@ -541,16 +394,17 @@ step_1_build() {
   k3d image import "$llama_tar" --cluster "$CLUSTER_NAME" >/dev/null
   rm -f "$llama_tar"
 
-  # The harness instructions-sync init container's client (mc). A tenant-workload
-  # image pulled from quay.io, not a built artifact. Multi-arch index, so export
-  # one arch to a tar (a plain import saves manifests for absent platforms and
-  # fails). The SeaweedFS server image is handled separately by install_object_store.
-  docker pull -q --platform "linux/${DOCKER_ARCH}" "$MC_IMAGE" >/dev/null
-  docker tag "$MC_IMAGE" mc:local
-  local mc_tar; mc_tar="$(mktemp -t mc.XXXXXX).tar"
-  docker image save --platform "linux/${DOCKER_ARCH}" -o "$mc_tar" mc:local
-  k3d image import "$mc_tar" --cluster "$CLUSTER_NAME" >/dev/null
-  rm -f "$mc_tar"
+  # The harness instructions-sync init container's client (rclone, a neutral S3
+  # client). A tenant-workload image pulled from Docker Hub, not a built artifact.
+  # Multi-arch index, so export one arch to a tar (a plain import saves manifests
+  # for absent platforms and fails). The SeaweedFS server image is handled
+  # separately by install_object_store.
+  docker pull -q --platform "linux/${DOCKER_ARCH}" "$RCLONE_IMAGE" >/dev/null
+  docker tag "$RCLONE_IMAGE" rclone:local
+  local rclone_tar; rclone_tar="$(mktemp -t rclone.XXXXXX).tar"
+  docker image save --platform "linux/${DOCKER_ARCH}" -o "$rclone_tar" rclone:local
+  k3d image import "$rclone_tar" --cluster "$CLUSTER_NAME" >/dev/null
+  rm -f "$rclone_tar"
 
   # Toolset images go through the local registry (sycophant-registry:5000
   # in-cluster) so the tool job pods can pull them. The stdlib toolset rides
@@ -565,24 +419,27 @@ step_1_build() {
 # Upload one workspace's instructions tree to the shared store and mint its read-only,
 # prefix-scoped sync credential: create the bucket, sync the tree with aws-cli,
 # then add a read-only S3 identity scoped to the <ns>/<workspace> prefix through
-# weed shell, and write the access/secret into the tenant's credentialName Secret
-# (plain here; a SealedSecret SaaS-side). The admin credential never leaves the
-# system namespace: it is read from the store's Secret and used only over the
-# port-forward, not the pod network.
-# $1 = local instructions source dir; $2 = workspace name.
+# weed shell, and write the access/secret into the tenant's credentialName Secret.
+# $1 = workspace name; $2 = target namespace (default $NAMESPACE). The tree is
+# the simple example with `model:` pinned to the in-cluster inference profile.
 provision_instructions_content() {
-  local instructions_src="$1" workspace="$2"
-  step "Uploading instructions + minting read-only sync credential (${workspace})"
+  local workspace="$1" target_ns="${2:-$NAMESPACE}"
+  step "Uploading instructions + minting read-only sync credential (${workspace} -> ${target_ns})"
 
-  # The provisioner drives the store with the host's aws-cli over a port-forward
-  # for the object upload, and mints the read-only reader through `weed shell`
-  # run inside the store pod (SeaweedFS ships no mc). preflight.sh checks for
-  # aws, but cluster-reuse runs skip preflight, so guard here — otherwise a
-  # missing aws surfaces only as a silent 60s "store API reachable" timeout.
-  command -v aws >/dev/null 2>&1 || {
-    warn "aws-cli not found on host — install it: brew install awscli"
-    exit 1
-  }
+  local instructions_src; instructions_src="$(mktemp -d)"
+  cp "$REPO_ROOT/examples/instructions/simple/AGENTS.md" "$instructions_src/AGENTS.md"
+  cp -r "$REPO_ROOT/examples/instructions/simple/agents" "$instructions_src/agents"
+  sed "s/^model:.*/model: ${INFERENCE_PROFILE}/" "$instructions_src/AGENTS.md" > "$instructions_src/AGENTS.md.tmp" \
+    && mv "$instructions_src/AGENTS.md.tmp" "$instructions_src/AGENTS.md"
+
+  # One reader identity per namespace: s3.configure -apply rewrites the named
+  # identity's actions, so each namespace needs its own name or it clobbers another
+  # tenant's prefix scope. Value is throwaway test creds, keyed by namespace.
+  local read_access="${INSTRUCTIONS_READ_ACCESS}-${target_ns}"
+  local read_secret="${INSTRUCTIONS_READ_SECRET}-${target_ns}"
+
+  # Upload over a port-forward with the host's aws-cli; mint the reader with
+  # `weed shell` inside the store pod (SeaweedFS ships no mc).
 
   # The admin credential lives only in the system namespace; read it from the
   # store's Secret rather than holding it in this script.
@@ -598,14 +455,15 @@ provision_instructions_content() {
   wait_for "store API reachable" 60 \
     "AWS_ACCESS_KEY_ID='$admin_access' AWS_SECRET_ACCESS_KEY='$admin_secret' aws s3 ls --endpoint-url '$url' >/dev/null 2>&1"
 
-  local prefix="${NAMESPACE}/${workspace}"
+  local prefix="${target_ns}/${workspace}"
   AWS_ACCESS_KEY_ID="$admin_access" AWS_SECRET_ACCESS_KEY="$admin_secret" \
     aws s3 mb "s3://${INSTRUCTIONS_BUCKET}" --endpoint-url "$url" >/dev/null 2>&1 || true
   AWS_ACCESS_KEY_ID="$admin_access" AWS_SECRET_ACCESS_KEY="$admin_secret" \
     aws s3 sync "$instructions_src" "s3://${INSTRUCTIONS_BUCKET}/${prefix}" --endpoint-url "$url" --delete >/dev/null
+  rm -rf "$instructions_src"
 
   # Mint the read-only, prefix-scoped reader with weed shell inside the store
-  # pod: a static S3 identity scoped to this <ns>/<workspace> prefix. mc mirror
+  # pod: a static S3 identity scoped to this <ns>/<workspace> prefix. rclone sync
   # first stats the bare prefix key (a HeadObject on <prefix> with no trailing
   # slash), then lists, then downloads, so the reader needs List and Read that
   # cover the bare key too (SeaweedFS Read does not imply ListBucket). Both
@@ -621,57 +479,93 @@ provision_instructions_content() {
   # Secret shape (access-key / secret-key) stays unchanged so the tenant Secret
   # contract is stable.
   kubectl exec -i -n sycophant-system deploy/seaweedfs -- weed shell >/dev/null <<EOF
-s3.configure -user ${INSTRUCTIONS_READ_ACCESS} -access_key ${INSTRUCTIONS_READ_ACCESS} -secret_key ${INSTRUCTIONS_READ_SECRET} -actions Read:${INSTRUCTIONS_BUCKET}/${prefix}*,List:${INSTRUCTIONS_BUCKET}/${prefix}* -apply
+s3.configure -user ${read_access} -access_key ${read_access} -secret_key ${read_secret} -actions Read:${INSTRUCTIONS_BUCKET}/${prefix}*,List:${INSTRUCTIONS_BUCKET}/${prefix}* -apply
 EOF
 
-  kubectl create secret generic "$INSTRUCTIONS_CREDENTIAL_NAME" -n "$NAMESPACE" \
-    --from-literal=access-key="$INSTRUCTIONS_READ_ACCESS" \
-    --from-literal=secret-key="$INSTRUCTIONS_READ_SECRET" \
+  kubectl create secret generic "$INSTRUCTIONS_CREDENTIAL_NAME" -n "$target_ns" \
+    --from-literal=access-key="$read_access" \
+    --from-literal=secret-key="$read_secret" \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   ok "Instructions uploaded to ${INSTRUCTIONS_BUCKET}/${prefix}; read credential ${INSTRUCTIONS_CREDENTIAL_NAME} minted"
 }
 
 # ---- step 2: configure ----
+# Author the tenant's values file where `syco tenant up` reads it. The values are
+# docs/e2e/values.yaml plus this run's overrides: the bound user, the local sync
+# image, each toolset's local-registry digest, and the capability manifest.
 step_2_configure() {
-  step "Step 2: Configure namespace, RBAC, instructions, secrets"
+  step "Step 2: Configure tenant values"
 
-  # Stamp the PSA labels at creation so the ns is restricted from birth. The
-  # part-of label (added in step_3, after Kyverno is up) is what the VAP gates
-  # on; a bare ns labelled part-of later would be denied for lacking enforce.
-  kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml \
-    | kubectl label --local -f - -o yaml \
-        pod-security.kubernetes.io/enforce=restricted \
-        pod-security.kubernetes.io/enforce-version=latest \
-        pod-security.kubernetes.io/warn=restricted \
-        pod-security.kubernetes.io/audit=restricted \
-    | kubectl apply -f - >/dev/null
+  # Resolve local-registry digests for toolset images. The host rewrite
+  # (localhost:5555 → sycophant-registry:5000) swaps the docker-push-facing
+  # host for the in-cluster name resolved via the CoreDNS NodeHosts entry
+  # `syco setup` adds; the digest is identical either way.
+  local git_ref ssh_ref stdlib_ref
+  git_ref="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' localhost:5555/toolset-git:latest | grep '^localhost:5555/')"
+  ssh_ref="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' localhost:5555/toolset-ssh-credentials:latest | grep '^localhost:5555/')"
+  stdlib_ref="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' localhost:5555/toolset:latest | grep '^localhost:5555/')"
+  git_ref="${git_ref/localhost:5555/sycophant-registry:5000}"
+  ssh_ref="${ssh_ref/localhost:5555/sycophant-registry:5000}"
+  stdlib_ref="${stdlib_ref/localhost:5555/sycophant-registry:5000}"
 
-  # TokenReview CRBs + the pod VAP binding are minted by Kyverno's
-  # tenant-rolebinding-generator once the ns carries part-of=sycophant-tenant
-  # (labelled in step_3, after the cluster chart installs the generator).
+  # Capability manifest: the chart no longer renders tool schema from
+  # values. The operator reads each BOUND toolset image's baked schema with
+  # `syco toolset manifest`, annotates the operator-supplied grants, and hands
+  # the merged result to the chart verbatim; the chart copies it into the
+  # workspace ConfigMap the harness mounts. The reader runs host-side
+  # (docker create/cp), so it reads the local `:local` image tags rather than the
+  # in-cluster refs above; the baked schema is identical across both. A bound
+  # image lacking baked schema makes the reader exit non-zero (pipefail aborts
+  # the run) — the deploy fails closed rather than shipping a partial manifest.
+  cargo build --release -p syco >/dev/null
+  local work ws_grants manifest_file
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+  ws_grants="$work/grants.yaml"
+  cat >"$ws_grants" <<'EOF'
+demo-key:
+  secret: demo-ssh-key
+  path: /home/agent/.ssh/id_ed25519
+EOF
+  manifest_file="$work/manifest.yaml"
+  {
+    echo "tools:"
+    "$SYCO" toolset manifest toolset:local --toolset stdlib | tail -n +2
+    "$SYCO" toolset manifest toolset-git:local --toolset workspace-ro | tail -n +2
+    "$SYCO" toolset manifest toolset-ssh-credentials:local --toolset ssh-credentials --grants "$ws_grants" | tail -n +2
+  } >"$manifest_file"
+  ok "Capability manifest built from baked image schema ($(grep -c '^- name:' "$manifest_file") tools)"
 
-  # Instructions content is delivered from the shared object store: the
-  # harness init container syncs its <ns>/<workspace> prefix from the store in
-  # the system namespace with a read-only credential, into an emptyDir mounted
-  # read-only at /etc/instructions/hello-world. Build the workspace's instructions tree here
-  # (model pinned to the in-cluster inference profile — the harness reads
-  # `model:` frontmatter fresh each turn, and the shared example defaults to an
-  # external provider), upload the tree, and mint the read credential. The store
-  # itself is already up (install_object_store at bootstrap).
-  local instructions_src; instructions_src="$(mktemp -d)"
-  cp "$REPO_ROOT/examples/instructions/simple/AGENTS.md" "$instructions_src/AGENTS.md"
-  cp -r "$REPO_ROOT/examples/instructions/simple/agents" "$instructions_src/agents"
-  sed "s/^model:.*/model: ${INFERENCE_PROFILE}/" "$instructions_src/AGENTS.md" > "$instructions_src/AGENTS.md.tmp" \
-    && mv "$instructions_src/AGENTS.md.tmp" "$instructions_src/AGENTS.md"
+  # Merge with helm's own -f/--set/--set-file semantics by rendering the supplied
+  # values through a scratch chart. Nothing touches the cluster.
+  mkdir -p "$work/merge/templates"
+  printf 'apiVersion: v2\nname: e2e-values\nversion: 0.0.0\n' > "$work/merge/Chart.yaml"
+  printf '{{ toYaml .Values }}\n' > "$work/merge/templates/values.yaml"
+  mkdir -p "$(dirname "$TENANT_VALUES_FILE")"
+  helm template e2e-values "$work/merge" \
+    -f "$REPO_ROOT/docs/e2e/values.yaml" \
+    --set "users[0]=${APISERVER_OIDC_ISSUER}#${TENANT_A_USER_SUB}" \
+    --set-string "harness.instructions.syncImage=rclone:local" \
+    --set-string "toolsets.stdlib.image=${stdlib_ref}" \
+    --set-string "toolsets.workspace-ro.image=${git_ref}" \
+    --set-string "toolsets.ssh-credentials.image=${ssh_ref}" \
+    --set-file "workspaces.hello-world.capabilityManifest=${manifest_file}" \
+    > "$TENANT_VALUES_FILE"
+  ok "Tenant values written to ${TENANT_VALUES_FILE} (client: ${CLIENT_NAME})"
+}
 
-  provision_instructions_content "$instructions_src" hello-world
-  rm -rf "$instructions_src"
+# Seed what the tenant reads but no marker installs: the instructions tree and
+# its read credential, the vendor model key, and the ssh-credentials fixtures.
+seed_tenant() {
+  # The harness init container syncs its <ns>/<workspace> instructions prefix
+  # from the object store with a read-only credential.
+  provision_instructions_content hello-world
 
   kubectl create secret generic sycophant-llm-openrouter -n "$NAMESPACE" \
     --from-literal=sycophant-llm-openrouter="$OPENROUTER_API_KEY" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
   kubectl apply -f "$REPO_ROOT/examples/toolsets/ssh-credentials/fixtures/" -n "$NAMESPACE" >/dev/null
-  ok "Namespace, RBAC, instructions, secrets, toolset fixtures applied"
+  ok "Instructions, secrets, toolset fixtures applied"
 }
 
 # ---- step 3: deploy ----
@@ -691,35 +585,55 @@ step_3_deploy() {
     warn "cluster release 'sycophant' wedged (pending/failed) — uninstalling before reinstall"
     helm uninstall sycophant -n sycophant-system --wait --timeout=2m >/dev/null 2>&1 || true
   fi
-  # The cluster chart always renders the StructuredAuthenticationConfiguration
-  # ConfigMap from the same issuer, audience, CA, and prefix the apiserver was
-  # booted with (gen_apiserver_oidc_trust), so chart render and live apiserver
-  # config agree. The apiserver already reads its copy from the boot mount; this
-  # ConfigMap is the chart-managed record of the same trust.
+  # `syco setup` installed the cluster chart on a fresh cluster; a reuse run
+  # re-applies this checkout's chart with the same Dex trust (issuer, audience,
+  # and the CA setup generated) and e2e reap tuning, so chart render and live
+  # apiserver config agree.
   helm upgrade --install sycophant "$REPO_ROOT/charts/sycophant-cluster/" \
     -n sycophant-system \
     --set-string "idp.issuer=$APISERVER_OIDC_ISSUER" \
     --set-string "idp.audience=$APISERVER_OIDC_AUDIENCE" \
-    --set-file "idp.certificateAuthority=$APISERVER_OIDC_DIR/tls.crt" \
+    --set-file "idp.certificateAuthority=$SYCO_DEX_CA" \
+    -f "$SYCO_CLUSTER_VALUES" \
     --wait >/dev/null
   ok "Cluster chart installed"
 
-  # Labelling the ns triggers the (label-matched) tenant-rolebinding-generator,
-  # which mints the per-tenant TokenReview CRB, the pod VAP binding, and the
-  # tenant-deployer RoleBinding. Kyverno generate is async, so wait for the
-  # wiring before the controllers need it.
-  kubectl label namespace "$NAMESPACE" app.kubernetes.io/part-of=sycophant-tenant --overwrite >/dev/null
+  # A killed prior run (e.g. an apiserver timeout mid-install) can leave a tenant
+  # release wedged in a pending-*/failed state, which blocks the next install
+  # with "another operation in progress". An e2e tenant holds no state worth
+  # preserving, so drop the non-deployed records the installers keep in
+  # ConfigMaps; the next install proceeds from the last deployed one.
+  if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
+    kubectl delete configmap -n "$NAMESPACE" \
+      -l 'owner=helm,status in (pending-install,pending-upgrade,pending-rollback,failed)' \
+      --ignore-not-found >/dev/null
+  fi
 
-  local crb
-  for crb in relay; do
-    wait_for "${NAMESPACE}-${crb}-tokenreview CRB" 120 \
-      "kubectl get clusterrolebinding ${NAMESPACE}-${crb}-tokenreview >/dev/null 2>&1"
-  done
+  # The operator's path: `syco tenant up` writes the tenant marker, then one
+  # workspace, user, and toolset marker each, under the operator's Dex login,
+  # and waits on every installer Job. The base install's install-wait hook gates
+  # on the app adapter, which needs a pre-auth key minted from the tenant's own
+  # headscale, so the provision runs in the background while this step seeds the
+  # namespace the reactor generates and mints the key.
+  "$SYCO" tenant up --ns "$NAMESPACE" --capacity "$TENANT_CAPACITY" &
+  local up_pid=$!
+  CLEANUP_PIDS+=("$up_pid")
+
+  wait_for "tenant namespace ${NAMESPACE} generated" 120 \
+    "kubectl get namespace '$NAMESPACE' >/dev/null 2>&1"
+  kubectl get namespace "$NAMESPACE" \
+    -o jsonpath='{.metadata.labels.app\.kubernetes\.io/part-of}' 2>/dev/null | grep -qx sycophant-tenant \
+    || { warn "generated namespace ${NAMESPACE} lacks the part-of=sycophant-tenant label"; exit 1; }
+  seed_tenant
+
+  # The part-of label the reactor stamps triggers the tenant-rolebinding-generator,
+  # which mints the per-tenant TokenReview CRB and the pod VAP binding. Kyverno
+  # generate is async, so wait for the wiring before the controllers need it.
+  wait_for "${NAMESPACE}-relay-tokenreview CRB" 120 \
+    "kubectl get clusterrolebinding ${NAMESPACE}-relay-tokenreview >/dev/null 2>&1"
   wait_for "${NAMESPACE}-sycophant-pod-binding VAP binding" 120 \
     "kubectl get validatingadmissionpolicybinding ${NAMESPACE}-sycophant-pod-binding >/dev/null 2>&1"
-  wait_for "tenant-deployer RoleBinding" 120 \
-    "kubectl get rolebinding tenant-deployer -n $NAMESPACE >/dev/null 2>&1"
-  ok "Kyverno minted TokenReview CRB + pod VAP binding + deployer RoleBinding (label-triggered)"
+  ok "Kyverno minted TokenReview CRB + pod VAP binding (label-triggered)"
 
   # The pod VAP is now bound to this ns — assert it actually enforces. The
   # binding object existing does not mean the apiserver enforces it yet: there
@@ -738,7 +652,7 @@ metadata:
   name: vap-probe
   labels:
     app.kubernetes.io/part-of: sycophant
-    app.kubernetes.io/component: relay-ctrl
+    app.kubernetes.io/component: relay-controller
 spec:
   automountServiceAccountToken: true
   securityContext:
@@ -766,84 +680,19 @@ POD
     sleep 2
   done
 
-  # Resolve local-registry digests for toolset images. The host rewrite
-  # (localhost:5555 → sycophant-registry:5000) swaps the docker-push-facing
-  # host for the in-cluster name resolved via the CoreDNS NodeHosts entry
-  # added in patch_coredns_for_registry; the digest is identical either way.
-  local git_ref ssh_ref stdlib_ref
-  git_ref="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' localhost:5555/toolset-git:latest | grep '^localhost:5555/')"
-  ssh_ref="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' localhost:5555/toolset-ssh-credentials:latest | grep '^localhost:5555/')"
-  stdlib_ref="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' localhost:5555/toolset:latest | grep '^localhost:5555/')"
-  git_ref="${git_ref/localhost:5555/sycophant-registry:5000}"
-  ssh_ref="${ssh_ref/localhost:5555/sycophant-registry:5000}"
-  stdlib_ref="${stdlib_ref/localhost:5555/sycophant-registry:5000}"
-
-  # Capability manifest: the chart no longer renders tool schema from
-  # values. The operator reads each BOUND toolset image's baked schema with
-  # `syco toolset manifest`, annotates the operator-supplied grants, and hands
-  # the merged result to the chart verbatim via --set-file; the chart copies it
-  # into the workspace ConfigMap the harness mounts. The reader runs host-side
-  # (docker create/cp), so it reads the local `:local` image tags rather than the
-  # in-cluster refs above; the baked schema is identical across both. A bound
-  # image lacking baked schema makes the reader exit non-zero (pipefail aborts
-  # the run) — the deploy fails closed rather than shipping a partial manifest.
-  cargo build --release -p syco >/dev/null
-  local syco="$REPO_ROOT/target/release/syco"
-  local ws_grants manifest_file
-  ws_grants="$(mktemp)"
-  cat >"$ws_grants" <<'EOF'
-demo-key:
-  secret: demo-ssh-key
-  path: /home/agent/.ssh/id_ed25519
-EOF
-  manifest_file="$(mktemp)"
-  {
-    echo "tools:"
-    "$syco" toolset manifest toolset:local --toolset stdlib | tail -n +2
-    "$syco" toolset manifest toolset-git:local --toolset workspace-ro | tail -n +2
-    "$syco" toolset manifest toolset-ssh-credentials:local --toolset ssh-credentials --grants "$ws_grants" | tail -n +2
-  } >"$manifest_file"
-  ok "Capability manifest built from baked image schema ($(grep -c '^- name:' "$manifest_file") tools)"
-
   # Instructions delivery is object-storage-driven — no Instructions CR. The harness init
   # container syncs its <ns>/<workspace> prefix from the shared store in the
-  # system namespace (populated in step 2) into an emptyDir it mounts read-only.
+  # system namespace (seeded above) into an emptyDir it mounts read-only.
 
-  # Readiness is gated by the install-wait post-install hook (helm waits for
-  # hooks regardless of --wait), so native --wait is omitted here.
-
-  # A killed prior run (e.g. an apiserver timeout mid-install) can leave this
-  # release wedged in a pending-*/failed state, which blocks the next install
-  # with "another operation in progress". An e2e tenant holds no state worth
-  # preserving, so clear a non-deployed release before reinstalling.
-  if helm list -n "$NAMESPACE" --pending -q 2>/dev/null | grep -qx "$NAMESPACE" \
-     || helm list -n "$NAMESPACE" --failed -q 2>/dev/null | grep -qx "$NAMESPACE"; then
-    warn "tenant release '$NAMESPACE' wedged (pending/failed) — uninstalling before reinstall"
-    helm uninstall "$NAMESPACE" -n "$NAMESPACE" --wait --timeout=2m >/dev/null 2>&1 || true
-  fi
-
-  # Two-phase: install-wait gates adapter-app, which needs the authkey minted
-  # from in-release headscale. --no-hooks phase 1 brings headscale up, then the
-  # key is minted, then phase 2 runs install-wait with the secret in place.
-  tenant_install() {
-    helm upgrade --install "$NAMESPACE" "$REPO_ROOT/charts/sycophant-tenant/" \
-      -n "$NAMESPACE" \
-      -f "$REPO_ROOT/docs/e2e/values.yaml" \
-      --set "users[0]=${APISERVER_OIDC_ISSUER}#${TENANT_A_USER_SUB}" \
-      --set-string "harness.instructions.syncImage=mc:local" \
-      --set-string "toolsets.stdlib.image=${stdlib_ref}" \
-      --set-string "toolsets.workspace-ro.image=${git_ref}" \
-      --set-string "toolsets.ssh-credentials.image=${ssh_ref}" \
-      --set-file "workspaces.hello-world.capabilityManifest=${manifest_file}" \
-      --timeout=5m "$@" >/dev/null
-  }
-  tenant_install --no-hooks
-  ok "Tenant chart applied without hooks (client: ${CLIENT_NAME})"
-
+  wait_for "headscale Deployment rendered by the base installer" 300 \
+    "kubectl get deploy headscale -n '$NAMESPACE' >/dev/null 2>&1"
   step_3_headscale_authkey
 
-  tenant_install
-  ok "Tenant chart installed with readiness gate (install-wait passed)"
+  wait "$up_pid" || { warn "syco tenant up failed"; exit 1; }
+  ok "syco tenant up: tenant, workspace, user, and toolset markers admitted; each installer Job succeeded (install-wait passed)"
+  wait_for "tenant release ${NAMESPACE} deployed" 120 \
+    "release_deployed '$NAMESPACE' '$NAMESPACE'"
+  ok "tenant release ${NAMESPACE} deployed"
 
   # Grant rows are runtime data, not chart config: the operator writes them
   # into the chart-created `relay-access-grants` ConfigMap. The identity IS the
@@ -963,16 +812,16 @@ step_4_verify() {
     return 1
   fi
 
-  # The stdlib toolset must be in the rendered toolset-config ConfigMap by now.
-  # Toolset pods are spawned lazily on the first CallTool RPC, so zero pods is
+  # The stdlib toolset must have rendered into its own toolset-stdlib ConfigMap by
+  # now. Toolset pods are spawned lazily on the first CallTool RPC, so zero pods is
   # the correct pre-tool-call state. Step 6 verifies the pod appears after the
   # first call and survives subsequent calls (keepalive=true).
-  if ! kubectl get configmap toolset-config -n "$NAMESPACE" \
-       -o jsonpath='{.data.toolsets\.yaml}' 2>/dev/null | grep -q '^stdlib:'; then
-    warn "toolset-config ConfigMap has no 'stdlib' entry — helm render failed"
+  if ! kubectl get configmap toolset-stdlib -n "$NAMESPACE" \
+       -o jsonpath='{.data.toolset\.yaml}' 2>/dev/null | grep -q '^stdlib:'; then
+    warn "toolset-stdlib ConfigMap has no 'stdlib' entry — helm render failed"
     return 1
   fi
-  ok "toolset-config carries the stdlib toolset (keepalive=true, lazy-spawn)"
+  ok "toolset-stdlib carries the stdlib toolset (keepalive=true, lazy-spawn)"
 }
 
 # ---- step 5: flutter ----
@@ -1056,6 +905,7 @@ tailnet_join_macos() {
 
   # Confirm the fresh headscale now sees this Mac online (relay + Mac = 2). `-w`
   # so 'offline' does not match 'online'.
+  # shellcheck disable=SC2016 # single-quoted on purpose: wait_for evals it.
   wait_for "Mac joined the fresh tailnet" 60 \
     '[ "$(kubectl exec -n '"$NAMESPACE"' deploy/headscale -- headscale nodes list 2>/dev/null | grep -cw online)" -ge 2 ]'
   ok "Mac joined the tailnet (re-registered against this run'\''s headscale)"
@@ -1166,11 +1016,8 @@ step_5_flutter() {
 step_6_security() {
   step "Step 6: Security assertions"
 
-  # Wait for the per-workspace stdlib toolset pod (created by the harness
-  # on the first stdlib Bash/ReadFile/WriteFile/ListDirectory call from the
-  # agent). 90s buffer accounts for the known ARM64 gVisor
-  # `epoll_pwait` slow path on first cold start — see vault
-  # `sycophant-kernel-isolation-runtime`.
+  # The harness creates the stdlib toolset pod on the first stdlib call; 90s
+  # covers the ARM64 gVisor cold-start slow path.
   local toolset_selector="app.kubernetes.io/component=capability-job,sycophant.md/workspace=hello-world,sycophant.md/toolset=stdlib"
   local task_pod
   wait_for "stdlib toolset pod for hello-world" 90 \
@@ -1316,13 +1163,17 @@ step_6_security() {
     ok "Credential isolation (no grant credential in a grantless toolset pod)"
   fi
 
-  if kubectl get serviceaccounts -n "$NAMESPACE" -l sycophant.md/type=workspace-sa -o name \
-       | grep -q sa-hello-world; then
-    ok "Workspace ServiceAccounts present"
-  else
-    warn "sa-hello-world ServiceAccount missing"
-    return 1
-  fi
+  # Every workspace-sa form the chart renders for the workspace must exist, not
+  # just one of them.
+  local workspace_sas sa
+  workspace_sas="$(kubectl get serviceaccounts -n "$NAMESPACE" -l sycophant.md/type=workspace-sa -o name)"
+  for sa in harness-hello-world unprivileged-hello-world hello-world-workspace-init; do
+    if ! printf '%s\n' "$workspace_sas" | grep -qx "serviceaccount/${sa}"; then
+      warn "${sa} ServiceAccount missing"
+      return 1
+    fi
+  done
+  ok "Workspace ServiceAccounts present"
 
   # Each substep is an independent security assertion sharing no state. Run
   # them all and fail at the end if any failed, so one failure never aborts the
@@ -1349,7 +1200,7 @@ step_6_security() {
 # let loopback bypass both the tailnet and the CNP.
 step_6_relay_sheds_tsnet() {
   local images
-  images="$(kubectl get deploy relay-ctrl -n "$NAMESPACE" \
+  images="$(kubectl get deploy relay-controller -n "$NAMESPACE" \
     -o jsonpath='{range .spec.template.spec.containers[*]}{.name}={.image}{"\n"}{end}')"
   if printf '%s' "$images" | grep -qi 'tailscale\|tsnet'; then
     warn "relay pod carries a tailscale/tsnet container: $images"
@@ -1377,7 +1228,7 @@ step_6_adapter_isolation() {
 # reach 9092 and the unlabelled one must not.
 step_6_adapter_port_fence() {
   step "Adapter-port fence (9092)"
-  local target="relay-ctrl.${NAMESPACE}.svc.cluster.local"
+  local target="relay-controller.${NAMESPACE}.svc.cluster.local"
 
   adapter_probe() {
     local name="$1" class="$2"
@@ -1573,16 +1424,16 @@ step_6_grant_row_hot_reload() {
   local before after count0 rows0 count1
 
   grants_deliveries() {
-    kubectl logs deploy/relay-ctrl -n "$NAMESPACE" 2>/dev/null \
+    kubectl logs deploy/relay-controller -n "$NAMESPACE" 2>/dev/null \
       | grep -c '"message":"grants delivery applied"'
   }
   grants_last_rows() {
-    kubectl logs deploy/relay-ctrl -n "$NAMESPACE" 2>/dev/null \
+    kubectl logs deploy/relay-controller -n "$NAMESPACE" 2>/dev/null \
       | grep '"message":"grants delivery applied"' | tail -1 \
       | grep -o '"rows":[0-9]*' | cut -d: -f2
   }
 
-  before="$(kubectl get pod -n "$NAMESPACE" -l app.kubernetes.io/component=relay-ctrl \
+  before="$(kubectl get pod -n "$NAMESPACE" -l app.kubernetes.io/component=relay-controller \
     -o jsonpath='{.items[0].metadata.name}')"
   count0="$(grants_deliveries)"
   rows0="$(grants_last_rows)"
@@ -1613,7 +1464,7 @@ step_6_grant_row_hot_reload() {
     return 1
   fi
 
-  after="$(kubectl get pod -n "$NAMESPACE" -l app.kubernetes.io/component=relay-ctrl \
+  after="$(kubectl get pod -n "$NAMESPACE" -l app.kubernetes.io/component=relay-controller \
     -o jsonpath='{.items[0].metadata.name}')"
   if [ "$before" != "$after" ]; then
     warn "relay pod restarted during the hot-reload probe ($before -> $after)"
@@ -1623,9 +1474,9 @@ step_6_grant_row_hot_reload() {
 }
 
 # ---- step 7: syco upgrade via the CLI ----
-# Exercises the operator upgrade path — the earlier steps deploy with raw helm,
-# so this is the only coverage that `syco upgrade` actually delivers the binary's
-# charts. Wiping the config-root charts first is the regression guard: an upgrade
+# Exercises the operator upgrade path: it re-extracts the binary's charts and
+# re-provisions the main tenant from its values file, so this is the only
+# coverage that `syco upgrade` actually delivers the binary's charts. Wiping the config-root charts first is the regression guard: an upgrade
 # that skips the chart re-extract has nothing to apply and fails here.
 step_7_upgrade_cli() {
   step "Step 7: syco upgrade (CLI chart delivery)"
@@ -1633,7 +1484,7 @@ step_7_upgrade_cli() {
   cargo build --release -p syco >/dev/null
   local syco="$REPO_ROOT/target/release/syco"
 
-  rm -rf "${HOME}/.config/sycophant/charts"
+  rm -rf "${SYCO_CONFIG_DIR}/charts"
 
   if "$syco" upgrade; then
     ok "syco upgrade succeeded (re-extracted charts + applied cluster + tenant)"
@@ -1642,7 +1493,7 @@ step_7_upgrade_cli() {
     return 1
   fi
 
-  if [ -f "${HOME}/.config/sycophant/charts/sycophant-cluster/Chart.yaml" ]; then
+  if [ -f "${SYCO_CONFIG_DIR}/charts/sycophant-cluster/Chart.yaml" ]; then
     ok "config-root charts re-extracted from the binary"
   else
     warn "syco upgrade left the config-root charts missing"
@@ -1651,11 +1502,8 @@ step_7_upgrade_cli() {
 }
 
 # ---- OIDC write-path proof ----
-# Live-cluster proof of the object-store OIDC write path. It stands up a
-# self-supplied generic OIDC issuer fixture (NOT Dex), points the store at it,
-# and proves a token from that issuer mints a credential that writes while the
-# store reaches the issuer and nothing else. This is the object-store OIDC
-# acceptance, so it runs on every e2e; there is no opt-out.
+# A token from a generic (non-Dex) issuer fixture mints a store credential that
+# writes, and the store reaches that issuer and nothing else.
 #
 # OIDC_WRITE_ROLE_ARN  the roles[] entry the fixture token assumes; the rendered
 #                      -s3.iam.config roleMapping maps this issuer to it.
@@ -1688,35 +1536,115 @@ TENANT_A_USER_SUB="tenant-a-user"
 TENANT_B_USER_SUB="tenant-b-user"
 TENANT_B_NAMESPACE="${NAMESPACE}-b"
 
-# Lifecycle marker contract. The reserved marker names, the well-known label,
-# and the reap-after annotation are the stable public surface the reactor
-# policies match on (charts/sycophant-cluster/templates/_helpers.tpl). The
-# provision caller is authenticated by a second, non-Dex JWT issuer (below), so
-# the marker contract is proven against an issuer the bundled Dex never signed.
+# Lifecycle marker contract. Marker names and the label mirror the cluster
+# chart's reactor policies. The reactor prefixes the bare tenant token with
+# tenant-. The operator is authenticated by a second, non-Dex issuer (below).
 LIFECYCLE_OPERATOR_SUB="operator-provisioner"
-LIFECYCLE_TENANT_NS="tenant-lifecycle-probe"
-LIFECYCLE_MARKER_LABEL="sycophant.md/lifecycle-marker"
-LIFECYCLE_PROVISION_NAME="sycophant-tenant-provision"
-LIFECYCLE_SUSPEND_NAME="sycophant-tenant-suspend"
+LIFECYCLE_TENANT_TOKEN="lifecycle-probe"
+LIFECYCLE_TENANT_NS="tenant-${LIFECYCLE_TENANT_TOKEN}"
+LIFECYCLE_WORKSPACE="hello-world"
+LIFECYCLE_USER="${APISERVER_OIDC_ISSUER}#lifecycle-bound-user"
+# Toolset names absent from the base install, so their ConfigMaps can only land
+# via the marker. The second is installed by UPDATING the one fixed-name marker.
+LIFECYCLE_TOOLSET="lifecycle-tool"
+LIFECYCLE_TOOLSET_2="lifecycle-tool-2"
 
-# A second JWT issuer, distinct from the bundled Dex, published over HTTPS on its
-# own node loopback NodePort. Its self-signed CA is stamped into the apiserver
-# auth-config at boot (gen_second_issuer_trust) as a second jwt: entry whose
-# username claimMapping uses the same issuer prefix Dex does, so a token it signs
-# authenticates into the trusted subject namespace the provision VAP admits. This
-# proves the marker contract admits an issuer-stamped identity generically, not
-# only the bundled Dex.
+# A second JWT issuer on its own loopback NodePort, trusted at boot
+# (gen_second_issuer_trust) with the same username prefix as Dex, so the marker
+# contract is proven against an issuer the bundled Dex never signed.
 APISERVER_OIDC2_NODEPORT=30444
 APISERVER_OIDC2_ISSUER="https://127.0.0.1:${APISERVER_OIDC2_NODEPORT}"
 APISERVER_OIDC2_AUDIENCE="sycophant-lifecycle"
 APISERVER_OIDC2_KID="lifecycle-fixture-key"
 
+# ---- syco inputs ----
+# e2e drives the operator's real path through `syco`. Each SYCO_* input below
+# defaults for e2e and may be overridden from the environment.
+SYCO="$REPO_ROOT/target/release/syco"
+# syco's config root for this run, so e2e never touches the operator's own
+# ~/.config/sycophant. `syco setup` regenerates the Dex trust under it.
+export SYCO_CONFIG_DIR="${SYCO_CONFIG_DIR:-$REPO_ROOT/tmp/syco-config}"
+# Dex's operator login. The password persists for reuse runs against the same
+# Dex and is regenerated with the cluster.
+SYCO_PASSWORD_FILE="$REPO_ROOT/tmp/e2e-operator-password"
+# The public Dex CA `syco setup` generated and the apiserver trusts.
+SYCO_DEX_CA="$SYCO_CONFIG_DIR/oidc/ca.crt"
+# The main tenant's values, where `syco tenant up` and `syco upgrade` read them.
+TENANT_VALUES_FILE="$SYCO_CONFIG_DIR/tenants/$NAMESPACE/values.yaml"
+# Memory quota for the main tenant, summed over pod limits: inference 2560Mi;
+# relay, adapter, headscale, harness, workspace-init, and three toolset pods at
+# 256Mi each (the LimitRange default where the chart sets none); install-wait
+# 64Mi; and the step 6 probe pods. About 5.1Gi, or 10.6Gi at the inference
+# chart default of 8Gi, so 12Gi leaves headroom for either.
+TENANT_CAPACITY="${TENANT_CAPACITY:-12Gi}"
+export SYCO_EMAIL="${SYCO_EMAIL:-e2e-operator@sycophant.local}"
+# Step 1 builds and loads the e2e image set itself.
+export SYCO_SKIP_BUILD="${SYCO_SKIP_BUILD:-1}"
+# The Cilium agent image comes from the host Docker cache, not a run-time pull.
+export SYCO_CILIUM_PRELOAD="${SYCO_CILIUM_PRELOAD:-1}"
+# Apiserver audit log and the relay's app port on the k3d load balancer.
+export SYCO_K3D_ARGS="${SYCO_K3D_ARGS:---k3s-arg --kube-apiserver-arg=audit-policy-file=/etc/rancher/k3s/audit-policy.yaml@server:* --k3s-arg --kube-apiserver-arg=audit-log-path=/var/log/k3s-audit.log@server:* --k3s-arg --kube-apiserver-arg=audit-log-maxage=7@server:* -v $REPO_ROOT/docs/e2e/audit-policy.yaml:/etc/rancher/k3s/audit-policy.yaml@server:0 --port 9090:9090@loadbalancer}"
+export SYCO_AUTH_CONFIG_APPEND="${SYCO_AUTH_CONFIG_APPEND:-$APISERVER_OIDC_DIR/second-issuer.yaml}"
+export SYCO_KYVERNO_VALUES="${SYCO_KYVERNO_VALUES:-$REPO_ROOT/docs/e2e/kyverno-values.yaml}"
+export SYCO_CLUSTER_VALUES="${SYCO_CLUSTER_VALUES:-$REPO_ROOT/docs/e2e/cluster-values.yaml}"
+
+# Export SYCO_PASSWORD: the caller's, else the persisted one, else a new one.
+syco_credentials() {
+  if [ -z "${SYCO_PASSWORD:-}" ]; then
+    if [ ! -s "$SYCO_PASSWORD_FILE" ]; then
+      mkdir -p "$(dirname "$SYCO_PASSWORD_FILE")"
+      ( umask 077; head -c 256 /dev/urandom | LC_ALL=C tr -dc 'a-zA-Z0-9' | cut -c1-24 > "$SYCO_PASSWORD_FILE" )
+    fi
+    SYCO_PASSWORD="$(cat "$SYCO_PASSWORD_FILE")"
+  fi
+  export SYCO_PASSWORD
+}
+
 b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+# Write the JWKS ($4) and discovery document ($5) for issuer $3 whose RS256
+# signing key is the PEM private key $1, published under kid $2.
+write_issuer_docs() {
+  local n
+  n="$(openssl rsa -in "$1" -noout -modulus | sed 's/^Modulus=//' | xxd -r -p | b64url)"
+  printf '{"keys":[{"kty":"RSA","use":"sig","alg":"RS256","kid":"%s","n":"%s","e":"AQAB"}]}\n' "$2" "$n" > "$4"
+  printf '{"issuer":"%s","jwks_uri":"%s/.well-known/jwks.json"}\n' "$3" "$3" > "$5"
+}
+
+# Build a kubeconfig at $1 whose sole context (named $2) presents bearer token
+# $3 to the current apiserver with its CA and no client cert. kubectl prefers a
+# client cert over a token, so reusing the admin context would skip the OIDC path.
+kubeconfig_with_token() {
+  local kc="$1" name="$2" token="$3" server
+  server="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')"
+  kubectl config view --minify --raw \
+    -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' \
+    | openssl base64 -d -A > "$kc.ca"
+  [ -s "$kc.ca" ] || { warn "could not read the apiserver CA from the current kubeconfig"; exit 1; }
+  KUBECONFIG="$kc" kubectl config set-cluster e2e \
+    --server="$server" --certificate-authority="$kc.ca" --embed-certs=true >/dev/null
+  KUBECONFIG="$kc" kubectl config set-credentials "$name" --token="$token" >/dev/null
+  KUBECONFIG="$kc" kubectl config set-context "$name" --cluster=e2e --user="$name" >/dev/null
+  KUBECONFIG="$kc" kubectl config use-context "$name" >/dev/null
+}
+
+# Mint a compact RS256 JWT: header (kid $1) + payload (iss $2, sub $3, aud $4,
+# iat now, exp now+600s), signed by the PEM private key $5. Emits the token on
+# stdout.
+mint_rs256_jwt() {
+  local kid="$1" iss="$2" sub="$3" aud="$4" keyfile="$5"
+  local now exp header payload signing_input sig
+  now="$(date +%s)"; exp="$(( now + 600 ))"
+  header="$(printf '{"alg":"RS256","typ":"JWT","kid":"%s"}' "$kid" | b64url)"
+  payload="$(printf '{"iss":"%s","sub":"%s","aud":"%s","iat":%s,"exp":%s}' \
+    "$iss" "$sub" "$aud" "$now" "$exp" | b64url)"
+  signing_input="${header}.${payload}"
+  sig="$(printf '%s' "$signing_input" | openssl dgst -sha256 -sign "$keyfile" | b64url)"
+  printf '%s.%s' "$signing_input" "$sig"
+}
 
 verify_oidc_write_path() {
   step "OIDC write-path proof"
-  command -v openssl >/dev/null 2>&1 || { warn "openssl required for the OIDC proof"; exit 1; }
-  command -v aws >/dev/null 2>&1 || { warn "aws-cli required for the OIDC proof"; exit 1; }
   command -v python3 >/dev/null 2>&1 || { warn "python3 required for the OIDC proof"; exit 1; }
 
   local work; work="$(mktemp -d)"
@@ -1726,15 +1654,8 @@ verify_oidc_write_path() {
   openssl genrsa -out "$work/key.pem" 2048 >/dev/null 2>&1
   openssl rsa -in "$work/key.pem" -pubout -out "$work/pub.pem" >/dev/null 2>&1
   local kid="e2e-fixture-key"
-  # n from the modulus, e = AQAB (65537). Build the JWKS + discovery documents.
-  local modulus_hex; modulus_hex="$(openssl rsa -in "$work/key.pem" -noout -modulus | sed 's/^Modulus=//')"
-  local n; n="$(printf '%s' "$modulus_hex" | xxd -r -p | b64url)"
-  cat > "$work/jwks.json" <<EOF
-{"keys":[{"kty":"RSA","use":"sig","alg":"RS256","kid":"${kid}","n":"${n}","e":"AQAB"}]}
-EOF
-  cat > "$work/openid-configuration.json" <<EOF
-{"issuer":"${OIDC_FIXTURE_ISSUER}","jwks_uri":"${OIDC_FIXTURE_ISSUER}/.well-known/jwks.json"}
-EOF
+  write_issuer_docs "$work/key.pem" "$kid" "$OIDC_FIXTURE_ISSUER" \
+    "$work/jwks.json" "$work/openid-configuration.json"
 
   # Serve both documents from a ConfigMap through the pinned static-file server.
   kubectl create configmap oidc-fixture -n sycophant-system \
@@ -1774,14 +1695,9 @@ EOF
   kubectl rollout status deploy/seaweedfs -n sycophant-system --timeout=120s >/dev/null
 
   # --- mint an RS256 JWT signed by the fixture key ---
-  local now exp header payload signing_input sig jwt
-  now="$(date +%s)"; exp="$(( now + 600 ))"
-  header="$(printf '{"alg":"RS256","typ":"JWT","kid":"%s"}' "$kid" | b64url)"
-  payload="$(printf '{"iss":"%s","sub":"%s","aud":"%s","iat":%s,"exp":%s}' \
-    "$OIDC_FIXTURE_ISSUER" "$OIDC_FIXTURE_SUBJECT" "$OIDC_FIXTURE_AUDIENCE" "$now" "$exp" | b64url)"
-  signing_input="${header}.${payload}"
-  sig="$(printf '%s' "$signing_input" | openssl dgst -sha256 -sign "$work/key.pem" | b64url)"
-  jwt="${signing_input}.${sig}"
+  local jwt
+  jwt="$(mint_rs256_jwt "$kid" "$OIDC_FIXTURE_ISSUER" "$OIDC_FIXTURE_SUBJECT" \
+    "$OIDC_FIXTURE_AUDIENCE" "$work/key.pem")"
 
   # --- reach the s3 gateway over the port-forward ---
   kubectl port-forward -n sycophant-system svc/seaweedfs "${S3_PF_PORT}:8333" >/dev/null 2>&1 &
@@ -1861,39 +1777,16 @@ sys.stdout.write(jwt.encode(
 # tokens signed with Dex's active signing key, and runs the checks.
 verify_user_isolation() {
   step "Per-identity cluster-identity isolation proof"
-  command -v openssl >/dev/null 2>&1 || { warn "openssl required for the identity proof"; exit 1; }
   command -v python3 >/dev/null 2>&1 || { warn "python3 required for the identity proof"; exit 1; }
 
-  local d="$APISERVER_OIDC_DIR"
-  { [ -f "$d/tls.crt" ] && [ -f "$d/tls.key" ]; } \
-    || { warn "apiserver OIDC trust material missing under ${d}; boot the cluster with --clean first"; exit 1; }
+  [ -s "$SYCO_DEX_CA" ] \
+    || { warn "apiserver OIDC trust material missing at ${SYCO_DEX_CA}; boot the cluster with --clean first"; exit 1; }
 
   local work; work="$(mktemp -d)"
   trap 'rm -rf "$work"' RETURN
 
-  # Hand Dex the boot serving cert (SAN 127.0.0.1) as its TLS listener, so the
-  # cert the apiserver trusts and the cert Dex serves are one and the same.
-  kubectl create secret tls sycophant-dex-tls -n "$APISERVER_OIDC_NS" \
-    --cert="$d/tls.crt" --key="$d/tls.key" \
-    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-
-  # The upstream Dex subchart is vendored under the chart's charts/ dir but
-  # gitignored, so a fresh checkout lacks it; fetch it before the install
-  # resolves dependencies.
-  if ! ls "$REPO_ROOT"/charts/sycophant-dex/charts/dex-*.tgz >/dev/null 2>&1; then
-    helm dependency build "$REPO_ROOT/charts/sycophant-dex" >/dev/null
-  fi
-
-  # Install the bundled Dex on the pinned NodePort, its issuer set to the
-  # node-reachable address the apiserver trusts. The apiserver's node netns has
-  # no CoreDNS, so the chart's default svc-DNS issuer is unreachable there; the
-  # loopback NodePort is.
-  helm upgrade --install sycophant-dex "$REPO_ROOT/charts/sycophant-dex" \
-    -n "$APISERVER_OIDC_NS" \
-    --set-string "dex.config.issuer=$APISERVER_OIDC_ISSUER" \
-    --set "dex.service.type=NodePort" \
-    --set "dex.service.ports.https.nodePort=$APISERVER_OIDC_NODEPORT" \
-    --wait >/dev/null
+  # `syco setup` installed the bundled Dex on the pinned NodePort the apiserver
+  # trusts, with its own TLS cert.
   wait_for "bundled Dex ready" 120 \
     "kubectl get deploy sycophant-dex -n $APISERVER_OIDC_NS -o jsonpath='{.status.readyReplicas}' 2>/dev/null | grep -qx 1"
   # Dex creates its signing key singleton on first serve; wait for it before
@@ -1924,24 +1817,8 @@ verify_user_isolation() {
   local rb_before
   rb_before="$(kubectl get rolebindings -n "$NAMESPACE" -o name 2>/dev/null | sort)"
 
-  # Present the token through a dedicated kubeconfig that carries ONLY the
-  # apiserver endpoint, its CA, and the bearer token. kubectl prefers a
-  # client certificate over --token, so reusing the admin context would
-  # authenticate as the admin cert (system:masters) and never exercise the
-  # OIDC path. Reuse the admin context's server URL and CA, drop its cert.
-  local ukube api_server
-  ukube="$work/user.kubeconfig"
-  api_server="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')"
-  kubectl config view --minify --raw \
-    -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' \
-    | openssl base64 -d -A > "$work/apiserver-ca.crt"
-  [ -s "$work/apiserver-ca.crt" ] \
-    || { warn "could not read the apiserver CA from the current kubeconfig"; exit 1; }
-  KUBECONFIG="$ukube" kubectl config set-cluster e2e \
-    --server="$api_server" --certificate-authority="$work/apiserver-ca.crt" --embed-certs=true >/dev/null
-  KUBECONFIG="$ukube" kubectl config set-credentials user --token="$token" >/dev/null
-  KUBECONFIG="$ukube" kubectl config set-context user --cluster=e2e --user=user >/dev/null
-  KUBECONFIG="$ukube" kubectl config use-context user >/dev/null
+  local ukube="$work/user.kubeconfig"
+  kubeconfig_with_token "$ukube" user "$token"
 
   # Authn: the token must authenticate as the issuer-prefixed identity. The
   # apiserver's OIDC authenticator initializes lazily on first token use: it
@@ -1954,14 +1831,16 @@ verify_user_isolation() {
     || { warn "user token did not authenticate as ${user_identity} within the init window (last: $(kubectl --kubeconfig="$ukube" auth whoami -o jsonpath='{.status.userInfo.username}' 2>/dev/null || echo 401/none))"; exit 1; }
   ok "user token authenticated as ${user_identity}"
 
-  # Same-tenant allow through the tenant-user RoleBinding.
+  # A member holds no control-plane verbs. It cannot create a configmap in
+  # its own tenant namespace, so it cannot self-drop a lifecycle marker. Every
+  # marker is written by the operator that holds the cluster credential.
   local can_a
   can_a="$(kubectl --kubeconfig="$ukube" auth can-i create configmaps -n "$NAMESPACE" 2>/dev/null || true)"
-  [ "$can_a" = "yes" ] \
-    || { warn "user cannot create configmaps in its own tenant namespace ${NAMESPACE} (got: ${can_a:-none})"; exit 1; }
-  ok "user can create configmaps in its own tenant namespace"
+  [ "$can_a" = "no" ] \
+    || { warn "user could create configmaps in its own tenant namespace ${NAMESPACE} (got: ${can_a:-none}); a member must hold no control-plane verbs"; exit 1; }
+  ok "user cannot create configmaps in its own tenant namespace"
 
-  # Cross-tenant deny: the isolation claim this proof exists to hold.
+  # Cross-tenant is denied the same way, so no member reaches another tenant.
   local can_b
   can_b="$(kubectl --kubeconfig="$ukube" auth can-i create configmaps -n "$TENANT_B_NAMESPACE" 2>/dev/null || true)"
   [ "$can_b" = "no" ] \
@@ -1978,7 +1857,8 @@ verify_user_isolation() {
   ok "a system: token is refused at authentication"
 
   # No login-time mint: authentication created no RoleBinding, and the only
-  # binding naming the user identity is the chart's static tenant-user binding.
+  # binding naming the user identity is the user marker's provision-identity-<hash>
+  # binding.
   local rb_after
   rb_after="$(kubectl get rolebindings -n "$NAMESPACE" -o name 2>/dev/null | sort)"
   [ "$rb_before" = "$rb_after" ] \
@@ -1990,9 +1870,10 @@ d = json.load(sys.stdin); ident = os.environ["IDENT"]
 print("\n".join(rb["metadata"]["name"] for rb in d["items"]
       if any(s.get("kind") == "User" and s.get("name") == ident
              for s in rb.get("subjects") or [])))')"
-  [ "$rb_naming" = "tenant-user" ] \
-    || { warn "user identity ${user_identity} is named by RoleBinding(s) other than tenant-user: ${rb_naming:-none}"; exit 1; }
-  ok "no per-identity binding minted at login; the static tenant-user binding is the only grant"
+  local user_rb; user_rb="provision-identity-$(handle_of "$user_identity")"
+  [ "$rb_naming" = "$user_rb" ] \
+    || { warn "user identity ${user_identity} is named by RoleBinding(s) other than ${user_rb}: ${rb_naming:-none}"; exit 1; }
+  ok "no per-identity binding minted at login; the user marker's ${user_rb} binding is the only grant"
 
   ok "per-identity cluster-identity isolation proof passed"
 }
@@ -2009,15 +1890,8 @@ stand_up_second_issuer() {
   { [ -f "$d/oidc2-tls.crt" ] && [ -f "$d/oidc2-sign.key" ]; } \
     || { warn "second-issuer trust material missing under ${d}; boot the cluster with --clean first"; exit 1; }
 
-  local modulus_hex n
-  modulus_hex="$(openssl rsa -in "$d/oidc2-sign.key" -noout -modulus | sed 's/^Modulus=//')"
-  n="$(printf '%s' "$modulus_hex" | xxd -r -p | b64url)"
-  cat > "$work/oidc2-jwks.json" <<EOF
-{"keys":[{"kty":"RSA","use":"sig","alg":"RS256","kid":"${APISERVER_OIDC2_KID}","n":"${n}","e":"AQAB"}]}
-EOF
-  cat > "$work/oidc2-discovery.json" <<EOF
-{"issuer":"${APISERVER_OIDC2_ISSUER}","jwks_uri":"${APISERVER_OIDC2_ISSUER}/.well-known/jwks.json"}
-EOF
+  write_issuer_docs "$d/oidc2-sign.key" "$APISERVER_OIDC2_KID" "$APISERVER_OIDC2_ISSUER" \
+    "$work/oidc2-jwks.json" "$work/oidc2-discovery.json"
 
   kubectl create configmap oidc2-fixture -n "$APISERVER_OIDC_NS" \
     --from-file=openid-configuration="$work/oidc2-discovery.json" \
@@ -2100,152 +1974,173 @@ YAML
     "kubectl get deploy oidc2-fixture -n $APISERVER_OIDC_NS -o jsonpath='{.status.readyReplicas}' 2>/dev/null | grep -qx 1"
 }
 
-# Mint an RS256 token signed by the second issuer's fixture key, carrying that
-# issuer, its audience, and the given sub. The apiserver maps it into the same
-# prefixed subject namespace as a Dex token, so the provision VAP admits it.
-mint_fixture_token() {
-  local sub="$1" work="$2" d="$APISERVER_OIDC_DIR"
-  local now exp header payload signing_input sig
-  now="$(date +%s)"; exp="$(( now + 600 ))"
-  header="$(printf '{"alg":"RS256","typ":"JWT","kid":"%s"}' "$APISERVER_OIDC2_KID" | b64url)"
-  payload="$(printf '{"iss":"%s","sub":"%s","aud":"%s","iat":%s,"exp":%s}' \
-    "$APISERVER_OIDC2_ISSUER" "$sub" "$APISERVER_OIDC2_AUDIENCE" "$now" "$exp" | b64url)"
-  signing_input="${header}.${payload}"
-  sig="$(printf '%s' "$signing_input" | openssl dgst -sha256 -sign "$d/oidc2-sign.key" | b64url)"
-  printf '%s.%s' "$signing_input" "$sig"
+# ---- tenant lifecycle marker-contract proof ----
+# Each marker is admitted for an issuer-prefixed operator identity and refused
+# for a standing ServiceAccount that holds the same RBAC, so the marker VAP, not
+# RBAC, is what tells them apart. Provision drives the tenant Namespace, quota,
+# and base install; workspace, user, and toolset markers each drive one release;
+# suspend scales the tenant down and stamps a reap TTL the reap policy acts on.
+
+# The 10-hex handle a marker writer derives from $1 and the reactor names its
+# per-install objects with.
+handle_of() { printf '%s' "$1" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10; }
+
+# Emit a lifecycle marker ConfigMap up to `data:`. $1 name; $2 namespace.
+marker_yaml() {
+  cat <<YAML
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: $1
+  namespace: $2
+  labels:
+    sycophant.md/lifecycle-marker: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+YAML
 }
 
-# ---- tenant lifecycle marker-contract proof ----
-# Live proof of the marker contract: a provision marker written by an
-# IdP-authenticated user identity is admitted by the provision VAP and drives
-# Kyverno to materialize the tenant Namespace + capacity ResourceQuota, while the
-# same marker written by a standing ServiceAccount credential — one that even
-# holds the RBAC create verb — is refused by that VAP. A suspend marker inside
-# the tenant namespace scales its Deployments to zero and stamps a reap-after
-# TTL, and a zero-keepalive marker lets the reap DeletingPolicy delete the
-# namespace. The provision caller is authenticated by the second, non-Dex issuer
-# (stand_up_second_issuer), so the proof is not narrowed to the bundled Dex.
+# Prove marker file $3 for kind $1 with handle $2: the standing SA ($sa_kube) is
+# refused by marker-provision-$1, the operator ($op_kube) is admitted, and the
+# provision-$1 Job completes. Clears a prior run's Job first, since its selector
+# is immutable.
+prove_marker() {
+  local kind="$1" handle="$2" file="$3" err
+  kubectl delete job,serviceaccount "provision-${kind}-${handle}" -n sycophant-system \
+    --ignore-not-found >/dev/null
+  if err="$(kubectl --kubeconfig="$sa_kube" create -f "$file" 2>&1)"; then
+    warn "a standing ServiceAccount wrote a ${kind} marker; the ${kind} VAP failed open"; exit 1
+  fi
+  printf '%s' "$err" | grep -qi "marker-provision-${kind}" \
+    || { warn "SA ${kind} marker was refused, but not by the ${kind} identity VAP: ${err}"; exit 1; }
+  ok "a standing ServiceAccount credential cannot write a ${kind} marker"
+  kubectl --kubeconfig="$op_kube" create -f "$file" >/dev/null \
+    || { warn "the ${kind} VAP refused the IdP-authenticated operator identity"; exit 1; }
+  ok "${kind} marker admitted for the IdP-authenticated operator identity"
+  wait_for "provision-${kind} Job succeeded" 600 \
+    "kubectl get job 'provision-${kind}-${handle}' -n sycophant-system -o jsonpath='{.status.succeeded}' 2>/dev/null | grep -qx 1"
+}
+
+# Prove the identity gate on marker file $3 for kind $1, sent with kubectl verb
+# $2: the standing SA ($sa_kube) is refused by marker-provision-$1 on a real
+# write, and the second issuer's identity ($op_kube), which Dex never signed, is
+# admitted on a server dry-run so nothing is generated.
+prove_gate() {
+  local kind="$1" verb="$2" file="$3" err
+  if err="$(kubectl --kubeconfig="$sa_kube" "$verb" -f "$file" 2>&1)"; then
+    warn "a standing ServiceAccount wrote a ${kind} marker; the ${kind} VAP failed open"; exit 1
+  fi
+  printf '%s' "$err" | grep -qi "marker-provision-${kind}" \
+    || { warn "SA ${kind} marker was refused, but not by the ${kind} identity VAP: ${err}"; exit 1; }
+  ok "a standing ServiceAccount credential cannot write a ${kind} marker"
+  kubectl --kubeconfig="$op_kube" "$verb" --dry-run=server -f "$file" >/dev/null \
+    || { warn "the ${kind} VAP refused an IdP identity Dex never signed"; exit 1; }
+  ok "${kind} marker admitted for an IdP identity Dex never signed"
+}
+
+# The lifecycle workspace's harness pod name and Deployment generation, which a
+# live toolset add must leave unchanged.
+harness_identity() {
+  printf '%s/%s' \
+    "$(kubectl get pods -n "$LIFECYCLE_TENANT_NS" \
+      -l "app.kubernetes.io/component=harness,sycophant.md/workspace=${LIFECYCLE_WORKSPACE}" \
+      -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)" \
+    "$(kubectl get deploy "$LIFECYCLE_WORKSPACE" -n "$LIFECYCLE_TENANT_NS" \
+      -o jsonpath='{.metadata.generation}' 2>/dev/null)"
+}
+
+# Write the toolset marker for toolset $1 (handle $2, image name $3) to $work.
+toolset_marker() {
+  { marker_yaml provision-toolset "$LIFECYCLE_TENANT_NS"; cat <<YAML
+  toolset: $1
+  handle: $2
+  values: |
+    toolsets:
+      $1:
+        image: registry.local/$3:local
+        keepalive: false
+YAML
+  } > "$work/toolset-$1.yaml"
+}
+
 verify_tenant_lifecycle() {
   step "Tenant lifecycle marker-contract proof"
   command -v python3 >/dev/null 2>&1 || { warn "python3 required for the lifecycle proof"; exit 1; }
-  command -v openssl >/dev/null 2>&1 || { warn "openssl required for the lifecycle proof"; exit 1; }
+
+  # The tenant hashes its bare token; workspace, user, and toolset hash
+  # <tenant>/<name>. The chart's per-user RoleBinding hashes the subject alone.
+  local tenant_handle ws_handle user_handle user_rb_handle
+  tenant_handle="$(handle_of "$LIFECYCLE_TENANT_TOKEN")"
+  ws_handle="$(handle_of "${LIFECYCLE_TENANT_TOKEN}/${LIFECYCLE_WORKSPACE}")"
+  user_handle="$(handle_of "${LIFECYCLE_TENANT_TOKEN}/${LIFECYCLE_USER}")"
+  user_rb_handle="$(handle_of "$LIFECYCLE_USER")"
 
   local work; work="$(mktemp -d)"
   trap 'rm -rf "$work"' RETURN
 
-  # Start from nothing: clear any prior run's marker and target namespace.
-  kubectl delete configmap "$LIFECYCLE_PROVISION_NAME" -n sycophant-system --ignore-not-found >/dev/null
-  kubectl delete namespace "$LIFECYCLE_TENANT_NS" --ignore-not-found --wait=false >/dev/null
+  # Start from nothing, so the proof covers a first provision. A prior run's
+  # installer outlives its reap TTL.
+  kubectl delete configmap provision-tenant -n sycophant-system --ignore-not-found >/dev/null
+  kubectl delete namespace "$LIFECYCLE_TENANT_NS" --ignore-not-found --timeout=300s >/dev/null
 
-  # The operator identity and a standing ServiceAccount both hold RBAC create on
-  # configmaps in sycophant-system, so the provision VAP — not RBAC — is the one
-  # thing that can tell them apart.
   local operator_identity="${APISERVER_OIDC_ISSUER}#${LIFECYCLE_OPERATOR_SUB}"
-  kubectl apply -f - >/dev/null <<YAML
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: lifecycle-marker-writer
-  namespace: sycophant-system
-rules:
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    verbs: ["create"]
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: lifecycle-standing-sa
-  namespace: sycophant-system
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: lifecycle-marker-writer
-  namespace: sycophant-system
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: lifecycle-marker-writer
-subjects:
-  - kind: User
-    name: ${operator_identity}
-    apiGroup: rbac.authorization.k8s.io
-  - kind: ServiceAccount
-    name: lifecycle-standing-sa
-    namespace: sycophant-system
-YAML
+  kubectl create role lifecycle-marker-writer -n sycophant-system \
+    --verb=create --resource=configmaps --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  kubectl create serviceaccount lifecycle-standing-sa -n sycophant-system \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  kubectl create rolebinding lifecycle-marker-writer -n sycophant-system \
+    --role=lifecycle-marker-writer --user="$operator_identity" \
+    --serviceaccount=sycophant-system:lifecycle-standing-sa \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
-  # The provision marker: the reserved provision name and well-known label, in
-  # sycophant-system. keepalive 0 reaps the tenant as soon as it is suspended.
-  cat > "$work/provision-marker.yaml" <<YAML
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: ${LIFECYCLE_PROVISION_NAME}
-  namespace: sycophant-system
-  labels:
-    ${LIFECYCLE_MARKER_LABEL}: "true"
-data:
-  tenant: ${LIFECYCLE_TENANT_NS}
-  capacity: 512Mi
-  keepalive: "0"
-YAML
-
-  local api_server
-  api_server="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')"
-  kubectl config view --minify --raw \
-    -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' \
-    | openssl base64 -d -A > "$work/apiserver-ca.crt"
-  [ -s "$work/apiserver-ca.crt" ] \
-    || { warn "could not read the apiserver CA from the current kubeconfig"; exit 1; }
-
-  # --- negative: a standing ServiceAccount credential is refused by the VAP.
-  # The SA holds the create verb, so admitting it would be the VAP failing open.
-  local sa_token sa_kube
+  local sa_token sa_kube="$work/sa.kubeconfig"
   sa_token="$(kubectl create token lifecycle-standing-sa -n sycophant-system --duration=10m)"
-  sa_kube="$work/sa.kubeconfig"
-  KUBECONFIG="$sa_kube" kubectl config set-cluster e2e \
-    --server="$api_server" --certificate-authority="$work/apiserver-ca.crt" --embed-certs=true >/dev/null
-  KUBECONFIG="$sa_kube" kubectl config set-credentials sa --token="$sa_token" >/dev/null
-  KUBECONFIG="$sa_kube" kubectl config set-context sa --cluster=e2e --user=sa >/dev/null
-  KUBECONFIG="$sa_kube" kubectl config use-context sa >/dev/null
+  kubeconfig_with_token "$sa_kube" sa "$sa_token"
 
-  local sa_err
-  if sa_err="$(kubectl --kubeconfig="$sa_kube" create -f "$work/provision-marker.yaml" 2>&1)"; then
-    warn "a standing ServiceAccount wrote a provision marker; the provision VAP failed open"; exit 1
-  fi
-  printf '%s' "$sa_err" | grep -qi 'cluster-provision-marker-identity' \
-    || { warn "SA provision was refused, but not by the provision identity VAP: ${sa_err}"; exit 1; }
-  ok "a standing ServiceAccount credential cannot write a provision marker"
-
-  # --- positive: an operator identity from the SECOND, non-Dex issuer
-  # provisions. Publishing that issuer and minting its token proves the marker
-  # contract admits any issuer-stamped identity the apiserver trusts, not only
-  # a Dex-signed one.
   stand_up_second_issuer "$work"
-  local op_token op_kube
-  op_token="$(mint_fixture_token "$LIFECYCLE_OPERATOR_SUB" "$work")"
-  op_kube="$work/operator.kubeconfig"
-  KUBECONFIG="$op_kube" kubectl config set-cluster e2e \
-    --server="$api_server" --certificate-authority="$work/apiserver-ca.crt" --embed-certs=true >/dev/null
-  KUBECONFIG="$op_kube" kubectl config set-credentials op --token="$op_token" >/dev/null
-  KUBECONFIG="$op_kube" kubectl config set-context op --cluster=e2e --user=op >/dev/null
-  KUBECONFIG="$op_kube" kubectl config use-context op >/dev/null
-
-  # The apiserver OIDC authenticator initializes lazily; poll until the operator
-  # token authenticates as its issuer-prefixed identity before writing.
+  local op_token op_kube="$work/operator.kubeconfig"
+  op_token="$(mint_rs256_jwt "$APISERVER_OIDC2_KID" "$APISERVER_OIDC2_ISSUER" "$LIFECYCLE_OPERATOR_SUB" \
+    "$APISERVER_OIDC2_AUDIENCE" "$APISERVER_OIDC_DIR/oidc2-sign.key")"
+  kubeconfig_with_token "$op_kube" op "$op_token"
+  # The apiserver OIDC authenticator initializes lazily.
   wait_for "operator token OIDC authenticator initialized" 60 \
     "kubectl --kubeconfig='$op_kube' auth whoami -o jsonpath='{.status.userInfo.username}' 2>/dev/null | grep -qFx '$operator_identity'" \
     || { warn "operator token did not authenticate as ${operator_identity}"; exit 1; }
 
-  kubectl --kubeconfig="$op_kube" create -f "$work/provision-marker.yaml" >/dev/null \
-    || { warn "the provision VAP refused the IdP-authenticated operator identity"; exit 1; }
-  ok "provision marker admitted for the IdP-authenticated operator identity"
+  { marker_yaml provision-tenant sycophant-system; cat <<YAML
+  tenant: ${LIFECYCLE_TENANT_TOKEN}
+  handle: ${tenant_handle}
+  capacity: 512Mi
+  keepalive: "0"
+  values: "{}"
+YAML
+  } > "$work/provision-marker.yaml"
+  prove_gate tenant create "$work/provision-marker.yaml"
 
-  # The provision-marker generate policy emits only the tenant Namespace +
-  # capacity ResourceQuota under Kyverno's own ServiceAccount. The part-of label
-  # on that namespace then triggers tenant-rolebinding-generator separately.
+  # The operator's real path: syco writes the tenant, workspace, and user
+  # markers under its Dex login and waits on each installer Job, failing loudly
+  # on a refused marker or a failed Job.
+  local values_file="${SYCO_CONFIG_DIR}/tenants/${LIFECYCLE_TENANT_NS}/values.yaml"
+  mkdir -p "$(dirname "$values_file")"
+  # workspaceInit rides the local registry, matching docs/e2e/values.yaml.
+  cat > "$values_file" <<YAML
+workspaceInit:
+  image: sycophant-registry:5000/toolset-git
+  tag: latest
+  pullPolicy: IfNotPresent
+users:
+  - "${LIFECYCLE_USER}"
+workspaces:
+  ${LIFECYCLE_WORKSPACE}:
+    toolsets:
+      - stdlib
+      - workspace-ro
+YAML
+  syco_credentials
+  "$SYCO" tenant up --ns "$LIFECYCLE_TENANT_NS" --capacity 512Mi \
+    || { warn "syco tenant up failed"; exit 1; }
+  ok "syco tenant up: tenant, workspace, and user markers admitted for the operator's Dex identity; each installer Job succeeded"
+
   wait_for "tenant namespace generated" 120 \
     "kubectl get namespace '$LIFECYCLE_TENANT_NS' >/dev/null 2>&1"
   wait_for "tenant capacity quota generated" 120 \
@@ -2254,6 +2149,110 @@ YAML
     -o jsonpath='{.metadata.labels.app\.kubernetes\.io/part-of}' 2>/dev/null | grep -qx sycophant-tenant \
     || { warn "generated namespace lacks the part-of=sycophant-tenant label"; exit 1; }
   ok "provision generated the tenant namespace and capacity quota"
+
+  wait_for "tenant helm release deployed" 120 \
+    "release_deployed '$LIFECYCLE_TENANT_NS' '$LIFECYCLE_TENANT_NS'"
+  wait_for "relay-controller Deployment Available" 180 \
+    "kubectl get deploy relay-controller -n '$LIFECYCLE_TENANT_NS' -o jsonpath='{.status.availableReplicas}' 2>/dev/null | grep -qx 1"
+  ok "tenant helm release deployed and relay-controller is Available"
+
+  # The workspace harness reads the instructions-reader Secret, which the marker
+  # path does not produce, so seed it the way the main tenant is seeded.
+  provision_instructions_content "$LIFECYCLE_WORKSPACE" "$LIFECYCLE_TENANT_NS"
+
+  # One writer Role covers the workspace, user, and toolset markers.
+  kubectl create role workspace-marker-writer -n "$LIFECYCLE_TENANT_NS" \
+    --verb=create,update,get --resource=configmaps --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  kubectl create rolebinding workspace-marker-writer -n "$LIFECYCLE_TENANT_NS" \
+    --role=workspace-marker-writer --user="$operator_identity" \
+    --serviceaccount=sycophant-system:lifecycle-standing-sa \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+  # The installed markers, re-sent as UPDATEs: refused for the standing SA,
+  # admitted (dry-run) for the second issuer's identity.
+  kubectl get configmap provision-workspace -n "$LIFECYCLE_TENANT_NS" -o jsonpath='{.data.handle}' \
+    | grep -qx "$ws_handle" || { warn "workspace marker handle is not ${ws_handle}"; exit 1; }
+  kubectl get configmap provision-user -n "$LIFECYCLE_TENANT_NS" -o jsonpath='{.data.handle}' \
+    | grep -qx "$user_handle" || { warn "user marker handle is not ${user_handle}"; exit 1; }
+  kubectl get configmap provision-workspace -n "$LIFECYCLE_TENANT_NS" -o yaml > "$work/workspace-marker.yaml"
+  kubectl get configmap provision-user -n "$LIFECYCLE_TENANT_NS" -o yaml > "$work/user-marker.yaml"
+  prove_gate workspace replace "$work/workspace-marker.yaml"
+  prove_gate user replace "$work/user-marker.yaml"
+
+  wait_for "workspace helm release deployed" 120 \
+    "release_deployed 'workspace-${LIFECYCLE_WORKSPACE}' '$LIFECYCLE_TENANT_NS'"
+  kubectl get deploy "$LIFECYCLE_WORKSPACE" -n "$LIFECYCLE_TENANT_NS" >/dev/null 2>&1 \
+    || { warn "workspace harness Deployment was not created"; exit 1; }
+  kubectl get configmap "relay-toolset-grants-${LIFECYCLE_WORKSPACE}" -n "$LIFECYCLE_TENANT_NS" \
+    -o jsonpath='{.metadata.labels.sycophant\.md/type}' 2>/dev/null | grep -qx relay-toolset-grants \
+    || { warn "per-workspace relay-toolset-grants ConfigMap missing or unlabeled"; exit 1; }
+  ok "workspace release deployed; per-workspace object set installed in render=workspace mode"
+
+  # The harness's one init container, instructions-sync, rclone-syncs the
+  # instructions prefix; a clean exit proves the store sync end to end.
+  wait_for "harness instructions-sync init container completed" 180 \
+    "kubectl get pods -n '$LIFECYCLE_TENANT_NS' -l 'app.kubernetes.io/component=harness,sycophant.md/workspace=${LIFECYCLE_WORKSPACE}' -o jsonpath='{.items[0].status.initContainerStatuses[0].state.terminated.exitCode}' 2>/dev/null | grep -qx 0"
+  kubectl get pods -n "$LIFECYCLE_TENANT_NS" \
+    -l "app.kubernetes.io/component=harness,sycophant.md/workspace=${LIFECYCLE_WORKSPACE}" \
+    -o jsonpath='{.items[0].status.initContainerStatuses[0].name}' 2>/dev/null | grep -qx instructions-sync \
+    || { warn "the harness first init container is not instructions-sync; the exit-0 check inspected the wrong container"; exit 1; }
+  ok "harness instructions-sync init container (rclone) synced and exited 0"
+
+  # `syco tenant up` waits for the base relay-controller to be Available before
+  # the workspace marker, so it merges the new grants live.
+  wait_for "relay-controller served the new workspace grants live" 60 \
+    "kubectl logs -n '$LIFECYCLE_TENANT_NS' -l app.kubernetes.io/name=relay-controller --tail=80 2>/dev/null | grep -E 'toolset-grants delivery applied.*\"configmaps\":[1-9]' -q"
+  ok "relay-controller merged the workspace grants without a pod roll"
+
+  wait_for "user helm release deployed" 120 \
+    "release_deployed 'user-${user_handle}' '$LIFECYCLE_TENANT_NS'"
+  kubectl get rolebinding "provision-identity-${user_rb_handle}" -n "$LIFECYCLE_TENANT_NS" \
+    -o jsonpath='{.roleRef.kind}/{.roleRef.name}' 2>/dev/null | grep -qx ClusterRole/provision-identity \
+    || { warn "per-user provision-identity RoleBinding missing or wrong roleRef"; exit 1; }
+  kubectl get rolebinding "provision-identity-${user_rb_handle}" -n "$LIFECYCLE_TENANT_NS" \
+    -o jsonpath='{.subjects[0].kind}/{.subjects[0].name}' 2>/dev/null | grep -qFx "User/${LIFECYCLE_USER}" \
+    || { warn "per-user provision-identity RoleBinding does not bind ${LIFECYCLE_USER}"; exit 1; }
+  ok "user release deployed; per-user provision-identity RoleBinding binds the identity in render=user mode"
+
+  # Two toolsets through the one fixed-name marker: a CREATE, then an UPDATE.
+  # The harness merges each per-toolset ConfigMap by watch, so its pod and
+  # Deployment generation must not change.
+  local harness_before ts h image n=0
+  harness_before="$(harness_identity)"
+  [ -n "${harness_before%/*}" ] || { warn "no lifecycle harness pod before the toolset add"; exit 1; }
+  for ts in "$LIFECYCLE_TOOLSET" "$LIFECYCLE_TOOLSET_2"; do
+    n=$((n + 1))
+    h="$(handle_of "${LIFECYCLE_TENANT_TOKEN}/${ts}")"
+    image="tool-lifecycle"; [ "$n" = 1 ] || image="tool-lifecycle-$n"
+    toolset_marker "$ts" "$h" "$image"
+    if [ "$n" = 1 ]; then
+      prove_marker toolset "$h" "$work/toolset-${ts}.yaml"
+    else
+      kubectl delete job,serviceaccount "provision-toolset-${h}" -n sycophant-system \
+        --ignore-not-found >/dev/null
+      kubectl --kubeconfig="$op_kube" replace -f "$work/toolset-${ts}.yaml" >/dev/null \
+        || { warn "the toolset VAP refused the IdP-authenticated operator identity on the marker UPDATE"; exit 1; }
+      ok "toolset ${ts} admitted via marker UPDATE"
+      wait_for "provision-toolset Job for ${ts} succeeded" 600 \
+        "kubectl get job 'provision-toolset-${h}' -n sycophant-system -o jsonpath='{.status.succeeded}' 2>/dev/null | grep -qx 1"
+    fi
+
+    wait_for "toolset ${ts} helm release deployed" 120 \
+      "release_deployed 'toolset-${ts}' '$LIFECYCLE_TENANT_NS'"
+    kubectl get configmap "toolset-${ts}" -n "$LIFECYCLE_TENANT_NS" \
+      -o jsonpath='{.metadata.labels.sycophant\.md/type}' 2>/dev/null | grep -qx toolset \
+      || { warn "per-toolset ConfigMap for ${ts} missing or not labelled sycophant.md/type=toolset"; exit 1; }
+    kubectl get configmap "toolset-${ts}" -n "$LIFECYCLE_TENANT_NS" \
+      -o "jsonpath={.data.toolset\.yaml}" 2>/dev/null | grep -q "registry.local/${image}:local" \
+      || { warn "per-toolset ConfigMap for ${ts} does not carry the marker's toolset definition"; exit 1; }
+
+    wait_for "harness merged toolset set=${n} by watch" 120 \
+      "kubectl logs deploy/${LIFECYCLE_WORKSPACE} -n ${LIFECYCLE_TENANT_NS} -c harness --tail=200 2>/dev/null | grep -E 'toolset delivery applied.*\"configmaps\":${n},' -q"
+    local harness_after; harness_after="$(harness_identity)"
+    [ "$harness_before" = "$harness_after" ] \
+      || { warn "harness pod or Deployment generation changed on toolset add (${harness_before} -> ${harness_after})"; exit 1; }
+    ok "harness picked up toolset set=${n} live with no pod roll"
+  done
 
   # --- suspend: scale tenant Deployments to zero, stamp the reap TTL.
   kubectl apply -n "$LIFECYCLE_TENANT_NS" -f - >/dev/null <<'YAML'
@@ -2284,37 +2283,31 @@ spec:
             capabilities: { drop: ["ALL"] }
 YAML
 
-  # The suspend marker lands inside the tenant namespace under the reserved
-  # suspend name; the mutate scales the Deployment down and stamps reap-after.
-  kubectl apply -n "$LIFECYCLE_TENANT_NS" -f - >/dev/null <<YAML
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: ${LIFECYCLE_SUSPEND_NAME}
-  labels:
-    ${LIFECYCLE_MARKER_LABEL}: "true"
-data:
-  keepalive: "0"
-YAML
-
+  # `syco tenant down` suspends with no keepalive; `syco tenant remove`
+  # re-writes the suspend marker with keepalive 0.
+  "$SYCO" tenant down --ns "$LIFECYCLE_TENANT_NS" || { warn "syco tenant down failed"; exit 1; }
   wait_for "tenant deployments scaled to zero" 120 \
-    "kubectl get deploy lifecycle-workload -n '$LIFECYCLE_TENANT_NS' -o jsonpath='{.spec.replicas}' 2>/dev/null | grep -qx 0"
+    "kubectl get deploy lifecycle-workload -n '$LIFECYCLE_TENANT_NS' -o jsonpath='{.spec.replicas}' 2>/dev/null | grep -qx 0" \
+    || exit 1
+  ok "syco tenant down scaled the tenant deployments to zero"
+  "$SYCO" tenant remove --ns "$LIFECYCLE_TENANT_NS" || { warn "syco tenant remove failed"; exit 1; }
   wait_for "reap-after TTL stamped on the namespace" 120 \
-    "kubectl get namespace '$LIFECYCLE_TENANT_NS' -o jsonpath='{.metadata.annotations.sycophant\.md/reap-after}' 2>/dev/null | grep -q ."
-  ok "suspend scaled the tenant deployments to zero and stamped the reap TTL"
+    "kubectl get namespace '$LIFECYCLE_TENANT_NS' -o jsonpath='{.metadata.annotations.sycophant\.md/reap-after}' 2>/dev/null | grep -q ." \
+    || exit 1
+  ok "syco tenant remove stamped the reap TTL"
 
-  # --- delete: the reap DeletingPolicy deletes the namespace once its TTL is in
-  # the past. Provision generate is synchronize:false, so the reaped namespace is
-  # not resurrected while the marker still exists. The policy runs on a */10
-  # schedule, so allow a generous budget.
+  # The e2e reap schedule is every minute (Kyverno's floor); allow a loaded node.
   wait_for "tenant namespace reaped" 720 \
     "! kubectl get namespace '$LIFECYCLE_TENANT_NS' >/dev/null 2>&1"
   ok "the zero-keepalive tenant namespace was reaped"
+  rm -rf "$(dirname "$values_file")"
 
   ok "tenant lifecycle marker-contract proof passed"
 }
 
 main() {
+  # The operator path below runs through this checkout's syco.
+  cargo build --release -p syco >/dev/null
   local cluster_exists=0
   if k3d cluster list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$CLUSTER_NAME"; then
     cluster_exists=1
@@ -2322,20 +2315,26 @@ main() {
 
   if [ "$CLEAN" = "1" ]; then
     step "Clean run — fresh cluster + full image rebuild"
-    "$REPO_ROOT/scripts/preflight.sh"
+    CLEAN=1 "$REPO_ROOT/scripts/preflight.sh"
     step_0_bootstrap
     step_1_build
   elif [ "$cluster_exists" = "1" ]; then
     warn "Reusing cluster '$CLUSTER_NAME' + its loaded images (pass --clean to rebuild from scratch)"
+    # Reuse still runs deploy, the proofs, and upgrade, so the runtime tools are
+    # required; only the cross-build tier is not. Check them (CLEAN=0 skips musl).
+    CLEAN=0 "$REPO_ROOT/scripts/preflight.sh"
     kubectl config use-context "k3d-$CLUSTER_NAME" >/dev/null 2>&1 \
-      || warn "could not switch kube-context to k3d-$CLUSTER_NAME"
+      || { warn "could not switch kube-context to k3d-$CLUSTER_NAME — the k3d cluster exists but its kubeconfig context is missing; recreate with --clean"; exit 1; }
   else
     warn "No cluster '$CLUSTER_NAME' — bootstrapping once (later runs without --clean reuse it)"
-    "$REPO_ROOT/scripts/preflight.sh"
+    # First boot bootstraps and cross-compiles the images, so it needs the full
+    # build tier even though the run was not invoked with --clean.
+    CLEAN=1 "$REPO_ROOT/scripts/preflight.sh"
     step_0_bootstrap
     step_1_build
   fi
 
+  syco_credentials
   step_2_configure
   step_3_deploy
   verify_user_isolation

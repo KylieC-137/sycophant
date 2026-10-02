@@ -45,7 +45,7 @@ scripts/quickstart-test.sh
 
 Every test under `integration/` must route through actual sycophant code paths:
 
-1. **Tenant namespaces are created via the deployer SA**, not inline with PSA labels hardcoded. The sycophant mutate rule is the only thing that can stamp the labels. The test asserts those labels via `kubectl get` — fixture asymmetry. Delete the mutate rule, the test goes red.
+1. **Tenant namespaces come from the shared tenant-namespace fixture**, which carries the real perimeter labels (`part-of=sycophant-tenant` + the four PSA labels), not hardcoded per test. The label is what triggers the real Kyverno generate wiring the test then asserts. Delete that generate rule, the test goes red.
 
 2. **Caller identity matches the policy's selector.** SA-gated rules are exercised via `kubectl --as=system:serviceaccount:ns:sa` inside `command:` or `script:` steps.
 
@@ -66,8 +66,8 @@ Mutations:
 | Name              | Removes                                            | Expected to break                                              |
 |-------------------|----------------------------------------------------|----------------------------------------------------------------|
 | harness-vap   | VAP `cluster-gvisor-pod-policy`             | All `harness-pod-shape/` tests                               |
-| protect-security  | ClusterPolicy `cluster-protect-security`         | All `tenant-resource-protection/` |
-| tenant-tokenreview-crbs | ClusterPolicy `tenant-rolebinding-generator` | `tenant-namespace-creation/tenant-tokenreview-crbs-generated` |
+| protect-security  | ValidatingPolicy `cluster-protect-security`      | All `tenant-resource-protection/` |
+| tenant-tokenreview-crbs | GeneratingPolicy `tenant-rolebinding-generator` | `tenant-namespace-creation/tenant-tokenreview-crbs-generated` |
 
 The script restores the chart via `helm upgrade --install` after.
 
@@ -76,7 +76,7 @@ The script restores the chart via `helm upgrade --install` after.
 `tests/unit/kyverno-policies/<policy-name>/` directories hold offline policy
 checks. Each has:
 
-- `policy.yaml` — rendered from the chart by `make test-unit-k8s`, never hand-edited
+- `policy.yaml` — rendered from the chart by `make test-unit-k8s`; gitignored
 - `resource-*.yaml` — synthetic admission inputs
 - `user-*.yaml` — UserInfo fixtures for impersonation
 - `values.yaml` — Namespace labels the policy's `namespaceSelector` matches on

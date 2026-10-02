@@ -3,17 +3,7 @@ kind: Test
 metadata:
   name: protect-network-policy-blocks-same-ns
 spec:
-  description: |
-    cluster-protect-security/protect-network-policy: a ServiceAccount
-    in a tenant ns cannot create/update/delete a NetworkPolicy in that
-    same tenant ns. External callers (cluster-admin, deployer) are
-    excluded.
-
-    Setup as cluster-admin: create tenant ns via deployer; create
-    `attacker` SA + Role granting NetworkPolicy CRUD; bind it.
-    Then impersonate the attacker and attempt the write — must fail
-    citing the policy. The cluster-admin RBAC setup itself works
-    (cluster-admin is excluded by username precondition).
+  description: An in-namespace ServiceAccount cannot create, update, or delete a NetworkPolicy.
   bindings:
     - name: tenant_ns
       value: (join('-', ['tenant', random('[a-z0-9]{8}')]))

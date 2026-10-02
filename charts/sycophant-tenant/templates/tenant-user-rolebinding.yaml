@@ -1,20 +1,21 @@
+{{- if eq .Values.render "base" }}
 {{- if .Values.users }}
 # The tenant's namespace-scoped user identities. Binds each operator-supplied
-# issuer-prefixed identity to the minimal tenant-user ClusterRole in this
+# issuer-prefixed identity to the minimal provision-identity ClusterRole in this
 # tenant namespace only, so a user's authority is the union of their
 # per-namespace bindings and nothing wider. Static YAML gated on the users
 # list: a tenant with no bound identities renders no binding and admits no
 # user. Each subject is a User named <issuer>#<sub> exactly as the apiserver
-# presents it, never a Group; the roleRef is tenant-user, never
-# tenant-operator or tenant-deployer.
+# presents it, never a Group; the roleRef is provision-identity, never
+# provision-write.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: tenant-user
+  name: provision-identity
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
-    app.kubernetes.io/component: tenant-user
+    app.kubernetes.io/component: provision-identity
 subjects:
   {{- range .Values.users }}
   - kind: User
@@ -23,6 +24,31 @@ subjects:
   {{- end }}
 roleRef:
   kind: ClusterRole
-  name: tenant-user
+  name: provision-identity
   apiGroup: rbac.authorization.k8s.io
+{{- end }}
+{{- end }}
+{{- if eq .Values.render "user" }}
+{{- range .Values.users }}
+# Per-user tenant membership, one RoleBinding per identity, with the same
+# subject shape and roleRef as the base aggregate above. The name carries a hash
+# of the subject because an issuer-prefixed identity is not a DNS-safe name.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: provision-identity-{{ . | sha256sum | trunc 10 }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: provision-identity
+subjects:
+  - kind: User
+    name: {{ . | quote }}
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: provision-identity
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
 {{- end }}

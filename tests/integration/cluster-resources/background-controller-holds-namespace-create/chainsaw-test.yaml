@@ -3,23 +3,14 @@ kind: Test
 metadata:
   name: background-controller-holds-namespace-create
 spec:
-  description: |
-    The Kyverno background-controller aggregated ClusterRole grants create on
-    Namespaces and ResourceQuotas so the reactor can generate them under its own
-    ServiceAccount rights.
+  description: The Kyverno background-controller role grants create on Namespaces, ResourceQuotas, and LimitRanges.
   steps:
     - name: assert-aggregated-create-verbs
       try:
         - script:
             content: |
-              REPO_ROOT=$(git rev-parse --show-toplevel)
-              out=$(helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
-                -n sycophant-system \
-                --api-versions policies.kyverno.io/v1/ValidatingPolicy 2>&1) || {
-                echo "chart must render with no policyEngine set; helm error:" >&2
-                printf '%s\n' "$out" >&2
-                exit 1
-              }
+              out=$(helm template probe "$(git rev-parse --show-toplevel)/charts/sycophant-cluster" -n sycophant-system \
+                --api-versions policies.kyverno.io/v1/ValidatingPolicy 2>&1) || { printf '%s\n' "$out" >&2; exit 1; }
 
               role=$(printf '%s' "$out" | awk 'BEGIN{RS="\n---\n"} \
                 /rbac.kyverno.io\/aggregate-to-background-controller/ {print}')
@@ -28,6 +19,8 @@ spec:
 
               printf '%s' "$role" | grep -q 'resourcequotas' \
                 || { echo "aggregated bg-controller role must grant resourcequotas create"; printf '%s\n' "$role" >&2; exit 1; }
+              printf '%s' "$role" | grep -q 'limitranges' \
+                || { echo "aggregated bg-controller role must grant limitranges create"; printf '%s\n' "$role" >&2; exit 1; }
 
               printf '%s' "$role" | awk '
                 /resources:/ { ns = ($0 ~ /namespaces/) }

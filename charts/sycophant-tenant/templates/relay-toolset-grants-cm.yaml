@@ -1,32 +1,37 @@
 {{/*
-The toolset grants the relay gateway serves on ListGrants: per workspace, which
-toolsets it may call and the grant names a call may select. Names only -- no
-secret, no path, no egress.
+Per-workspace toolset grants the relay gateway serves on ListGrants: which
+toolsets a workspace may call and the grant names a call may select. Names only
+-- no secret, no path, no egress.
 
-The relay is the internet-facing ingress and needs nothing but names to answer
-ListGrants (`crates/relay-controller/src/capabilities.rs` keeps the grant keys
-and discards every value). Mounting the full capability manifest would put every
-workspace's Secret names, mount paths, and egress domains inside the least
-protected pod in the namespace for no gain.
+One ConfigMap per workspace, `relay-toolset-grants-<workspace>`, which the relay
+merges from the `sycophant.md/type: relay-toolset-grants` label set live. The
+relay is the internet-facing
+ingress and needs nothing but names to answer ListGrants
+(`crates/relay-controller/src/capabilities.rs` keeps the grant keys and discards
+every value). Mounting the full capability manifest would put every workspace's
+Secret names, mount paths, and egress domains inside the least protected pod in
+the namespace for no gain.
 
 Rendered through `sycophant.workspaceBindings` in `.namesOnly` mode, the same
 walk the capability manifest renders, so this ConfigMap cannot name a grant the
 manifest does not bind or drift in structure from it.
 
-Carries its own `sycophant.md/type: relay-toolset-grants`, which
-`protect-relay-toolset-grants` selects on: in-namespace workloads, the relay
+Carries `sycophant.md/type: relay-toolset-grants`, which the
+`cluster-protect-security` policy selects on: in-namespace workloads, the relay
 included, cannot rewrite the grant names the gateway serves.
 */}}
+{{- range $name, $ws := .Values.workspaces }}
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: relay-toolset-grants
-  namespace: {{ .Release.Namespace }}
+  name: relay-toolset-grants-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
   labels:
-    {{- include "sycophant.labels" . | nindent 4 }}
+    {{- include "sycophant.labels" $ | nindent 4 }}
     sycophant.md/type: relay-toolset-grants
+    app.kubernetes.io/name: {{ $name }}
 data:
   grants.yaml: |
-    {{- range $name, $ws := .Values.workspaces }}
     {{- include "sycophant.workspaceBindings" (dict "name" $name "workspace" $ws "namesOnly" true) | nindent 4 }}
-    {{- end }}
+{{- end }}

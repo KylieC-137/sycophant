@@ -1,6 +1,6 @@
 # Kubernetes audit policy for sycophant e2e bootstrap.
 #
-# Logs Secret AND SealedSecret resource access events at Metadata level
+# Logs Secret resource access events at Metadata level
 # (not RequestResponse, which would log secret values into the audit log).
 #
 # Rule order matters: first match wins. Exclusions for kubelet + system
@@ -38,8 +38,6 @@ rules:
     resources:
       - group: ""
         resources: ["secrets"]
-      - group: "bitnami.com"
-        resources: ["sealedsecrets"]
 
   # Log all Secret access events at Metadata level. Captures who/what/when
   # without recording the Secret's data field.
@@ -47,14 +45,4 @@ rules:
     resources:
       - group: ""
         resources: ["secrets"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-
-  # Log all SealedSecret access events at Metadata level. Captures Rails
-  # writes via the rails-deployer SA so the SaaS audit trail is visible.
-  # SealedSecret is the deployer's customer-paste write path; if this isn't
-  # logged, half the secrets pipeline is invisible.
-  - level: Metadata
-    resources:
-      - group: "bitnami.com"
-        resources: ["sealedsecrets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

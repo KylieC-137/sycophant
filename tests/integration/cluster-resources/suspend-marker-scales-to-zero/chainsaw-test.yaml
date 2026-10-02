@@ -3,28 +3,14 @@ kind: Test
 metadata:
   name: suspend-marker-scales-to-zero
 spec:
-  description: |
-    A suspend marker inside a tenant namespace drives a mutate that scales that
-    namespace's tenant Deployments to zero replicas. The suspend reactor acts
-    inside the target namespace, not sycophant-system.
-
-    The blast-radius assertion is the load-bearing one: the Deployments to
-    patch are resolved from the trigger's own namespace. A target selector that
-    named Deployments without that scoping would scale every tenant in the
-    cluster on one marker.
+  description: A suspend marker in a tenant namespace scales that namespace's Deployments to zero.
   steps:
     - name: assert-suspend-mutate
       try:
         - script:
             content: |
-              REPO_ROOT=$(git rev-parse --show-toplevel)
-              out=$(helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
-                -n sycophant-system \
-                --api-versions policies.kyverno.io/v1/ValidatingPolicy 2>&1) || {
-                echo "chart must render with no policyEngine set; helm error:" >&2
-                printf '%s\n' "$out" >&2
-                exit 1
-              }
+              out=$(helm template probe "$(git rev-parse --show-toplevel)/charts/sycophant-cluster" -n sycophant-system \
+                --api-versions policies.kyverno.io/v1/ValidatingPolicy 2>&1) || { printf '%s\n' "$out" >&2; exit 1; }
 
               mut=$(printf '%s' "$out" | awk 'BEGIN{RS="\n---\n"} \
                 /kind: MutatingPolicy/ && /replicas/ && /deployments/ {print}')

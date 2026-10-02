@@ -13,9 +13,6 @@ pub(crate) struct HarnessConfig {
     pub idle_gap_secs: u64,
     /// Namespace this workspace's tool Jobs are created in.
     pub namespace: String,
-    /// Operator-authored toolset config, read once at boot from a mounted
-    /// ConfigMap. Names each toolset's image, keepalive, and forwarded env.
-    pub toolset_config_file: String,
     /// Operator-authored capability manifest, read once at boot from a mounted
     /// ConfigMap. Carries each bound toolset's tools with their argument schemas
     /// and this workspace's resolved grants (Secret name, mount path, egress),
@@ -63,9 +60,6 @@ impl HarnessConfig {
         let namespace =
             std::env::var("TOOLSET_NAMESPACE").unwrap_or_else(|_| "default".to_string());
 
-        let toolset_config_file = std::env::var("TOOLSET_CONFIG_FILE")
-            .unwrap_or_else(|_| "/etc/sycophant/toolset-config/toolsets.yaml".to_string());
-
         let capability_manifest_file = std::env::var("CAPABILITY_MANIFEST_FILE")
             .unwrap_or_else(|_| "/etc/sycophant/capability-manifest/manifest.yaml".to_string());
 
@@ -85,7 +79,6 @@ impl HarnessConfig {
             max_iterations,
             idle_gap_secs,
             namespace,
-            toolset_config_file,
             capability_manifest_file,
             scheduling_file,
             capability_service,

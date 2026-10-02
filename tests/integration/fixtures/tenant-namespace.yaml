@@ -1,5 +1,5 @@
 # Shared perimeter-labeled tenant namespace. part-of triggers the per-tenant policy
-# wiring; the four PSA labels satisfy the cluster-tenant-ns-psa-required guard.
+# wiring; the four PSA labels satisfy the cluster-tenant-namespace-psa-required guard.
 # Applied templated (`- apply: { file, template: true }`) so ($tenant_ns) resolves.
 apiVersion: v1
 kind: Namespace

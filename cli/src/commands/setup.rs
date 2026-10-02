@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use crate::cli::SetupCmd;
 use crate::commands::build;
-use crate::commands::common::{ok, step};
+use crate::commands::common::{ok, step, warn};
+use crate::commands::operator;
 use crate::runner::{run_output, run_passthrough, run_silent, run_stdin};
 use crate::scope::Scope;
 
@@ -14,6 +15,37 @@ pub(crate) const CLUSTER: &str = "sycophant";
 const NODE: &str = "k3d-sycophant-server-0";
 const REGISTRY: &str = "sycophant-registry";
 const SYSTEM_NS: &str = "sycophant-system";
+const APISERVER_AUTH_CONFIG: &str = "/etc/rancher/k3s/auth-config.yaml";
+
+// Optional inputs for non-default clusters (the e2e harness sets them all).
+// Truthy: skip the image build (the caller builds and loads its own images).
+const SKIP_BUILD_ENV: &str = "SYCO_SKIP_BUILD";
+// Extra `k3d cluster create` arguments, whitespace-separated.
+const K3D_ARGS_ENV: &str = "SYCO_K3D_ARGS";
+// A file appended to the rendered apiserver auth config before the node boots,
+// e.g. a second jwt issuer.
+const AUTH_CONFIG_APPEND_ENV: &str = "SYCO_AUTH_CONFIG_APPEND";
+// Extra helm values files for the Kyverno engine and the cluster chart.
+const KYVERNO_VALUES_ENV: &str = "SYCO_KYVERNO_VALUES";
+const CLUSTER_VALUES_ENV: &str = "SYCO_CLUSTER_VALUES";
+// Truthy: import the Cilium agent image from the host Docker cache before the
+// install, so a slow registry pull cannot outlast the rollout wait.
+const CILIUM_PRELOAD_ENV: &str = "SYCO_CILIUM_PRELOAD";
+
+fn env_flag(name: &str) -> bool {
+    env::var(name).is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
+fn env_path(name: &str) -> Option<String> {
+    env::var(name).ok().filter(|v| !v.is_empty())
+}
+
+/// `-f <file>` for an optional values-file input.
+fn extra_values(name: &str) -> Vec<String> {
+    env_path(name)
+        .map(|f| vec!["-f".to_string(), f])
+        .unwrap_or_default()
+}
 const CILIUM_VERSION: &str = "1.19.3";
 const KYVERNO_VERSION: &str = "3.9.1";
 // Pinned gVisor release — the release tarball (gvisor.tar.bz2 + .sha512) is
@@ -31,11 +63,9 @@ const KYVERNO_VALUES: &str = include_str!("../../values/kyverno.yaml");
 // stays a `--set`.
 const CILIUM_VALUES: &str = include_str!("../../values/cilium.yaml");
 
-// The cluster layer always renders the Kyverno policies and requires the
-// Kyverno CRDs, which setup installs (P5) before this cluster-layer install
-// (P7). There is no engine knob to pass. Pure so the actual arg list handed to
-// helm is unit + mutation testable.
-fn cluster_layer_helm_args(chart: &str) -> Vec<String> {
+// The cluster layer requires the Kyverno CRDs, which setup installs first. Its
+// idp values match the auth config the apiserver was booted with.
+fn cluster_layer_helm_args(chart: &str, ca: &str) -> Vec<String> {
     [
         "upgrade",
         "--install",
@@ -43,11 +73,18 @@ fn cluster_layer_helm_args(chart: &str) -> Vec<String> {
         chart,
         "-n",
         SYSTEM_NS,
+        "--set-string",
+        &format!("idp.issuer={}", operator::ISSUER),
+        "--set-string",
+        &format!("idp.audience={}", operator::AUDIENCE),
+        "--set-file",
+        &format!("idp.certificateAuthority={ca}"),
         "--wait",
         "--timeout=5m",
     ]
     .iter()
     .map(|s| s.to_string())
+    .chain(extra_values(CLUSTER_VALUES_ENV))
     .collect()
 }
 
@@ -82,21 +119,76 @@ pub(crate) fn run(_cmd: SetupCmd) -> Result<(), String> {
         Some(_) => Some(build_arch(env::consts::ARCH)?),
         None => None,
     };
-    check_prereqs(arch.as_ref())?; // P0
+    check_prereqs(arch.as_ref())?;
     let scope = Scope::global()?;
-    crate::sync::extract_assets(&scope)?; // P1: charts + version
+    // Each operator step is gated on its own result, so a partial run resumes.
+    // Asked up front so the run does not stall on a prompt after the build.
+    let need_dex = !operator::dex_installed();
+    let need_grant = !operator::marker_writer_bound(SYSTEM_NS);
+    let login = if need_dex {
+        Some(prompt_login()?)
+    } else if need_grant {
+        Some(operator::credentials(&scope.oidc_dir())?)
+    } else {
+        None
+    };
+    crate::sync::extract_assets(&scope)?; // charts + version
     ok("global config scaffolded");
-    ensure_cluster(&scope)?; // P2 (creates the toolset registry + instructions mount)
-    install_gvisor(&scope)?; // P3 — before Cilium (CRI-restart ordering)
-    install_cilium()?; // P4
-    patch_coredns_registry()?; // P4.5 — after Cilium so CoreDNS can reschedule
-    install_kyverno(&scope)?; // P5
+    ensure_cluster(&scope)?; // creates the toolset registry + instructions mount
+    install_gvisor(&scope)?; // before Cilium (CRI-restart ordering)
+    install_cilium()?;
+    patch_coredns_registry()?; // after Cilium so CoreDNS can reschedule
+    install_kyverno(&scope)?;
     match (&repo, &arch) {
-        (Some(repo), Some(arch)) => build::build_and_load(repo, arch)?, // P6
+        _ if env_flag(SKIP_BUILD_ENV) => {
+            ok(&format!("images: {SKIP_BUILD_ENV} set — skipping build"))
+        }
+        (Some(repo), Some(arch)) => build::build_and_load(repo, arch)?,
         _ => ok("images: no repo checkout — skipping build (expecting prebuilt images)"),
     }
-    install_cluster_layer(&scope)?; // P7
-    eprintln!("\n\x1b[1;32m==> Cluster ready.\x1b[0m Next: `syco tenant up <name>`.");
+    install_cluster_layer(&scope)?;
+    if let Some((email, password)) = login {
+        install_operator(&scope, need_dex, email, password)?;
+    }
+    eprintln!(
+        "\n\x1b[1;32m==> Cluster ready.\x1b[0m Next: `syco tenant up --ns tenant-<name> --capacity <quantity>`."
+    );
+    Ok(())
+}
+
+fn prompt_login() -> Result<(String, String), String> {
+    eprintln!("Dex operator login (the password is kept only as a bcrypt hash in the cluster)");
+    let email = operator::prompt("Operator email", operator::EMAIL_ENV, false)?;
+    let password = operator::prompt("Operator password", operator::PASSWORD_ENV, true)?;
+    if operator::prompt("Confirm password", operator::PASSWORD_ENV, true)? != password {
+        return Err("passwords do not match".into());
+    }
+    Ok((email, password))
+}
+
+/// Install Dex with the operator as its one password user when absent, log in
+/// once to learn the identity the apiserver maps the operator to, and let it
+/// write the tenant marker. Tenant-namespace grants are made by `tenant up`
+/// once the namespace exists.
+fn install_operator(
+    scope: &Scope,
+    install: bool,
+    email: String,
+    password: String,
+) -> Result<(), String> {
+    if install {
+        if !operator::dex_tls_present() {
+            return Err(
+                "Dex TLS Secret missing from sycophant-system; run `syco destroy` then `syco setup`"
+                    .into(),
+            );
+        }
+        operator::install_dex(&scope.dex_chart_dir(), &email, &password)?;
+        operator::save_email(&scope.oidc_dir(), &email)?;
+    }
+    let kube = operator::Operator::with_password(email, password)?.kubeconfig()?;
+    operator::grant_marker_writer(SYSTEM_NS, "create", &kube.identity)?;
+    ok(&format!("{} may write the tenant marker", kube.identity));
     Ok(())
 }
 
@@ -176,6 +268,26 @@ fn check_prereqs(build: Option<&BuildArch>) -> Result<(), String> {
             "brew install kubectl"
         } else {
             "https://kubernetes.io/docs/tasks/tools/#kubectl"
+        },
+    );
+    require(
+        &mut fails,
+        "openssl",
+        run_silent("openssl", &["version"]),
+        if mac {
+            "brew install openssl"
+        } else {
+            "apt-get install -y openssl"
+        },
+    );
+    require(
+        &mut fails,
+        "htpasswd",
+        run_silent("sh", &["-c", "command -v htpasswd"]),
+        if mac {
+            "htpasswd ships with macOS; reinstall the command-line tools"
+        } else {
+            "apt-get install -y apache2-utils"
         },
     );
     require(
@@ -339,10 +451,39 @@ fn parse_df_avail_gb(df_output: &str) -> Option<u64> {
 fn ensure_cluster(scope: &Scope) -> Result<(), String> {
     step("Ensuring k3d cluster `sycophant`");
     let list = run_output("k3d", &["cluster", "list", "-o", "json"]).unwrap_or_default();
+    let oidc = scope.oidc_dir();
+    let auth_config = operator::auth_config(&oidc);
     if cluster_exists(&list, CLUSTER) {
+        if !auth_config.is_file() {
+            return Err(format!(
+                "cluster `sycophant` exists but {} is missing, so its apiserver trusts no Dex issuer; run `syco destroy` then `syco setup`",
+                auth_config.display()
+            ));
+        }
         ok("cluster `sycophant` already exists");
         return Ok(());
     }
+    // The apiserver reads its auth config at process start, so the trust is
+    // generated before the node boots. Only the auth config is mounted.
+    let tls_key = operator::generate_trust(&oidc, &scope.cluster_chart_dir())?;
+    if let Some(extra) = env_path(AUTH_CONFIG_APPEND_ENV) {
+        warn(&format!(
+            "{AUTH_CONFIG_APPEND_ENV} is set: appending {extra} to the apiserver auth config, \
+             so the apiserver trusts every issuer it adds beside Dex"
+        ));
+        let more =
+            fs::read_to_string(&extra).map_err(|e| format!("failed to read {extra}: {e}"))?;
+        let mut cfg = fs::read_to_string(&auth_config)
+            .map_err(|e| format!("failed to read {}: {e}", auth_config.display()))?;
+        cfg.push('\n');
+        cfg.push_str(&more);
+        fs::write(&auth_config, cfg)
+            .map_err(|e| format!("failed to write {}: {e}", auth_config.display()))?;
+    }
+    let auth_mount = format!("{}:{APISERVER_AUTH_CONFIG}@server:*", auth_config.display());
+    let auth_arg =
+        format!("--kube-apiserver-arg=authentication-config={APISERVER_AUTH_CONFIG}@server:*");
+    let dex_port = format!("127.0.0.1:{0}:{0}@loadbalancer", operator::DEX_NODEPORT);
     // `--registry-create` is owned-by-cluster and errors if a registry by that
     // name already exists (e.g. another k3d cluster created it). Reuse it via
     // `--registry-use` when present; create it otherwise. Either way the cluster
@@ -363,33 +504,50 @@ fn ensure_cluster(scope: &Scope) -> Result<(), String> {
         .map_err(|e| format!("failed to create {}: {e}", instructions_dir_path.display()))?;
     let k = instructions_dir_path.to_string_lossy();
     let instructions_mount = format!("{k}:{k}@all");
-    run_passthrough(
-        "k3d",
-        &[
-            "cluster",
-            "create",
-            CLUSTER,
-            "--k3s-arg",
-            "--flannel-backend=none@server:*",
-            "--k3s-arg",
-            "--disable-network-policy@server:*",
-            "--k3s-arg",
-            "--disable=traefik@server:*",
-            "--k3s-arg",
-            "--disable=servicelb@server:*",
-            "--k3s-arg",
-            "--disable=metrics-server@server:*",
-            "--k3s-arg",
-            "--disable=helm-controller@server:*",
-            "--k3s-arg",
-            "--secrets-encryption@server:*",
-            "-v",
-            &instructions_mount,
-            &registry_arg,
-            "--wait",
-        ],
-    )?;
+    let extra = env_path(K3D_ARGS_ENV).unwrap_or_default();
+    if !extra.is_empty() {
+        warn(&format!(
+            "{K3D_ARGS_ENV} is set: passing extra `k3d cluster create` arguments, \
+             which may change the cluster's mounts, ports, and apiserver flags: {extra}"
+        ));
+    }
+    let mut args: Vec<&str> = vec![
+        "cluster",
+        "create",
+        CLUSTER,
+        "--k3s-arg",
+        "--flannel-backend=none@server:*",
+        "--k3s-arg",
+        "--disable-network-policy@server:*",
+        "--k3s-arg",
+        "--disable=traefik@server:*",
+        "--k3s-arg",
+        "--disable=servicelb@server:*",
+        "--k3s-arg",
+        "--disable=metrics-server@server:*",
+        "--k3s-arg",
+        "--disable=helm-controller@server:*",
+        "--k3s-arg",
+        "--secrets-encryption@server:*",
+        "--k3s-arg",
+        &auth_arg,
+        "-v",
+        &auth_mount,
+        "-v",
+        &instructions_mount,
+        &registry_arg,
+        // The host reaches Dex at the same loopback address the apiserver does.
+        "--port",
+        &dex_port,
+        "--wait",
+    ];
+    args.extend(extra.split_whitespace());
+    run_passthrough("k3d", &args)?;
     ok("cluster `sycophant` created");
+    // Dex's TLS key goes from memory into the cluster and nowhere else.
+    apply_system_ns(scope)?;
+    operator::upload_tls(&oidc, &tls_key)?;
+    ok("Dex TLS Secret stored in sycophant-system");
     Ok(())
 }
 
@@ -402,7 +560,9 @@ fn patch_coredns_registry() -> Result<(), String> {
     let tmpl = format!("{{{{ (index .NetworkSettings.Networks \"k3d-{CLUSTER}\").IPAddress }}}}");
     let ip = run_output("docker", &["inspect", REGISTRY, "--format", &tmpl]).unwrap_or_default();
     if ip.is_empty() {
-        ok("registry not present — skipping CoreDNS wiring");
+        warn(&format!(
+            "could not resolve the {REGISTRY} IP on the k3d-{CLUSTER} network — skipping CoreDNS wiring; toolset image pulls from {REGISTRY}:5000 will fail"
+        ));
         return Ok(());
     }
     let current = run_output(
@@ -439,22 +599,11 @@ fn patch_coredns_registry() -> Result<(), String> {
             &patch,
         ],
     )?;
-    run_passthrough(
-        "kubectl",
-        &["rollout", "restart", "deploy/coredns", "-n", "kube-system"],
-    )?;
-    run_passthrough(
-        "kubectl",
-        &[
-            "rollout",
-            "status",
-            "deploy/coredns",
-            "-n",
-            "kube-system",
-            "--timeout=60s",
-        ],
-    )?;
-    ok(&format!("CoreDNS resolves sycophant-registry -> {ip}"));
+    // No restart: the k3s Corefile reloads NodeHosts on its own within about a
+    // minute, and a restart would make the fresh pod re-pull its image.
+    ok(&format!(
+        "CoreDNS NodeHosts maps sycophant-registry -> {ip}"
+    ));
     Ok(())
 }
 
@@ -479,7 +628,21 @@ fn install_gvisor(scope: &Scope) -> Result<(), String> {
     for f in ["gvisor.tar.bz2", "gvisor.tar.bz2.sha512"] {
         run_passthrough(
             "curl",
-            &["-sSfL", "-o", &format!("{t}/{f}"), &format!("{url}/{f}")],
+            // --retry-all-errors also covers a mid-transfer reset, which the
+            // release bucket does intermittently.
+            &[
+                "-sSfL",
+                "--retry",
+                "5",
+                "--retry-delay",
+                "2",
+                "--retry-all-errors",
+                "--connect-timeout",
+                "10",
+                "-o",
+                &format!("{t}/{f}"),
+                &format!("{url}/{f}"),
+            ],
         )?;
     }
     // sha512sum reads the `.sha512` file's relative name, so verify from $tmp,
@@ -593,6 +756,9 @@ fn install_cilium() -> Result<(), String> {
     fs::write(&values_path, CILIUM_VALUES)
         .map_err(|e| format!("failed to write cilium values: {e}"))?;
     let values_str = values_path.to_string_lossy().into_owned();
+    if env_flag(CILIUM_PRELOAD_ENV) {
+        preload_cilium()?;
+    }
     run_passthrough(
         "helm",
         &[
@@ -615,6 +781,20 @@ fn install_cilium() -> Result<(), String> {
         ],
     )?;
     ok("Cilium ready");
+    Ok(())
+}
+
+/// k3d wipes the node image cache with the cluster, so the ~240MB agent image
+/// is otherwise re-pulled on every fresh cluster.
+fn preload_cilium() -> Result<(), String> {
+    let image = format!("quay.io/cilium/cilium:v{CILIUM_VERSION}");
+    run_output("docker", &["pull", "-q", &image])?;
+    // Removed on drop, on failure, and on Ctrl-C.
+    let tar = operator::TempFile::new("tar", "")?;
+    let t = tar.path();
+    run_output("docker", &["image", "save", "-o", &t, &image])?;
+    run_output("k3d", &["image", "import", &t, "--cluster", CLUSTER])?;
+    ok("Cilium agent image preloaded");
     Ok(())
 }
 
@@ -652,40 +832,45 @@ fn install_kyverno(scope: &Scope) -> Result<(), String> {
     fs::write(&values_path, KYVERNO_VALUES)
         .map_err(|e| format!("failed to write kyverno values: {e}"))?;
     let values_str = values_path.to_string_lossy().into_owned();
-    run_passthrough(
-        "helm",
-        &[
-            "upgrade",
-            "--install",
-            "kyverno",
-            "kyverno/kyverno",
-            "--version",
-            KYVERNO_VERSION,
-            "-n",
-            "kyverno",
-            "-f",
-            &values_str,
-            "--wait",
-            "--timeout=5m",
-        ],
-    )?;
+    let mut args = vec![
+        "upgrade".to_string(),
+        "--install".into(),
+        "kyverno".into(),
+        "kyverno/kyverno".into(),
+        "--version".into(),
+        KYVERNO_VERSION.into(),
+        "-n".into(),
+        "kyverno".into(),
+        "-f".into(),
+        values_str,
+        "--wait".into(),
+        "--timeout=5m".into(),
+    ];
+    args.extend(extra_values(KYVERNO_VALUES_ENV));
+    run_passthrough("helm", &args.iter().map(String::as_str).collect::<Vec<_>>())?;
     ok("Kyverno installed");
     Ok(())
 }
 
-fn install_cluster_layer(scope: &Scope) -> Result<(), String> {
-    step("Installing sycophant cluster layer");
-    let chart_dir = scope.cluster_chart_dir();
-    // Create the namespace ourselves with PSA labels — helm --create-namespace
-    // would land it bare, leaving privileged pods admissible. Applied from the
-    // same chart dir helm installs from (charts/sycophant-cluster/system-ns.yaml).
-    let ns_manifest = chart_dir.join("system-ns.yaml");
+// Create the namespace ourselves with PSA labels — helm --create-namespace
+// would land it bare, leaving privileged pods admissible. Applied from the same
+// chart dir helm installs from (charts/sycophant-cluster/system-ns.yaml).
+fn apply_system_ns(scope: &Scope) -> Result<(), String> {
+    let ns_manifest = scope.cluster_chart_dir().join("system-ns.yaml");
     run_passthrough(
         "kubectl",
         &["apply", "-f", ns_manifest.to_string_lossy().as_ref()],
-    )?;
-    let chart = chart_dir.to_string_lossy().into_owned();
-    let args = cluster_layer_helm_args(&chart);
+    )
+}
+
+fn install_cluster_layer(scope: &Scope) -> Result<(), String> {
+    step("Installing sycophant cluster layer");
+    apply_system_ns(scope)?;
+    let chart = scope.cluster_chart_dir().to_string_lossy().into_owned();
+    let ca = operator::ca_cert(&scope.oidc_dir())
+        .to_string_lossy()
+        .into_owned();
+    let args = cluster_layer_helm_args(&chart, &ca);
     run_passthrough("helm", &args.iter().map(String::as_str).collect::<Vec<_>>())?;
     ok("sycophant cluster layer installed");
     Ok(())
@@ -783,17 +968,15 @@ mod tests {
     }
 
     #[test]
-    fn cluster_layer_passes_no_policy_engine_knob() {
-        // The engine knob is gone: the cluster chart always renders the Kyverno
-        // policies. The install args carry no `--set policyEngine`, and a mutant
-        // reintroducing one fails here.
-        let args = cluster_layer_helm_args("/charts/sycophant-cluster");
-        assert!(
-            !args.iter().any(|a| a.contains("policyEngine")),
-            "install args must not carry a policyEngine knob: {args:?}"
-        );
-        assert_eq!(args.first().map(String::as_str), Some("upgrade"));
-        assert!(args.iter().any(|a| a == "--install"));
+    fn cluster_layer_trusts_dex() {
+        let args = cluster_layer_helm_args("/c", "/oidc/ca.crt");
+        let pairs: Vec<_> = args
+            .windows(2)
+            .map(|w| (w[0].as_str(), w[1].as_str()))
+            .collect();
+        assert!(pairs.contains(&("--set-string", "idp.issuer=https://127.0.0.1:30443/dex")));
+        assert!(pairs.contains(&("--set-string", "idp.audience=sycophant-cluster")));
+        assert!(pairs.contains(&("--set-file", "idp.certificateAuthority=/oidc/ca.crt")));
     }
 
     #[test]

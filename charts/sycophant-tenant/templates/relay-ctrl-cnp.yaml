@@ -1,9 +1,4 @@
-{{- $hasApp := false }}
-{{- range $channel, $entry := .Values.channels }}
-{{- if eq $entry.kind "app" }}
-{{- $hasApp = true }}
-{{- end }}
-{{- end }}
+{{- if eq .Values.render "base" }}
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -15,7 +10,7 @@ metadata:
 spec:
   endpointSelector:
     matchLabels:
-      app.kubernetes.io/component: relay-ctrl
+      app.kubernetes.io/component: relay-controller
       app.kubernetes.io/part-of: sycophant
   # One object carries every relay ingress rule. Any ingress policy
   # selecting a pod flips that pod to default-deny for ingress, so a
@@ -46,7 +41,7 @@ spec:
         - ports:
             - port: "9092"
               protocol: TCP
-{{- if $hasApp }}
+{{- if gt (include "sycophant.appChannelCount" . | atoi) 0 }}
     # App port (9091) — the transport-class adapter pipe, and nothing else.
     # A bare component match would admit every adapter, platform adapters
     # included.
@@ -71,7 +66,7 @@ metadata:
 spec:
   endpointSelector:
     matchLabels:
-      app.kubernetes.io/component: relay-ctrl
+      app.kubernetes.io/component: relay-controller
       app.kubernetes.io/part-of: sycophant
   egress:
     # kube-apiserver: TokenReview (internal-caller auth), the
@@ -83,21 +78,12 @@ spec:
         - ports:
             - port: "6443"
               protocol: TCP
-    - toEndpoints:
-        - matchLabels:
-            io.kubernetes.pod.namespace: kube-system
-            k8s-app: kube-dns
-      toPorts:
-        - ports:
-            - port: "53"
-              protocol: UDP
-            - port: "53"
-              protocol: TCP
+    {{- include "sycophant.dnsEgress" . | nindent 4 }}
     # Per-workspace harness relay-forward surface (9091): the gateway
     # forwards external WatchTools / CallTool calls into the workspace's
     # harness. This is the harness's relay-only port, split off the pod-facing
     # dispatch port (9090). The per-workspace harness-egress-<ws> CNP
-    # authorises the reverse (harness ingress admitting relay-ctrl to 9091).
+    # authorises the reverse (harness ingress admitting relay-controller to 9091).
     # Workspace scoping is enforced at the application layer (caller's signed
     # envelope + channel binding) and by the harness's per-workspace ingress.
     - toEndpoints:
@@ -108,3 +94,4 @@ spec:
         - ports:
             - port: "9091"
               protocol: TCP
+{{- end }}

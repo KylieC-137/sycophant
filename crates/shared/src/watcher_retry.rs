@@ -57,6 +57,52 @@ where
     })
 }
 
+/// Spawn a typed ConfigMap watcher via [`spawn_watcher_task`] and block until
+/// its initial sync lands (or 10s elapses). Returns `Ok(())` once the watcher's
+/// `ready_tx` fires, `Err(_)` on timeout so the caller can crash and let the
+/// kubelet restart backoff retry rather than serve an empty table.
+///
+/// `watch_fn` is the per-iteration watch body; it takes owned clones so each
+/// retry starts fresh and no borrow crosses the spawned task boundary.
+pub async fn spawn_and_await_ready<T, F, Fut, E>(
+    task_name: &'static str,
+    subject: &'static str,
+    client: kube::Client,
+    namespace: String,
+    table: T,
+    watch_fn: F,
+) -> Result<(), String>
+where
+    T: Clone + Send + 'static,
+    F: Fn(kube::Client, String, T, tokio::sync::watch::Sender<bool>) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<(), E>> + Send,
+    E: std::fmt::Display + Send,
+{
+    let (ready_tx, mut ready_rx) = tokio::sync::watch::channel(false);
+    spawn_watcher_task(task_name, move || {
+        watch_fn(
+            client.clone(),
+            namespace.clone(),
+            table.clone(),
+            ready_tx.clone(),
+        )
+    });
+
+    // `.is_ok()` here drops the borrowed `watch::Ref` before the return, so
+    // `ready_rx` isn't held across the tail expression.
+    let synced = tokio::time::timeout(Duration::from_secs(10), ready_rx.wait_for(|&v| v))
+        .await
+        .is_ok();
+    if synced {
+        tracing::info!("{} watcher initial sync complete", subject);
+        Ok(())
+    } else {
+        Err(format!(
+            "{subject} watcher initial sync did not complete within 10s"
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

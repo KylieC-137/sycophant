@@ -32,7 +32,7 @@ Trust contract:
 
 Instructions content is chart-value driven, not a custom resource. The chart renders, per workspace from `.Values.workspaces` (no `lookup`), an `emptyDir` mounted read-only onto that workspace's harness at `/etc/instructions/<workspace>` plus an init container that fills it.
 
-For each workspace the harness pod runs an `instructions-sync` init container that pulls `<harness.instructions.bucket>/<workspace prefix>` from `<harness.instructions.endpoint>` into the `emptyDir`, using the read-only credential named by `harness.instructions.credentialName` (a SealedSecret produced SaaS-side). The workspace prefix is `workspaces.<ws>.instructions.prefix`, defaulting to `<namespace>/<workspace>`. The init container mounts the credential; the serving container does not. `emptyDir` (not `hostPath`, not a PV) keeps the tenant namespace PSA `restricted` and re-syncs a fresh tree on every pod start.
+For each workspace the harness pod runs an `instructions-sync` init container that pulls `<harness.instructions.bucket>/<workspace prefix>` from `<harness.instructions.endpoint>` into the `emptyDir`, using the read-only credential named by `harness.instructions.credentialName` (a Secret the operator provides). The workspace prefix is `workspaces.<ws>.instructions.prefix`, defaulting to `<namespace>/<workspace>`. The init container mounts the credential; the serving container does not. `emptyDir` (not `hostPath`, not a PV) keeps the tenant namespace PSA `restricted` and re-syncs a fresh tree on every pod start.
 
 ```
 <bucket>/<prefix>  →  init sync  →  emptyDir /etc/instructions/<ws>  →  agent
@@ -63,7 +63,7 @@ harness:
     endpoint: seaweedfs.sycophant-system.svc.cluster.local:8333
     bucket: sycophant-instructions
     credentialName: instructions-reader
-    syncImage: quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+    syncImage: rclone/rclone:1.75.1
 ```
 
 ## Reference fixtures
@@ -142,7 +142,7 @@ The list narrows the toolset tools advertised to the model for that agent's turn
 
 - **Remote-source instructions adapters** — OCI, lakeFS, and git adapters beyond the object-storage sync ship as separate-repo crates with their own controllers. Each populates the workspace's object-storage prefix out-of-band; the serving container reads only its synced emptyDir.
 - **CLI helpers** — `syco init` to scaffold a new instructions folder.
-- **Web UI / SaaS authoring surface** — operator-facing app for editing principal content (Rails admin).
+- **Web UI authoring surface** — an operator-facing app for editing principal content.
 
 ## Verification
 

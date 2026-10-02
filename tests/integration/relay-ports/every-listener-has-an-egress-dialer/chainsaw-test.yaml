@@ -3,37 +3,7 @@ kind: Test
 metadata:
   name: every-listener-has-an-egress-dialer
 spec:
-  description: |
-    Every port the relay listens on must have BOTH halves of a reachable path:
-    an ingress rule in the relay's fence that admits the port, AND at least one
-    egress policy in the tenant render that permits a pod to dial the relay on
-    that port. An admit with no dialer is a dead listener — the fence opens but
-    nothing in the namespace is allowed to reach it. That is the 9092 defect: the
-    principal ingress rule shipped while no principal egress policy existed, so
-    nothing could dial the port the relay was fencing.
-
-    The relay serves the harness port (9090), the app port (9091), and the
-    principal port (9092), declared as container ports in
-    charts/sycophant-tenant/templates/relay-ctrl.yaml. The dialers today are the
-    harness (9090, harness-cnp.yaml), the transport adapter (9091,
-    adapter-app-cnp.yaml), and the principal adapter (9092,
-    adapter-principal-cnp.yaml).
-
-    A dialer is found by matching each egress rule's `toEndpoints` selector
-    against the relay pod's own rendered labels, so a policy keyed on the relay's
-    `component` label and one keyed on its `name` label both count.
-
-    Pure chart-render property. Rendered with a channel of kind app so all three
-    listeners' fences and dialers exist: the app-port ingress rule and the
-    transport dialer render only when an app channel is present; the principal
-    path renders unconditionally. The harness egress policy is per-workspace, so
-    the render sets one workspace (probe) to materialize the harness → relay
-    9090 dialer.
-
-    Mutation guard: drop adapter-principal-cnp.yaml from the render and the
-    9092 admit survives while its dialer disappears, reding the missing-dialer
-    assertion. Remove the app-port ingress rule and 9091 reds the missing-admit
-    assertion.
+  description: Every relay ingress port has at least one egress policy that lets a pod dial it.
   steps:
     - name: render-and-assert-each-listener-is-reachable
       try:
@@ -54,8 +24,8 @@ spec:
 
               # The relay pod and the ports it listens on.
               relay = [d for d in docs if d.get("kind") == "Deployment"
-                       and d["metadata"]["name"] == "relay-ctrl"]
-              assert relay, "relay-ctrl Deployment did not render"
+                       and d["metadata"]["name"] == "relay-controller"]
+              assert relay, "relay-controller Deployment did not render"
               relay = relay[0]
               relay_labels = relay["spec"]["template"]["metadata"]["labels"]
               listen = set()

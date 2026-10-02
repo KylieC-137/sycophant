@@ -40,6 +40,7 @@ use message_source::MessageSource;
 use registry::ConversationRegistry;
 use shared::scheduling::SchedulingConfig;
 use shared::toolset::ToolsetConfig;
+use tokio::sync::RwLock;
 use tonic::transport::Server;
 
 /// Default on-disk root for conversation event logs. Mounted from the
@@ -121,12 +122,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             None
         }
     };
-    let toolset_config = if kube_client.is_some() {
-        ToolsetConfig::load(&config.toolset_config_file)
-            .map_err(|e| format!("toolset config: {e}"))?
-    } else {
-        ToolsetConfig::empty()
-    };
+    // The live toolset table, empty at boot; the toolset watcher below fills it.
+    let toolset_config = Arc::new(RwLock::new(ToolsetConfig::empty()));
     // The tool catalog, read once at boot from the mounted capability manifest.
     // It carries each bound toolset's tools with their argument schemas and this
     // workspace's resolved grants, so the harness needs no runtime discovery and
@@ -154,6 +151,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // scheduling, so clone them before `DispatchState::new` consumes the
     // originals.
     let kube_for_inference = kube_client.clone();
+    let kube_for_toolset = kube_client.clone();
     let scheduling_for_inference = scheduling.clone();
     let dispatch = DispatchState::new(
         kube_client,
@@ -161,13 +159,41 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         config.capability_service.clone(),
         config.workspace.clone(),
         scheduling,
-        toolset_config,
+        toolset_config.clone(),
     );
     tracing::info!(
         namespace = %config.namespace,
         capability_service = %config.capability_service,
         "tool dispatch ready"
     );
+
+    // The live dispatch table. Only in cluster: local dev holds no kube client
+    // and dispatches no Jobs.
+    if let Some(client) = kube_for_toolset {
+        // An unsynced table dispatches no toolset, so a timeout crashes the
+        // process and lets the kubelet's restart backoff retry rather than
+        // answer every call with "not found".
+        shared::watcher_retry::spawn_and_await_ready(
+            "toolset",
+            "toolset",
+            client,
+            config.namespace.clone(),
+            toolset_config.clone(),
+            |client, ns, table, tx| async move {
+                shared::configmap_watcher::watch_configmaps(
+                    client,
+                    &ns,
+                    "sycophant.md/type=toolset",
+                    "toolset",
+                    table,
+                    tx,
+                    |cms| shared::toolset::ToolsetConfig::merge_configmaps(cms.values()),
+                )
+                .await
+            },
+        )
+        .await?;
+    }
 
     // The harness dials the model directly: a warm local Service in-process, or
     // a per-call inference-runtime Job it creates and dials. The message loop

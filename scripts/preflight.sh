@@ -5,12 +5,15 @@
 # nonzero if anything required is missing, so scripts/e2e.sh aborts before doing
 # any expensive work. Safe to run standalone:  scripts/preflight.sh
 #
-# Two tiers:
-#   - always:  build + deploy toolchain, free disk
-#   - client:  Flutter + platform SDK, checked only when FLUTTER_TARGET != none
+# Tiers:
+#   - always:      runtime + deploy toolchain, native build tools, free disk
+#   - cross-build: musl cross-compile chain, only when CLEAN=1 (a reuse run
+#                  keeps the loaded images and never cross-compiles)
+#   - client:      Flutter + platform SDK, only when FLUTTER_TARGET != none
 #
 # Env (shared with scripts/e2e.sh):
 #   ARCH            target arch for the musl build (default aarch64)
+#   CLEAN           1 on a from-scratch build (checks the cross-build tier)
 #   FLUTTER_TARGET  macos | none  (none = backend-only, skips client tier)
 
 set -uo pipefail
@@ -19,6 +22,7 @@ ARCH="${ARCH:-aarch64}"
 RUST_TARGET="${ARCH}-unknown-linux-musl"
 CROSS_LINKER="${ARCH}-linux-musl-gcc"
 FLUTTER_TARGET="${FLUTTER_TARGET:-macos}"
+CLEAN="${CLEAN:-0}"
 
 # Disk thresholds (GB).
 VM_DISK_FAIL=8
@@ -61,6 +65,10 @@ need "aws"     "command -v aws"     "brew install awscli"    "https://docs.aws.a
 need "cargo"   "command -v cargo"   "https://rustup.rs"     "https://rustup.rs"
 need "protoc"  "command -v protoc"  "brew install protobuf" "apt-get install -y protobuf-compiler  (or: dnf install protobuf-compiler)"
 need "cmake"   "command -v cmake"   "brew install cmake"    "apt-get install -y cmake  (or: dnf install cmake)"
+need "jq"      "command -v jq"           "brew install jq"      "apt-get install -y jq  (or: dnf install jq)"
+need "xxd"     "command -v xxd"          "brew install vim"     "apt-get install -y xxd  (or: dnf install vim-common)"
+need "openssl" "command -v openssl"      "brew install openssl" "apt-get install -y openssl"
+need "PyJWT"   "python3 -c 'import jwt'" "pip3 install pyjwt"   "pip3 install pyjwt  (or: apt-get install -y python3-jwt)"
 
 # ---- always: C toolchain (native link step) ----
 if [ "$OS" = "Darwin" ]; then
@@ -71,22 +79,29 @@ else
     "n/a" "apt-get install -y build-essential  (or: dnf groupinstall 'Development Tools')"
 fi
 
-# ---- always: musl cross-build chain for ${RUST_TARGET} ----
-echo "-- musl cross-build (${RUST_TARGET}) --"
-need "rustup target ${RUST_TARGET}" \
-  "rustup target list --installed | grep -qx ${RUST_TARGET}" \
-  "rustup target add ${RUST_TARGET}" \
-  "rustup target add ${RUST_TARGET}"
-need "cross-linker ${CROSS_LINKER}" \
-  "command -v ${CROSS_LINKER}" \
-  "brew install messense/macos-cross-toolchains/${ARCH}-unknown-linux-musl" \
-  "install a ${ARCH}-linux-musl cross toolchain (e.g. musl-cross) providing ${CROSS_LINKER}"
-# The target + compiler are useless to cargo without the linker wired in
-# ~/.cargo/config.toml; the build links against the host cc otherwise and fails.
-need "~/.cargo/config.toml linker for ${RUST_TARGET}" \
-  "grep -q 'target.${RUST_TARGET}' \"\${CARGO_HOME:-\$HOME/.cargo}/config.toml\"" \
-  "add to ~/.cargo/config.toml:  [target.${RUST_TARGET}]\\n             linker = \"${CROSS_LINKER}\"" \
-  "add to ~/.cargo/config.toml:  [target.${RUST_TARGET}]\\n             linker = \"${CROSS_LINKER}\""
+# ---- cross-build: musl chain for ${RUST_TARGET}, only on a from-scratch build ----
+# A reuse run keeps the images loaded in the cluster and never cross-compiles, so
+# the musl chain is not a prerequisite there. Checking it would falsely fail a
+# reuse run on a host that can still run every non-build step.
+if [ "$CLEAN" = "1" ]; then
+  echo "-- musl cross-build (${RUST_TARGET}) --"
+  need "rustup target ${RUST_TARGET}" \
+    "rustup target list --installed | grep -qx ${RUST_TARGET}" \
+    "rustup target add ${RUST_TARGET}" \
+    "rustup target add ${RUST_TARGET}"
+  need "cross-linker ${CROSS_LINKER}" \
+    "command -v ${CROSS_LINKER}" \
+    "brew install messense/macos-cross-toolchains/${ARCH}-unknown-linux-musl" \
+    "install a ${ARCH}-linux-musl cross toolchain (e.g. musl-cross) providing ${CROSS_LINKER}"
+  # The target + compiler are useless to cargo without the linker wired in
+  # ~/.cargo/config.toml; the build links against the host cc otherwise and fails.
+  need "~/.cargo/config.toml linker for ${RUST_TARGET}" \
+    "grep -q 'target.${RUST_TARGET}' \"\${CARGO_HOME:-\$HOME/.cargo}/config.toml\"" \
+    "add to ~/.cargo/config.toml:  [target.${RUST_TARGET}]\\n             linker = \"${CROSS_LINKER}\"" \
+    "add to ~/.cargo/config.toml:  [target.${RUST_TARGET}]\\n             linker = \"${CROSS_LINKER}\""
+else
+  echo "-- musl cross-build: skipped (reuse run — images already loaded) --"
+fi
 
 # ---- client tier: only when a client is being installed ----
 if [ "$FLUTTER_TARGET" != "none" ]; then

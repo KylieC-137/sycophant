@@ -16,8 +16,8 @@ installed BEFORE Kyverno (Kyverno's startup sanity check refuses to come Ready
 without its CRDs). The hobbyist script installs it; DevOps users install it
 manually before installing Kyverno.
 
-`sycophant-tenant` is NOT bundled — that's per-workspace and operators install
-separately, possibly multiple times.
+`sycophant-tenant` is NOT bundled — that's per-tenant, provisioned separately
+with `syco tenant up`, possibly multiple times.
 
 ## Prerequisites
 
@@ -85,10 +85,13 @@ helm dependency update
 helm install sycophant-quickstart . -n <your-ns> --wait --timeout=10m
 ```
 
-Then install one or more tenants:
+Then provision one or more tenants. Each reads its values file at
+`$SYCO_CONFIG_DIR/tenants/tenant-<name>/values.yaml` (default
+`~/.config/sycophant/tenants/tenant-<name>/values.yaml`); re-run to apply
+changed values:
 
 ```sh
-helm install my-tenant charts/sycophant-tenant -n my-tenant --create-namespace -f ...
+syco tenant up --ns tenant-<name> --capacity <quantity>
 ```
 
 ## Uninstall

@@ -3,18 +3,7 @@ kind: Test
 metadata:
   name: harness-ingress-workspace-scoped
 spec:
-  description: |
-    The harness serves one inbound surface: the relay-forward surface
-    (HarnessControl) on 9091, which admits relay-ctrl alone — relay forwards
-    registered-user requests here. It serves no pod-facing surface; the harness
-    dials each capability-job pod on 9090 instead (that egress flip and the
-    absence of any 9090 ingress are asserted by harness-egress-flips-to-tool-pod).
-
-    This bucket asserts the surviving relay-forward ingress shape: relay-ctrl
-    admitted to 9091, and no other endpoint on that port.
-
-    Structural render assertion (self-applies the template into a chainsaw ns);
-    the live L4 drop is Cilium's to enforce, out of scope.
+  description: The harness admits ingress only from relay-controller on 9091.
   bindings:
     - name: tenant_ns
       value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
@@ -36,11 +25,11 @@ spec:
                 name: harness-egress-probe
                 namespace: ($tenant_ns)
               spec:
-                # Relay-forward surface: relay-ctrl admitted to 9091 only.
+                # Relay-forward surface: relay-controller admitted to 9091 only.
                 (ingress[?toPorts[?ports[?port=='9091']]]):
                   - fromEndpoints:
                       - matchLabels:
-                          app.kubernetes.io/name: relay-ctrl
+                          app.kubernetes.io/name: relay-controller
                           app.kubernetes.io/part-of: sycophant
                 # No pod-facing dispatch surface: nothing admitted on 9090.
                 (length(ingress[?toPorts[?ports[?port=='9090']]])): 0

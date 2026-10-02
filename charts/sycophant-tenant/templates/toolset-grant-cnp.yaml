@@ -45,16 +45,7 @@ spec:
   egress:
     # DNS: resolve only this grant's one domain. L7 on :53 (never L4-only) so it
     # never shadows a sibling policy's L7 DNS allowlist.
-    - toEndpoints:
-        - matchLabels:
-            io.kubernetes.pod.namespace: kube-system
-            k8s-app: kube-dns
-      toPorts:
-        - ports:
-            - port: "53"
-              protocol: UDP
-            - port: "53"
-              protocol: TCP
+    {{- include "sycophant.dnsEgress" . | nindent 4 }}
           rules:
             dns:
               - matchName: {{ $spec.egress | quote }}

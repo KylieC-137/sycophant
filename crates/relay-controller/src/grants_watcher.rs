@@ -23,7 +23,7 @@ use tokio::sync::RwLock;
 use crate::grants::{apply_delivery, RelayGrants, RowError, GRANTS_CONFIGMAP_NAME};
 
 /// `reportingController` on every Event this module publishes.
-const REPORTING_CONTROLLER: &str = "relay-ctrl";
+const REPORTING_CONTROLLER: &str = "relay-controller";
 
 /// Watch the relay-access-grants ConfigMap in `namespace`, swapping `table` on
 /// every delivery. `ready_tx` fires once the initial sync has landed.

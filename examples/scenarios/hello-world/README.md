@@ -29,7 +29,9 @@ not an extra step:
 
 `syco setup` is idempotent and from-nothing: it ensures the k3d cluster, the
 gVisor runtime, Cilium, Kyverno, the toolset registry, and — from a checkout —
-builds and loads the images.
+builds and loads the images. On first run it also installs the bundled Dex and
+prompts for the operator's email and password. The password is kept only as a
+bcrypt hash inside the cluster, and every later lifecycle command asks for it.
 
 ```sh
 syco setup
@@ -48,30 +50,36 @@ mkdir -p ~/sycophant/tmp/hello-world-data
 cp examples/instructions/simple/AGENTS.md ~/sycophant/tmp/hello-world-data/AGENTS.md
 ```
 
-## 3. Tenant content
-
-The LLM credential and the demo SSH key the scrubber must redact are applied
-via the CLI (kept out of chart values so platform upgrades never prune them):
-
-```sh
-printf '%s' "$OPENROUTER_API_KEY" | syco tenant secret set openrouter --ns hello-world
-printf 'FAKE-ED25519-PRIVATE-KEY-DO-NOT-USE' | \
-  syco tenant secret set demo-ssh-key --ns hello-world
-```
-
-The toolsets that consume them are declared in the tenant values file (step 4).
-
-## 4. Workspace + deploy
+## 3. Workspace + deploy
 
 Toolsets, the workspace's instructions mount, and the toolset attachment all live in
 the tenant values file. The `prompt` toolset's profile key is the model the
 turn names. Seed the file from the scenario, then deploy:
 
 ```sh
-mkdir -p ~/.config/sycophant/tenants/hello-world
+mkdir -p ~/.config/sycophant/tenants/tenant-hello-world
 cp examples/scenarios/hello-world/values.yaml \
-  ~/.config/sycophant/tenants/hello-world/values.yaml
-syco tenant up --ns hello-world
+  ~/.config/sycophant/tenants/tenant-hello-world/values.yaml
+syco tenant up --ns tenant-hello-world --capacity 2Gi
+```
+
+`tenant up` prompts for the operator password you set during `syco setup` and
+writes lifecycle markers under short-lived Dex tokens: the tenant marker (the
+cluster creates the `tenant-hello-world` namespace, its memory quota, and the
+base release from the file's non-workspace settings, such as `model`), then one
+marker each for the workspace and each toolset in the values file. Re-run it
+after editing the values file to upgrade the tenant in place.
+
+## 4. Tenant content
+
+The LLM credential and the demo SSH key the scrubber must redact are applied
+via the CLI into the namespace step 3 created (kept out of chart values so
+platform upgrades never prune them):
+
+```sh
+printf '%s' "$OPENROUTER_API_KEY" | syco tenant secret set openrouter --ns tenant-hello-world
+printf 'FAKE-ED25519-PRIVATE-KEY-DO-NOT-USE' | \
+  syco tenant secret set demo-ssh-key --ns tenant-hello-world
 ```
 
 ## 5. Exercise the workspace (audit fixture)
@@ -85,7 +93,7 @@ Authorize the device for this workspace by writing its grant row. You invent
 the code; the relay mints nothing:
 
 ```sh
-kubectl patch configmap relay-access-grants -n hello-world --type=merge -p '{"data":{
+kubectl patch configmap relay-access-grants -n tenant-hello-world --type=merge -p '{"data":{
   "my-phone": "channel: app\nidentity: kJ8f2QwXnR4tYv6b\nworkspace: hello-world\n"
 }}'
 ```
@@ -108,7 +116,7 @@ scrubbing, egress containment, the L7 DNS allowlist, credential isolation, tool
 execution, and the workspace ServiceAccount:
 
 ```sh
-syco tenant audit hello-world --ns hello-world
+syco tenant audit hello-world --ns tenant-hello-world
 ```
 
 Exit 0 means every clause holds. If it reports the toolset pod is missing, the
@@ -122,7 +130,7 @@ NOT appear in the harness stdout; the scrubber redacts it before logging.
 Expect `0`:
 
 ```sh
-kubectl logs -n hello-world deployment/hello-world -c harness \
+kubectl logs -n tenant-hello-world deployment/hello-world -c harness \
   | grep -c 'FAKE-ED25519-PRIVATE-KEY'
 # expect: 0   (the bytes were replaced with [REDACTED:demo-ssh-key])
 ```
@@ -132,7 +140,7 @@ nothing, because `stage_credentials` only warns on a failed copy. Pair it with
 the positive assertion. Expect at least `1`:
 
 ```sh
-kubectl logs -n hello-world deployment/hello-world -c harness \
+kubectl logs -n tenant-hello-world deployment/hello-world -c harness \
   | grep -c '\[REDACTED:demo-ssh-key\]'
 # expect: >= 1   (the tool read the mounted key and emitted its bytes)
 ```
@@ -140,6 +148,6 @@ kubectl logs -n hello-world deployment/hello-world -c harness \
 ## Teardown
 
 ```sh
-syco tenant remove --ns hello-world   # delete this tenant + its data
-syco destroy                          # delete the whole cluster
+syco tenant remove --ns tenant-hello-world   # reaped with its data on the next sweep
+syco destroy                                 # delete the whole cluster
 ```

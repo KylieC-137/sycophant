@@ -1,0 +1,61 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: provision-tenant-marker-vap-validates-data
+spec:
+  # provision-tenant is one fixed name in sycophant-system, shared by every
+  # tenant-marker test, so these run alone.
+  concurrent: false
+  description: The provision-tenant marker VAP denies a bad handle, a bad capacity, missing values, or a token one over its helm release cap, and admits a valid marker and a token exactly at the cap.
+  steps:
+    - name: grant-marker-write
+      use:
+        template: ../../step-templates/marker-writer.yaml
+        with:
+          bindings:
+            - name: marker_ns
+              value: sycophant-system
+    - name: validate-data
+      try:
+        - script:
+            content: |
+              set -u
+              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+              marker() {
+                cat <<MANIFEST | kubectl create --dry-run=server --as="${ISSUER}#operator" -f - 2>&1
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: provision-tenant
+                namespace: sycophant-system
+                labels:
+                  app.kubernetes.io/part-of: sycophant
+                  sycophant.md/lifecycle-marker: "true"
+              data:
+                tenant: "${4:-acme}"
+                keepalive: "0"
+                handle: "$1"
+              $2
+              $3
+              MANIFEST
+              }
+              while IFS='|' read -r handle capacity values want; do
+                if out=$(marker "$handle" "$capacity" "$values"); then
+                  echo "admitted handle=$handle capacity=$capacity values=$values"; exit 1
+                fi
+                case "$out" in *"$want"*) ;; *) echo "$out"; exit 1;; esac
+              done <<CASES
+              0123456789a|  capacity: 2Gi|  values: "{}"|handle
+              abcdefghij|  capacity: 2Gi|  values: "{}"|handle
+              0f1e2d3c4b||  values: "{}"|capacity
+              0f1e2d3c4b|  capacity: not-a-quantity|  values: "{}"|capacity
+              0f1e2d3c4b|  capacity: 2Gi||'values'
+              CASES
+              marker 0f1e2d3c4b "  capacity: 2Gi" '  values: "{}"'
+              # tenant-<token> is the helm release name, capped at 53.
+              long=$(printf 'a%.0s' $(seq 1 47))
+              if out=$(marker 0f1e2d3c4b "  capacity: 2Gi" '  values: "{}"' "$long"); then
+                echo "admitted a 47-character tenant token"; exit 1
+              fi
+              case "$out" in *"at most 46"*) ;; *) echo "$out"; exit 1;; esac
+              marker 0f1e2d3c4b "  capacity: 2Gi" '  values: "{}"' "${long#a}"

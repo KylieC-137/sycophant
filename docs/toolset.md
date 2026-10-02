@@ -50,10 +50,11 @@ The Harness spawns the matching capability Job and dials it over a headless per-
 
 ## Toolset Configuration
 
-Toolsets are chart values, not CRs. `charts/sycophant-tenant` renders the
-`toolsets` map into a `toolset-config` ConfigMap and each workspace's resolved
-catalog into a `capability-manifest-<workspace>` ConfigMap; the Harness reads
-them once at startup. Changing them rolls the Harness pod.
+Toolsets are chart values, not CRs. `charts/sycophant-tenant` renders each
+`toolsets` entry into its own `toolset-<name>` ConfigMap, which the Harness
+watches live, and each workspace's resolved catalog into a
+`capability-manifest-<workspace>` ConfigMap the Harness reads once at startup.
+Changing the catalog rolls the Harness pod.
 
 An entry is flat. `image` and `keepalive` are read by the Harness: `image`
 selects the tool job's pod, `keepalive` sets the Job restart policy and idle-reap.

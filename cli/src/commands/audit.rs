@@ -170,7 +170,7 @@ pub(crate) fn run(scope: &Scope, cmd: AuditCmd) -> Result<(), String> {
         if workspace_sa_present(&sas, ws) {
             Verdict::Pass("Workspace ServiceAccount present".into())
         } else {
-            Verdict::Fail(format!("sa-{ws} ServiceAccount missing"))
+            Verdict::Fail(format!("workspace ServiceAccount for {ws} missing"))
         },
     );
 
@@ -359,11 +359,21 @@ fn parse_grep_count(s: &str) -> u32 {
         .unwrap_or(0)
 }
 
-/// `kubectl get sa -o name` lists `serviceaccount/<name>`; the workspace SA is
-/// `sa-<workspace>`. Exact line match so `sa-foo` doesn't satisfy `sa-foo-bar`.
+/// `kubectl get sa -o name` lists `serviceaccount/<name>`; a workspace's SAs are
+/// `harness-<workspace>`, `unprivileged-<workspace>`, and `<workspace>-workspace-init`.
+/// Exact line match so a shorter workspace name can't satisfy a longer one.
 fn workspace_sa_present(get_output: &str, ws: &str) -> bool {
-    let want = format!("serviceaccount/sa-{ws}");
-    get_output.lines().any(|l| l.trim() == want)
+    // Prefix-form SAs are built from the shared dispatch-auth source of truth, so
+    // a rename there cannot silently diverge from this check. The suffix-form
+    // `<ws>-workspace-init` SA never dials dispatch, so it stays local.
+    let mut wants: Vec<String> = shared::auth::WORKSPACE_SA_PREFIXES
+        .iter()
+        .map(|prefix| format!("serviceaccount/{prefix}{ws}"))
+        .collect();
+    wants.push(format!("serviceaccount/{ws}-workspace-init"));
+    get_output
+        .lines()
+        .any(|l| wants.iter().any(|want| l.trim() == want))
 }
 
 #[cfg(test)]
@@ -398,12 +408,23 @@ mod tests {
 
     #[test]
     fn workspace_sa_exact_match() {
-        let out = "serviceaccount/sa-hello-world\nserviceaccount/sa-other\n";
-        assert!(workspace_sa_present(out, "hello-world"));
-        assert!(workspace_sa_present(out, "other"));
+        // Chart-rendered forms: harness-<ws>, unprivileged-<ws>, <ws>-workspace-init.
+        // Each accepted form must resolve on its own.
+        assert!(workspace_sa_present(
+            "serviceaccount/harness-hello-world\n",
+            "hello-world"
+        ));
+        assert!(workspace_sa_present(
+            "serviceaccount/unprivileged-hello-world\n",
+            "hello-world"
+        ));
+        assert!(workspace_sa_present(
+            "serviceaccount/hello-world-workspace-init\n",
+            "hello-world"
+        ));
         // Mutant using `contains` instead of exact match would pass this.
         assert!(!workspace_sa_present(
-            "serviceaccount/sa-hello-world-2\n",
+            "serviceaccount/harness-hello-world-2\n",
             "hello-world"
         ));
         assert!(!workspace_sa_present("", "hello-world"));

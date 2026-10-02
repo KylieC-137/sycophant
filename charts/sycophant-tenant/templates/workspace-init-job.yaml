@@ -46,7 +46,7 @@ spec:
         sycophant.md/workspace: {{ $name }}
     spec:
       restartPolicy: OnFailure
-      serviceAccountName: sa-{{ $name }}
+      serviceAccountName: {{ $name }}-workspace-init
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true

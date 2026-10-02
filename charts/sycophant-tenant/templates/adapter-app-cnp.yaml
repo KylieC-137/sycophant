@@ -1,3 +1,4 @@
+{{- if eq .Values.render "base" }}
 {{/*
 Fail-closed egress for transport-class adapters.
 
@@ -11,13 +12,7 @@ No ingress policy selects this pod. It is the tailnet terminus and must
 accept inbound WireGuard; any ingress policy selecting it flips it to
 default-deny and breaks NAT traversal.
 */}}
-{{- $hasApp := false }}
-{{- range $channel, $entry := .Values.channels }}
-{{- if eq $entry.kind "app" }}
-{{- $hasApp = true }}
-{{- end }}
-{{- end }}
-{{- if $hasApp }}
+{{- if gt (include "sycophant.appChannelCount" . | atoi) 0 }}
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -40,20 +35,11 @@ spec:
         - ports:
             - port: "6443"
               protocol: TCP
-    - toEndpoints:
-        - matchLabels:
-            io.kubernetes.pod.namespace: kube-system
-            k8s-app: kube-dns
-      toPorts:
-        - ports:
-            - port: "53"
-              protocol: UDP
-            - port: "53"
-              protocol: TCP
+    {{- include "sycophant.dnsEgress" . | nindent 4 }}
     # The relay's app port. This forward is the adapter's whole job.
     - toEndpoints:
         - matchLabels:
-            app.kubernetes.io/component: relay-ctrl
+            app.kubernetes.io/component: relay-controller
             app.kubernetes.io/part-of: sycophant
       toPorts:
         - ports:
@@ -85,4 +71,5 @@ spec:
               protocol: UDP
             - port: "3478"
               protocol: UDP
+{{- end }}
 {{- end }}

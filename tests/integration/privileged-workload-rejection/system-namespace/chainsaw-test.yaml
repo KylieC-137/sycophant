@@ -3,11 +3,7 @@ kind: Test
 metadata:
   name: psa-rejects-privileged-system-ns
 spec:
-  description: |
-    The sycophant-system namespace (the cluster layer's home for the
-    tenant-deployer SA) is created PSA enforce=restricted by `syco setup`.
-    A privileged pod targeted at this ns must be rejected by PSA. Confirms
-    the setup path labels it (not just kyverno's own ns).
+  description: PSA rejects a privileged pod in sycophant-system.
   bindings:
     - name: target_namespace
       value: sycophant-system

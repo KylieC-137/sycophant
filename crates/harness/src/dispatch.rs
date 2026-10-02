@@ -154,7 +154,9 @@ struct SpawnConfig {
     workspace: String,
     workspace_pvc: String,
     scheduling: SchedulingConfig,
-    toolset_config: ToolsetConfig,
+    /// The live toolset table the toolset watcher keeps in sync; each call
+    /// reads it under the lock.
+    toolset_config: Arc<RwLock<ToolsetConfig>>,
 }
 
 pub(crate) struct DispatchState {
@@ -177,7 +179,7 @@ impl DispatchState {
         service_name: String,
         workspace: String,
         scheduling: SchedulingConfig,
-        toolset_config: ToolsetConfig,
+        toolset_config: Arc<RwLock<ToolsetConfig>>,
     ) -> Arc<Self> {
         let workspace_pvc = format!("workspace-data-{workspace}");
         Arc::new(Self {
@@ -443,12 +445,13 @@ impl DispatchState {
         args: HashMap<String, String>,
         grant: Option<(&str, &CapabilityGrant)>,
     ) -> Result<(String, mpsc::Receiver<ToolResultFrame>), String> {
-        let entry = self
-            .spawn
-            .toolset_config
-            .get(toolset_name)
-            .ok_or_else(|| format!("toolset {toolset_name} not found"))?
-            .clone();
+        let entry = {
+            let toolsets = self.spawn.toolset_config.read().await;
+            toolsets
+                .get(toolset_name)
+                .ok_or_else(|| format!("toolset {toolset_name} not found"))?
+                .clone()
+        };
 
         let call_id = Uuid::new_v4().to_string();
         let working_dir = WORKSPACE_MOUNT_PATH.to_string();
@@ -1136,7 +1139,7 @@ mod tests {
             "http://harness:9090".to_string(),
             "ws".to_string(),
             SchedulingConfig::default(),
-            ToolsetConfig::empty(),
+            Arc::new(RwLock::new(ToolsetConfig::empty())),
         )
     }
 
@@ -1287,7 +1290,7 @@ mod tests {
             "http://harness:9090".to_string(),
             "ws".to_string(),
             SchedulingConfig::default(),
-            ToolsetConfig::from_map(config),
+            Arc::new(RwLock::new(ToolsetConfig::from_map(config))),
         );
         state
             .set_active_job(active("git-push", "job-x", None))

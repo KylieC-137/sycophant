@@ -105,8 +105,9 @@ pub const ALLOWED_METHODS: &[&str] = &[
     // a conversation/workspace claim, so caller's workspace must own the id.
     "/relay.v1.RelayGateway/CancelTurn",
     // The caller's workspace toolset grants — names only, served from the
-    // mounted relay-toolset-grants file, which carries no Secret name, mount
-    // path, or egress domain. No LLM or tool dispatch is reachable through it.
+    // watched per-workspace relay-toolset-grants ConfigMaps, which carry no
+    // Secret name, mount path, or egress domain. No LLM or tool dispatch is
+    // reachable through it.
     "/relay.v1.RelayGateway/ListGrants",
 ];
 

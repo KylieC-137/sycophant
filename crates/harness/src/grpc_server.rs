@@ -406,7 +406,7 @@ mod dispatch_await_cancel_tests {
             "http://harness:9090".to_string(),
             crate::test_doubles::TEST_WS.to_string(),
             SchedulingConfig::default(),
-            ToolsetConfig::from_map(toolsets),
+            Arc::new(tokio::sync::RwLock::new(ToolsetConfig::from_map(toolsets))),
         )
     }
 

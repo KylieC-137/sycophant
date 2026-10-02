@@ -1,6 +1,6 @@
 # Sycophant Flutter Client
 
-A Flutter chat client for sycophant. Phase 2 ships Android only; iOS support is scaffolded but not built.
+A Flutter chat client for sycophant. It ships Android only; iOS support is scaffolded but not built.
 
 The client is a single-screen app:
 
@@ -44,11 +44,11 @@ If `adb install` fails with `INSTALL_FAILED_USER_RESTRICTED`, enable "Install vi
 
 ## First-time pairing
 
-Phase 2 trust flow:
+Trust flow:
 
 1. Operator (you) deploys headscale plus the app channel with ACME enabled. Channel config lives in the values file, not `--set`:
    ```yaml
-   # docs/e2e/values.yaml (or your own)
+   # ~/.config/sycophant/tenants/tenant-hello-world/values.yaml
    headscale:
      enabled: true
      serverUrl: https://hs.yourdomain.com
@@ -61,13 +61,13 @@ Phase 2 trust flow:
        loginServer: https://hs.yourdomain.com
    ```
    ```sh
-   helm upgrade --install e2e-test charts/sycophant-tenant/ \
-     -n e2e-test -f docs/e2e/values.yaml --wait
+   syco tenant up --ns tenant-hello-world --capacity 2Gi
    ```
+   Re-run it after editing the values file to apply the change.
 2. On the phone, install the official Tailscale Android client (Play Store or `sideload-via-adb` an F-Droid build); set "Use an alternate server" to `https://hs.yourdomain.com`; log in via auth-key minted from headscale.
 3. Invent an unguessable code and write the device's grant row. The code IS the row's identity; the relay mints nothing:
    ```sh
-   kubectl patch configmap relay-access-grants -n e2e-test --type=merge -p '{"data":{
+   kubectl patch configmap relay-access-grants -n tenant-hello-world --type=merge -p '{"data":{
      "calebs-iphone": "channel: app\nidentity: kJ8f2QwXnR4tYv6b\nworkspace: hello-world\n"
    }}'
    ```
@@ -96,9 +96,9 @@ Two scenarios:
 
 - **Operator re-invites a single device.** A row is spent once a key is registered against it, so re-invite is delete-and-rewrite: remove the row, then write a new row with a fresh code.
   ```sh
-  kubectl patch configmap relay-access-grants -n e2e-test --type=json \
+  kubectl patch configmap relay-access-grants -n tenant-hello-world --type=json \
     -p '[{"op":"remove","path":"/data/calebs-iphone"}]'
-  kubectl patch configmap relay-access-grants -n e2e-test --type=merge -p '{"data":{
+  kubectl patch configmap relay-access-grants -n tenant-hello-world --type=merge -p '{"data":{
     "calebs-iphone": "channel: app\nidentity: <a fresh unguessable string>\nworkspace: hello-world\n"
   }}'
   ```
@@ -108,7 +108,7 @@ Two scenarios:
 
 ## iOS (kept-in-mind, not shipped)
 
-The Flutter project is scaffolded for both Android and iOS (`flutter create --platforms=android,ios`). `ios/Runner/Info.plist` already has the `NSAppTransportSecurity` exception for cleartext to `*.ts.net` and `*.ts.local`. Building iOS requires Xcode + an Apple Developer account; that's Phase 3+ work.
+The Flutter project is scaffolded for both Android and iOS (`flutter create --platforms=android,ios`). `ios/Runner/Info.plist` already has the `NSAppTransportSecurity` exception for cleartext to `*.ts.net` and `*.ts.local`. Building iOS requires Xcode + an Apple Developer account, and is not done yet.
 
 ## Codegen
 
@@ -120,7 +120,7 @@ cd client && ./scripts/codegen.sh
 
 The generated files in `client/lib/src/generated/` are committed (so a fresh clone is buildable without `protoc`); rerun the script and commit the diff when the proto evolves.
 
-## Known limitations (Phase 2)
+## Known limitations
 
 - **Per-device revoke is operator-driven** — remove the device's row from the `relay-access-grants` ConfigMap. No in-app refresh or rotate UX.
 - **No multi-conversation support** — single chat thread per device.

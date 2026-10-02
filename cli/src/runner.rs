@@ -79,6 +79,36 @@ pub(crate) fn run_stdin(cmd: &str, args: &[&str], input: &str) -> Result<(), Str
     }
 }
 
+/// `run_stdin` that returns the raw stdout bytes.
+pub(crate) fn run_stdin_bytes(cmd: &str, args: &[&str], input: &str) -> Result<Vec<u8>, String> {
+    use std::io::Write;
+    let mut child = Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to run {cmd}: {e}"))?;
+
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .map_err(|e| format!("failed to write to {cmd} stdin: {e}"))?;
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("{cmd} wait failed: {e}"))?;
+
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("{cmd} failed: {stderr}"))
+    }
+}
+
 pub(crate) fn run_silent(cmd: &str, args: &[&str]) -> bool {
     Command::new(cmd)
         .args(args)

@@ -9,7 +9,7 @@ doing different jobs.
 | Test                              | Loads on                                                                  |
 |-----------------------------------|---------------------------------------------------------------------------|
 | system-namespace/                 | `syco setup` creates `sycophant-system` PSA-restricted (SYSTEM_NS_YAML)    |
-| tenant-namespace-non-workspace/   | Perimeter-labeled deployer-created ns enforces PSA on non-workspace pods   |
+| tenant-namespace-non-workspace/   | Perimeter-labeled tenant ns enforces PSA on non-workspace pods             |
 
 Belongs here: PSA-driven rejections in non-workspace contexts.
 Doesn't belong here: harness-pod admissions (see `harness-pod-shape/`).

@@ -3,23 +3,7 @@ kind: Test
 metadata:
   name: vap-rejects-capability-job-foreign-audience-token
 spec:
-  description: |
-    A prompt-injected harness authors the tool-Job spec, so it can bake a
-    projected SA token into the untrusted tool pod. The gVisor VAP's
-    capability-job audience pin bounds that: a projected serviceAccountToken
-    on a capability-job pod may carry ONLY the tool.toolset.sycophant.md
-    audience. Without the pin, a harness- or relay-audience token moves into
-    the sandbox, where the capability-job could present it to any in-namespace
-    service that accepts that audience and impersonate this workspace's harness.
-
-    Two cases, so a mutant that drops the audience equality OR bans projected
-    tokens as a class both red:
-      - a token at a HARNESS audience is REJECTED, and
-      - a token at the tool audience is ADMITTED (mutate stamps gvisor).
-
-    Self-contained: creates the tenant ns via the tenant-deployer SA and waits
-    for the label-triggered VAPBinding before submitting, so the VAP fires (no
-    silent-admit antipattern).
+  description: A capability-job pod may project a ServiceAccount token only for the tool.toolset.sycophant.md audience.
   bindings:
     - name: tenant_ns
       value: (join('-', ['tenant', random('[a-z0-9]{8}')]))

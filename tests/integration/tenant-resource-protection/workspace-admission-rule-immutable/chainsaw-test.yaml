@@ -3,21 +3,12 @@ kind: Test
 metadata:
   name: workspace-admission-rule-immutable
 spec:
-  description: |
-    Kubernetes excludes admissionregistration.k8s.io resources from being
-    intercepted by admission rules — neither Kyverno nor an in-tree
-    ValidatingAdmissionPolicy can guard the harness pod policy at the
-    admission layer (verified empirically). Protection is
-    enforced one layer up, at RBAC: no operator-tier identity in the
-    chart is granted admissionregistration.k8s.io/validatingadmissionpolicies
-    verbs. This test asserts that property holds against every
-    operator-tier service account and goes red the day a future PR grants
-    one of them VAP edit access.
+  description: The most privileged tenant identity cannot delete or change the cluster-wide gVisor rule.
   bindings:
     - name: tenant_ns
       value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
-    - name: ws_sa
-      value: sa-chainsaw-ws
+    - name: crb_name
+      value: (join('-', ['provision-probe', $tenant_ns]))
   steps:
     - name: create-tenant-ns
       use:
@@ -26,7 +17,7 @@ spec:
           bindings:
             - name: tenant_ns
               value: ($tenant_ns)
-    - name: setup-workspace-sa
+    - name: bind-provision-probe-to-provision-write
       try:
         - apply:
             template: true
@@ -34,45 +25,62 @@ spec:
               apiVersion: v1
               kind: ServiceAccount
               metadata:
-                name: ($ws_sa)
+                name: provision-probe
                 namespace: ($tenant_ns)
-    - name: tenant-deployer-cannot-delete-harness-vap
-      try:
-        - script:
-            content: |
-              kubectl delete validatingadmissionpolicy cluster-gvisor-pod-policy \
-                --as=system:serviceaccount:sycophant-system:tenant-deployer
-            check:
-              ($error != null): true
-              (contains($stderr, 'forbidden')): true
-    - name: tenant-deployer-cannot-patch-harness-vap
-      try:
-        - script:
-            content: |
-              kubectl patch validatingadmissionpolicy cluster-gvisor-pod-policy \
-                --type=merge -p '{"metadata":{"annotations":{"chainsaw":"probe"}}}' \
-                --as=system:serviceaccount:sycophant-system:tenant-deployer
-            check:
-              ($error != null): true
-              (contains($stderr, 'forbidden')): true
-    - name: workspace-sa-cannot-delete-harness-vap
+        - apply:
+            template: true
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRoleBinding
+              metadata:
+                name: ($crb_name)
+              subjects:
+                - kind: ServiceAccount
+                  name: provision-probe
+                  namespace: ($tenant_ns)
+              roleRef:
+                kind: ClusterRole
+                name: provision-write
+                apiGroup: rbac.authorization.k8s.io
+      cleanup:
+        - delete:
+            ref:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRoleBinding
+              name: ($crb_name)
+    - name: positive-control-crb-is-live
       try:
         - script:
             env:
               - name: TENANT_NS
                 value: ($tenant_ns)
-              - name: WS_SA
-                value: ($ws_sa)
             content: |
-              kubectl delete validatingadmissionpolicy cluster-gvisor-pod-policy \
-                --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
+              kubectl auth can-i create deployments.apps -n "$TENANT_NS" \
+                --as="system:serviceaccount:${TENANT_NS}:provision-probe"
             check:
-              ($error != null): true
-              (contains($stderr, 'forbidden')): true
-      finally:
+              ($error == null): true
+              (contains($stdout, 'yes')): true
+    - name: provision-write-cannot-delete-gvisor-vap
+      try:
         - script:
             env:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
+              kubectl auth can-i delete validatingadmissionpolicies.admissionregistration.k8s.io/cluster-gvisor-pod-policy \
+                --as="system:serviceaccount:${TENANT_NS}:provision-probe"
+            check:
+              ($error != null): true
+              (contains($stdout, 'no')): true
+    - name: provision-write-cannot-patch-gvisor-vap
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl auth can-i patch validatingadmissionpolicies.admissionregistration.k8s.io/cluster-gvisor-pod-policy \
+                --as="system:serviceaccount:${TENANT_NS}:provision-probe"
+            check:
+              ($error != null): true
+              (contains($stdout, 'no')): true

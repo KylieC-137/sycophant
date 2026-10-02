@@ -1,0 +1,89 @@
+# Shared per-tenant write role. Its consumers bind it via a generated
+# per-namespace RoleBinding, never a ClusterRoleBinding: the per-install
+# installer SAs `provision-<kind>-<handle>` in sycophant-system, one per
+# tenant, workspace, user, and toolset provision marker. RBAC's namespacing
+# rules scope these verbs to that one tenant namespace only.
+#
+# Result: the holder has write access to Secrets, Deployments, etc. in
+# its one tenant namespace only, never in kube-system, sycophant-system, or
+# any operator-controlled namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: provision-write
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: provision-write
+rules:
+  # Core per-tenant K8s objects helm manages.
+  # Secrets are intentionally NOT in this rule — write-only access to
+  # Secrets is the load-bearing defense against installer credential
+  # compromise (see Secrets rule below).
+  - apiGroups: [""]
+    resources:
+      - "configmaps"
+      - "services"
+      - "persistentvolumeclaims"
+      - "serviceaccounts"
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+
+  # Secrets: WRITE-ONLY. The installer creates/updates/deletes but cannot
+  # read existing values. A compromised installer credential can overwrite or
+  # delete a Secret but never read one. Server-side apply works without `get` because
+  # the verb checked is `patch`. See
+  # https://kubernetes.io/docs/reference/using-api/server-side-apply/
+  # HELM_DRIVER=configmap is required so helm release state lives in
+  # ConfigMaps the installer CAN read.
+  - apiGroups: [""]
+    resources:
+      - "secrets"
+    verbs: ["create", "update", "patch", "delete"]
+
+  # The only `get`-able Secret names, pinned so the write-only rule above
+  # still denies reading every other Secret. Each is needed because a tenant
+  # chart Role grants `get` on that same name, and creating that Role passes
+  # K8s anti-escalation only if the creator already holds the verb (no escalate
+  # verb anywhere):
+  #   relay-registered-keys  the relay-controller device public keys.
+  #   adapter-state          the app adapter's tailnet node state. Fixed name
+  #                          (one app channel per tenant); absent when no app
+  #                          channel is configured, and a pinned `get` on an
+  #                          absent name grants nothing.
+  - apiGroups: [""]
+    resources:
+      - "secrets"
+    resourceNames: ["relay-registered-keys", "adapter-state"]
+    verbs: ["get"]
+
+  # Warning Events. The relay-controller Role grants events create/patch to name
+  # rejected grant rows; the creator must hold the same verbs for the Role
+  # create to pass anti-escalation.
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+
+  # The sycophant chart creates per-workspace ServiceAccounts + Roles
+  # inside the tenant namespace; helm needs RBAC verbs to apply them.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+
+  # The tenant installer waits for its Namespace before running helm. Granted
+  # through the per-namespace RoleBinding, `get` reaches only that one
+  # Namespace; list and other namespaces stay denied. Never widen past `get`:
+  # the same path would grant `delete` on the tenant's own Namespace.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get"]
+
+  # Per-tenant network isolation.
+  - apiGroups: ["cilium.io"]
+    resources: ["ciliumnetworkpolicies"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]

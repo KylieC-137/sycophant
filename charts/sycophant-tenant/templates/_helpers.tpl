@@ -195,3 +195,30 @@ audience: omitted -- kubelet binds to apiserver default audience.
   mountPath: /var/run/secrets/kubernetes.io/serviceaccount
   readOnly: true
 {{- end -}}
+
+{{- /*
+The kube-dns egress every per-pod CNP opens: an L4 toEndpoints allowing UDP and
+TCP :53 to the kube-system kube-dns pods. Identical across all CNPs; the L7
+`rules.dns` allowlist a policy layers on top of it stays local. Caller nindents
+to the egress-entry depth (4).
+*/ -}}
+{{- define "sycophant.dnsEgress" -}}
+- toEndpoints:
+    - matchLabels:
+        io.kubernetes.pod.namespace: kube-system
+        k8s-app: kube-dns
+  toPorts:
+    - ports:
+        - port: "53"
+          protocol: UDP
+        - port: "53"
+          protocol: TCP
+{{- end -}}
+
+
+{{/* Number of `kind: app` entries under `.Values.channels`. */}}
+{{- define "sycophant.appChannelCount" -}}
+{{- $n := 0 -}}
+{{- range .Values.channels }}{{- if eq .kind "app" }}{{- $n = add $n 1 }}{{- end }}{{- end -}}
+{{- $n -}}
+{{- end -}}

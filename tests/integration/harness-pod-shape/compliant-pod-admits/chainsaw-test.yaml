@@ -3,20 +3,7 @@ kind: Test
 metadata:
   name: harness-pod-admits-cleanly
 spec:
-  description: |
-    Happy path. Tenant ns is created by the tenant-deployer SA — real
-    production path. The test applies the perimeter labels; the label-triggered
-    generate produces the per-tenant VAPBinding. THEN a harness-labeled
-    pod with a hardened security context and NO runtimeClassName admits
-    cleanly on the kubelet-default runtime.
-
-    Guards against accidentally tightening PSA/VAP so hard that legitimate
-    harness pods can't run, AND proves the gVisor narrowing: gVisor is
-    stamped/required on toolsets (capability-job) only, so the runtime-class
-    mutate must NOT stamp the harness and the VAP must NOT require it.
-    The test applies the perimeter labels itself (no auto-labelling mutate);
-    the VAPBinding must be generated or the VAP would not fire (silent-admit
-    antipattern), asserted before the workload submits.
+  description: A hardened harness pod with no runtimeClassName admits in a tenant namespace.
   bindings:
     - name: tenant_ns
       value: (join('-', ['tenant', random('[a-z0-9]{8}')]))

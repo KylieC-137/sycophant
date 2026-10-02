@@ -3,22 +3,7 @@ kind: Test
 metadata:
   name: harness-sa-only-creates-jobs
 spec:
-  description: |
-    The per-workspace creator ServiceAccount `harness-<ws>` is the identity the
-    gate keys on. It must hold exactly `create` on `batch/jobs` and nothing else:
-    no verb on pods, pods/ephemeralcontainers, cronjobs, deployments,
-    statefulsets, replicasets, daemonsets, replicationcontrollers, or secrets.
-    Absence is the denial for every other resource, so the creator can mint only
-    Jobs and only the gate governs their shape.
-
-    Pure chart-render property. `helm template` renders the SA plus the Role bound
-    to it; this test finds that Role via its RoleBinding and asserts its rule set
-    is exactly one rule -- apiGroups [batch], resources [jobs], verbs [create].
-
-    Mutation guard: adding any verb (get, list, delete), any resource (pods,
-    secrets), or a second rule fails the exact-rule-set assertion; widening verbs
-    to include `*` fails it; dropping the batch/jobs create rule fails the
-    presence assertion.
+  description: harness-<ws> may create Jobs and list and watch ConfigMaps, and nothing else.
   steps:
     - name: render-and-assert-harness-role
       try:
@@ -55,14 +40,15 @@ spec:
                   f"harness-probe must bind exactly one Role, got {bound}"
 
               rules = roles[bound[0]].get("rules") or []
-              assert len(rules) == 1, \
-                  f"harness-probe Role must hold exactly one rule, got {rules}"
-              r = rules[0]
-              assert sorted(r.get("apiGroups") or []) == ["batch"], \
-                  f"rule apiGroups must be [batch], got {r.get('apiGroups')}"
-              assert sorted(r.get("resources") or []) == ["jobs"], \
-                  f"rule resources must be [jobs], got {r.get('resources')}"
-              assert sorted(r.get("verbs") or []) == ["create"], \
-                  f"rule verbs must be exactly [create], got {r.get('verbs')}"
+              got = sorted(
+                  (tuple(sorted(r.get("apiGroups") or [])),
+                   tuple(sorted(r.get("resources") or [])),
+                   tuple(sorted(r.get("verbs") or [])))
+                  for r in rules)
+              want = sorted([
+                  (("batch",), ("jobs",), ("create",)),
+                  (("",), ("configmaps",), ("list", "watch")),
+              ])
+              assert got == want, f"harness-probe Role must be exactly {want}, got {got}"
               print("OK")
               PY

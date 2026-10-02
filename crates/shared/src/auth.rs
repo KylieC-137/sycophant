@@ -107,9 +107,9 @@ pub fn extract_bearer_token<T>(request: &Request<T>) -> Result<&str, Status> {
 }
 
 /// Prefixes on a workspace ServiceAccount name. Each names a role; all map to
-/// the same <workspace>. `sa-` is the controller-path pod, `unprivileged-` the
-/// harness-created tool-job pod, `harness-` the harness pod.
-const WORKSPACE_SA_PREFIXES: [&str; 3] = ["sa-", "unprivileged-", "harness-"];
+/// the same <workspace>. `unprivileged-` is the harness-created tool-job pod,
+/// `harness-` the harness pod.
+pub const WORKSPACE_SA_PREFIXES: [&str; 2] = ["unprivileged-", "harness-"];
 
 pub fn parse_workspace_from_sa(sa_name: &str) -> Option<&str> {
     let workspace = WORKSPACE_SA_PREFIXES
@@ -204,56 +204,26 @@ pub const RELAY_HARNESS_TOKEN_PATH: &str = "/var/run/secrets/relay/harness/token
 mod tests {
     use super::*;
 
+    /// Driven off `WORKSPACE_SA_PREFIXES` so the test cannot drift from the parser.
     #[test]
-    fn parse_workspace_valid() {
-        assert_eq!(
-            parse_workspace_from_sa("sa-hello-world"),
-            Some("hello-world")
-        );
+    fn parse_workspace_resolves_every_prefix_and_rejects_bare() {
+        for prefix in WORKSPACE_SA_PREFIXES {
+            assert_eq!(
+                parse_workspace_from_sa(&format!("{prefix}hello-world")),
+                Some("hello-world"),
+                "`{prefix}<workspace>` must resolve to its workspace"
+            );
+            assert_eq!(
+                parse_workspace_from_sa(prefix),
+                None,
+                "a bare `{prefix}` with an empty remainder must not resolve"
+            );
+        }
     }
 
     #[test]
     fn parse_workspace_no_prefix() {
         assert_eq!(parse_workspace_from_sa("default"), None);
-    }
-
-    #[test]
-    fn parse_workspace_empty_after_prefix() {
-        assert_eq!(parse_workspace_from_sa("sa-"), None);
-    }
-
-    #[test]
-    fn parse_workspace_nested_hyphens() {
-        assert_eq!(
-            parse_workspace_from_sa("sa-my-workspace"),
-            Some("my-workspace")
-        );
-    }
-
-    /// The harness-created tool-job pod runs as `unprivileged-<workspace>`,
-    /// not `sa-<workspace>`. The dispatch-auth resolver must accept that
-    /// subject too, alongside the existing `sa-` one, so the harness-created
-    /// pod's `GetToolCall`/`StreamToolResult`/`AwaitToolCancel` calls resolve
-    /// to a workspace instead of being denied.
-    #[test]
-    fn parse_workspace_unprivileged_prefix_resolves_to_workspace() {
-        assert_eq!(
-            parse_workspace_from_sa("unprivileged-foo"),
-            Some("foo"),
-            "an `unprivileged-<workspace>` subject must resolve to its workspace"
-        );
-    }
-
-    /// The harness pod runs as `harness-<workspace>`. It dials the controller's
-    /// dispatch with its own pod-SA token, so the resolver must accept that
-    /// subject too, alongside `sa-` and `unprivileged-`.
-    #[test]
-    fn parse_workspace_harness_prefix_resolves_to_workspace() {
-        assert_eq!(
-            parse_workspace_from_sa("harness-foo"),
-            Some("foo"),
-            "a `harness-<workspace>` subject must resolve to its workspace"
-        );
     }
 
     #[test]
@@ -307,7 +277,7 @@ mod tests {
     fn workspace_from_review_unauthenticated_returns_permission_denied() {
         let review = review_with(
             Some(false),
-            Some("system:serviceaccount:ns:sa-alice"),
+            Some("system:serviceaccount:ns:harness-alice"),
             Some(vec![TEST_AUDIENCE]),
         );
         let err = workspace_from_review(review, TEST_AUDIENCE).unwrap_err();
@@ -320,30 +290,14 @@ mod tests {
         // `authenticated: None` defaults to false via `unwrap_or(false)`.
         let review = review_with(
             None,
-            Some("system:serviceaccount:ns:sa-alice"),
+            Some("system:serviceaccount:ns:harness-alice"),
             Some(vec![TEST_AUDIENCE]),
         );
         let err = workspace_from_review(review, TEST_AUDIENCE).unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
 
-    #[test]
-    fn workspace_from_review_authenticated_workspace_sa_returns_name() {
-        let review = review_with(
-            Some(true),
-            Some("system:serviceaccount:ns:sa-hello-world"),
-            Some(vec![TEST_AUDIENCE]),
-        );
-        let ws = workspace_from_review(review, TEST_AUDIENCE).unwrap();
-        assert_eq!(ws, "hello-world");
-    }
-
-    /// Same pipeline as `workspace_from_review_authenticated_workspace_sa_returns_name`
-    /// (same audience check, same authenticated check), but for the
-    /// `unprivileged-<workspace>` subject the harness-created pod presents.
-    /// Runs the widened prefix through the full review path, not just the
-    /// prefix-strip helper, so a fix that only patches `parse_workspace_from_sa`
-    /// without wiring it into the caller's checks would still leave this red.
+    /// The full review path, not only the prefix-strip helper.
     #[test]
     fn workspace_from_review_unprivileged_subject_resolves_workspace() {
         let review = review_with(
@@ -396,7 +350,7 @@ mod tests {
     fn workspace_from_review_rejects_missing_audiences_echo() {
         let review = review_with(
             Some(true),
-            Some("system:serviceaccount:ns:sa-hello-world"),
+            Some("system:serviceaccount:ns:harness-hello-world"),
             None,
         );
         let err = workspace_from_review(review, TEST_AUDIENCE).unwrap_err();
@@ -408,7 +362,7 @@ mod tests {
     fn workspace_from_review_rejects_empty_audiences_echo() {
         let review = review_with(
             Some(true),
-            Some("system:serviceaccount:ns:sa-hello-world"),
+            Some("system:serviceaccount:ns:harness-hello-world"),
             Some(vec![]),
         );
         let err = workspace_from_review(review, TEST_AUDIENCE).unwrap_err();
@@ -420,7 +374,7 @@ mod tests {
     fn workspace_from_review_rejects_audiences_echo_without_requested() {
         let review = review_with(
             Some(true),
-            Some("system:serviceaccount:ns:sa-hello-world"),
+            Some("system:serviceaccount:ns:harness-hello-world"),
             Some(vec!["unrelated.sycophant.md", "other.example.com"]),
         );
         let err = workspace_from_review(review, TEST_AUDIENCE).unwrap_err();
@@ -434,7 +388,7 @@ mod tests {
         // succeed (catches a future mutant that flips `any` → strict equality).
         let review = review_with(
             Some(true),
-            Some("system:serviceaccount:ns:sa-hello-world"),
+            Some("system:serviceaccount:ns:harness-hello-world"),
             Some(vec!["other.example.com", TEST_AUDIENCE]),
         );
         let ws = workspace_from_review(review, TEST_AUDIENCE).unwrap();

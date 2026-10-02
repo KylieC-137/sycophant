@@ -3,25 +3,7 @@ kind: Test
 metadata:
   name: harness-egress-reaches-warm-service
 spec:
-  description: |
-    For a local model call the harness reaches the warm model ClusterIP Service
-    itself, with no per-call job in the path. Its per-workspace egress policy
-    (`harness-egress-<ws>`) must therefore open a hole to the warm model pod.
-    Today that CNP has egress to this workspace's capability-job pods on 9090
-    and to relay-ctrl, but names `component=inference` nowhere, so this is red
-    until the local-dial egress is added.
-
-    This bucket asserts the harness egress CNP opens egress to a same-tenant
-    `component=inference` endpoint. Name-agnostic on the port literal (the warm
-    Service port is derived from the profile `baseUrl`), pinned on the peer the
-    harness is allowed to dial. It does NOT assert any egress to an external
-    provider from the harness: a local call reaches only the in-cluster warm
-    Service, and a remote provider is reached only through the inference-runtime
-    job, never the harness.
-
-    Pure chart-render assertion: renders `harness-cnp.yaml` for one workspace
-    and checks the rendered CNP structurally, mirroring
-    `tool-dispatch-direction/harness-egress-flips-to-tool-pod`.
+  description: harness-egress-<ws> opens egress to the warm inference pod.
   bindings:
     - name: tenant_ns
       value: (join('-', ['tenant', random('[a-z0-9]{8}')]))

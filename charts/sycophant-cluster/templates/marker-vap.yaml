@@ -1,0 +1,149 @@
+{{- /*
+The identity gate every lifecycle marker rides on. A marker lands in a namespace
+whose RBAC is coarser than the operator intends (a tenant namespace, or
+sycophant-system for the tenant marker whose target namespace does not exist
+yet), so placement cannot decide who may act. Each VAP admits the marker only
+when the apiserver-stamped caller is an issuer-prefixed user. The apiserver maps
+identity as `<issuer>#<sub>` and maps no groups, uid, or extra, so a standing
+ServiceAccount credential (system:...) never carries the prefix and is rejected.
+CREATE and UPDATE are both gated because a marker name is reused and the reactor
+acts on an UPDATE as readily as a CREATE. failurePolicy Fail closes the gate if
+the policy cannot evaluate.
+
+Params: ctx, name (policy name), marker (marker name), noun and action (for the
+identity message), shape (extra validations), and system (true when the marker
+lives in sycophant-system rather than a tenant namespace).
+*/ -}}
+{{- define "sycophant.markerVap" -}}
+{{- $ctx := .ctx -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- include "sycophant.labels" $ctx | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    {{- if not .system }}
+    namespaceSelector:
+      matchLabels:
+        app.kubernetes.io/part-of: sycophant-tenant
+    {{- end }}
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["configmaps"]
+  matchConditions:
+    - name: is-{{ .noun }}-marker{{ if .system }}-in-system{{ end }}
+      expression: >-
+        {{ if .system }}object.metadata.namespace == 'sycophant-system' &&
+        {{ end }}has(object.metadata.name) &&
+        object.metadata.name == '{{ .marker }}' &&
+        has(object.metadata.labels) &&
+        '{{ include "sycophant.lifecycleMarkerLabel" $ctx }}' in object.metadata.labels
+  validations:
+    - expression: >-
+        has(request.userInfo.username) &&
+        request.userInfo.username.startsWith('{{ include "sycophant.idpUserPrefix" $ctx }}')
+      message: "a {{ .noun }} marker is admitted only for an issuer-prefixed user identity; standing cluster credentials cannot {{ .action }}"
+    {{- .shape | trim | nindent 4 }}
+    # A marker is a sycophant-controlled object, so it must carry part-of=sycophant.
+    - expression: >-
+        has(object.metadata.labels) &&
+        'app.kubernetes.io/part-of' in object.metadata.labels &&
+        object.metadata.labels['app.kubernetes.io/part-of'] == 'sycophant'
+      message: "a marker must carry the app.kubernetes.io/part-of=sycophant label"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ .name }}-binding
+  labels:
+    {{- include "sycophant.labels" $ctx | nindent 4 }}
+spec:
+  policyName: {{ .name }}
+  validationActions: [Deny]
+{{- end -}}
+
+{{- /*
+The tenant prefix keeps the composed namespace out of reserved namespaces. Every
+name a marker carries becomes part of a helm release name, which helm caps at
+53 characters, so each cap is 53 minus its release prefix: tenant-<token> leaves
+46, workspace-<name> 43, toolset-<name> 45; user-<handle> is always 15. The
+reactor reads capacity as the ResourceQuota bound, and a missing one would abort
+the whole generate silently, so it fails closed here.
+*/ -}}
+{{ include "sycophant.markerVap" (dict "ctx" . "name" "marker-provision-tenant" "system" true
+  "marker" (include "sycophant.provisionMarkerName" .) "noun" "provision" "action" "provision"
+  "shape" `
+- expression: >-
+    has(object.data) && 'tenant' in object.data &&
+    object.data['tenant'].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
+    size(object.data['tenant']) <= 46
+  message: "a provision marker must carry a DNS-safe 'tenant' token of at most 46 characters, so the release tenant-<token> fits helm's 53"
+- expression: >-
+    has(object.data) && 'handle' in object.data &&
+    object.data['handle'].matches('^[a-f0-9]{10}$')
+  message: "a provision marker must carry a 'handle' that is a 10-character hex token"
+- expression: >-
+    has(object.data) && 'capacity' in object.data &&
+    isQuantity(object.data['capacity'])
+  message: "a provision marker must carry a valid 'capacity' quantity"
+- expression: >-
+    has(object.data) && 'values' in object.data
+  message: "a provision marker must carry a 'values' key"` ) }}
+---
+{{- /*
+TODO: data.values on the tenant, workspace, and toolset markers is an opaque
+helm values blob checked only for presence, so a marker writer controls the
+install's values (only render and namespace.create are forced). The workspace
+marker also repeats every base key, so it can set base config that differs from
+the tenant marker. Validate each kind's allowed keys, and narrow the workspace
+marker to its own entry. The user marker carries no values.
+*/}}
+{{ include "sycophant.markerVap" (dict "ctx" . "name" "marker-provision-workspace"
+  "marker" (include "sycophant.workspaceProvisionMarkerName" .) "noun" "workspace" "action" "mint a workspace"
+  "shape" `
+- expression: >-
+    has(object.data) && 'workspace' in object.data && 'handle' in object.data && 'values' in object.data &&
+    object.data['workspace'].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
+    size(object.data['workspace']) <= 43 &&
+    object.data['handle'].matches('^[a-f0-9]{10}$')
+  message: "a workspace marker must carry a DNS-safe 'workspace' key of at most 43 characters (the release workspace-<name> fits helm's 53), a 10-character hex 'handle' key, and a 'values' key"` ) }}
+---
+{{ include "sycophant.markerVap" (dict "ctx" . "name" "marker-provision-user"
+  "marker" (include "sycophant.userProvisionMarkerName" .) "noun" "user" "action" "bind a framework user"
+  "shape" `
+- expression: >-
+    has(object.data) && 'handle' in object.data && 'user' in object.data &&
+    object.data['handle'].matches('^[a-f0-9]{10}$')
+  message: "a user marker must carry a 10-character hex 'handle' key and a 'user' key"
+# The installer prints the subject into a double-quoted YAML scalar, so a quote,
+# backslash, control character, or Unicode line or paragraph separator, any of
+# which escapes or folds that scalar, is refused. Same pattern as the tenant
+# chart's users schema.
+- expression: >-
+    has(object.data) && 'user' in object.data &&
+    object.data['user'].matches(r'^https?://[^#"\\\p{Cc}\x{2028}\x{2029}]+#[^"\\\p{Cc}\x{2028}\x{2029}]+$')
+  message: "a user marker's 'user' must be an issuer-prefixed subject <issuer>#<sub> with no quote, backslash, control character, or line separator"` ) }}
+---
+{{ include "sycophant.markerVap" (dict "ctx" . "name" "marker-provision-toolset"
+  "marker" (include "sycophant.toolsetProvisionMarkerName" .) "noun" "toolset" "action" "install a toolset"
+  "shape" `
+- expression: >-
+    has(object.data) && 'toolset' in object.data && 'handle' in object.data && 'values' in object.data &&
+    object.data['toolset'].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
+    size(object.data['toolset']) <= 45 &&
+    object.data['handle'].matches('^[a-f0-9]{10}$')
+  message: "a toolset marker must carry a DNS-safe 'toolset' key of at most 45 characters (the release toolset-<name> fits helm's 53), a 10-character hex 'handle' key, and a 'values' key"` ) }}
+---
+{{- /* An absent keepalive suspends with no reap; a typo'd one is refused rather than suspending forever. */}}
+{{ include "sycophant.markerVap" (dict "ctx" . "name" "marker-suspend-tenant"
+  "marker" (include "sycophant.suspendMarkerName" .) "noun" "suspend" "action" "suspend a tenant"
+  "shape" `
+- expression: >-
+    !has(object.data) || !('keepalive' in object.data) ||
+    object.data['keepalive'] in ['0', '30', '60', '90']
+  message: "a suspend marker's 'keepalive', when set, must be one of 0, 30, 60, 90"` ) }}

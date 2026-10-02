@@ -1,3 +1,4 @@
+{{- if eq .Values.render "base" }}
 {{/*
 The inference pod's own fence. One CiliumNetworkPolicy per `inference` entry,
 `inference-<key>`, selecting that pod and carrying every ingress rule for it in
@@ -69,17 +70,9 @@ spec:
     # DNS only, and L7-restricted. The pod dials nothing, so its allowlist is
     # empty: the port reaches kube-dns but the proxy resolves no name. Absent
     # its own `rules.dns` block this would L4-shadow other :53 policies.
-    - toEndpoints:
-        - matchLabels:
-            io.kubernetes.pod.namespace: kube-system
-            k8s-app: kube-dns
-      toPorts:
-        - ports:
-            - port: "53"
-              protocol: UDP
-            - port: "53"
-              protocol: TCP
+    {{- include "sycophant.dnsEgress" . | nindent 4 }}
           rules:
             dns: []
+{{- end }}
 {{- end }}
 {{- end }}

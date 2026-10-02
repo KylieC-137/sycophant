@@ -1,3 +1,4 @@
+{{- if eq .Values.render "base" }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -13,3 +14,4 @@ data:
         operator: Equal
         value: toolset
         effect: NoSchedule
+{{- end }}

@@ -1,10 +1,10 @@
 # Tenant values for the hello-world scenario.
 #
-# Copy this to the tenant config path, then `syco tenant up --ns hello-world`:
+# Copy this to the tenant config path, then `syco tenant up --ns tenant-hello-world`:
 #
-#   mkdir -p ~/.config/sycophant/tenants/hello-world
+#   mkdir -p ~/.config/sycophant/tenants/tenant-hello-world
 #   cp examples/scenarios/hello-world/values.yaml \
-#     ~/.config/sycophant/tenants/hello-world/values.yaml
+#     ~/.config/sycophant/tenants/tenant-hello-world/values.yaml
 toolsets:
   stdlib:
     image: sycophant-registry:5000/toolset:latest

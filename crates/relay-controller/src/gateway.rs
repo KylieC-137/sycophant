@@ -348,6 +348,8 @@ impl RelayGateway for GatewayService {
         let toolsets = self
             .state
             .capabilities()
+            .read()
+            .await
             .for_workspace(&row.workspace)
             .into_iter()
             .map(|(toolset, grants)| ToolsetGrants { toolset, grants })

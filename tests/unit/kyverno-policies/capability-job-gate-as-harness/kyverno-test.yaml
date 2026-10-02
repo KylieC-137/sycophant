@@ -1,30 +1,3 @@
-# The gate bounds which mount NAMES a harness-created Job may reference. The
-# volume-kind rule already bounds the kind; these two rules are what stop a
-# compromised harness from mounting a sibling workspace's data PVC or its own
-# conversation history, and from reading any ConfigMap.
-#
-# Offline, because both rules read only the creating identity and the submitted
-# spec — no cluster state and no context ConfigMap. The identity still has to be
-# real: `workspace` is parsed from the impersonated username, so a rule that
-# trusted a label instead of the identity would not pass here.
-#
-# Deny cases pair with pass cases on the same identity, so a rule that denied
-# every PVC or every Job would fail this suite rather than sail through it.
-#
-# Mutation guard: widening the claim name to a prefix match admits
-# `conversation-data-research`; dropping the identity derivation and comparing
-# against a carried label admits `workspace-data-other`; covering only
-# `volumes[]` in the ConfigMap ban admits `configmap-env` and
-# `configmap-envfrom`. Each of those reds this suite.
-#
-# What it does NOT catch: deleting a check outright. A CEL policy has no named
-# rules, so the CLI reports one row per policy and an expectation cannot name
-# the check it is about. `tests/integration/capability-job-gate/foreign-pvc-
-# mount-denies` is the deletion guard -- with the check gone the Job admits and
-# the apiserver-effect assertion reds. What keeps each row honest here is the
-# input: every Job is compliant apart from the one reference it is named for,
-# so the passing case can only pass if every check passes, and each failing
-# case can only fail on its own reference.
 apiVersion: cli.kyverno.io/v1alpha1
 kind: Test
 metadata:
@@ -33,6 +6,7 @@ policies:
   - policy.yaml
 resources:
   - resource-mounts.yaml
+  - jobs.yaml
 userinfo: user-harness-research.yaml
 variables: values.yaml
 results:
@@ -50,3 +24,11 @@ results:
       - tenant-offline/configmap-volume
       - tenant-offline/configmap-env
       - tenant-offline/configmap-envfrom
+  - policy: cluster-capability-job-gate-envelope
+    isMutatingPolicy: true
+    kind: Job
+    result: pass
+    resources:
+      - tenant-offline/minimal-template
+      - tenant-offline/hostile-security-context
+    patchedResources: patched.yaml

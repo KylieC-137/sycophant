@@ -26,7 +26,7 @@ spec:
     live rows. This is the one guard standing between those two sentences and
     the rows.
 
-    Also asserts D2's label (`sycophant.md/type: relay-access-grants`), which is
+    Also asserts the type label (`sycophant.md/type: relay-access-grants`), which is
     what the Kyverno write-protection rule matches on — a ConfigMap that renders
     without it is unprotected, and the Kyverno test next door would still pass
     because it applies its own labeled fixture.

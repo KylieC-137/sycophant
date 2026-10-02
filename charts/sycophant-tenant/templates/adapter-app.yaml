@@ -1,3 +1,4 @@
+{{- if eq .Values.render "base" }}
 {{/*
 App-channel adapter Deployment.
 
@@ -14,7 +15,16 @@ Userspace networking is load-bearing. WireGuard runs in netstack rather than
 through a kernel TUN device, so the container needs no added capability and
 runs non-root under the gVisor runtime class. Kernel-TUN mode fails at startup
 with `tstun.New("tailscale0"): operation not permitted`.
+
+At most one app channel per tenant. The adapter's tailnet node state lives in a
+single fixed-name Secret (`adapter-state`), which the provision-write holds a
+pinned `get` on so the adapter Role creates cleanly. Two app channels would
+resolve the same fixed Secret name and contend one tailnet node identity, so a
+second is refused at render rather than silently colliding.
 */}}
+{{- if gt (include "sycophant.appChannelCount" . | atoi) 1 }}
+{{- fail "channels: at most one app channel is supported per tenant; the adapter state Secret is a single fixed name (adapter-state) and a second adapter would contend the same tailnet node identity" }}
+{{- end }}
 {{- range $channel, $entry := .Values.channels }}
 {{- if ne $entry.kind "app" }}
 {{- fail (printf "channels.%s.kind: unsupported channel kind %q (only \"app\" is supported)" $channel $entry.kind) }}
@@ -99,9 +109,11 @@ spec:
                   key: authkey
             - name: TS_KUBE_SECRET
               # Persisted node state Secret; lets the adapter keep its
-              # tailnet identity across pod restarts. Not a keypair — the
-              # adapter signs nothing.
-              value: adapter-{{ $channel }}-state
+              # tailnet identity across pod restarts. Not a keypair, the
+              # adapter signs nothing. Fixed name (one app channel per tenant)
+              # so the provision-write can pin a `get` on it, the way it
+              # already pins relay-registered-keys.
+              value: adapter-state
             - name: TS_SERVE_CONFIG
               value: /etc/tsnet/serve.json
           resources:
@@ -159,8 +171,9 @@ data:
       "TCP": {
         "9090": {
           "HTTPS": false,
-          "TCPForward": "relay-ctrl.{{ $.Release.Namespace }}.svc.cluster.local:9091"
+          "TCPForward": "relay-controller.{{ $.Release.Namespace }}.svc.cluster.local:9091"
         }
       }
     }
+{{- end }}
 {{- end }}

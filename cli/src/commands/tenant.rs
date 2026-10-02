@@ -9,9 +9,9 @@ pub(crate) fn run(cmd: TenantCmd) -> Result<(), String> {
     let TenantCmd { ns, sub } = cmd;
     let scope = || -> Result<Scope, String> { Scope::for_tenant(require_ns(&ns)?) };
     match sub {
-        TenantSub::Up(_) => up::run(&scope()?),
+        TenantSub::Up(c) => up::run(&scope()?, &c.capacity),
         TenantSub::Down(_) => down::run(&scope()?),
-        TenantSub::Remove(_) => remove::run(require_ns(&ns)?),
+        TenantSub::Remove(_) => remove::run(&scope()?),
         TenantSub::Secret(c) => secret::run(&scope()?, c),
         TenantSub::Workspace(c) => workspace::run(&scope()?, c),
         TenantSub::Audit(c) => audit::run(&scope()?, c),

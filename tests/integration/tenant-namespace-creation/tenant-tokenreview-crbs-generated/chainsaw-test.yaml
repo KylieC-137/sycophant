@@ -3,28 +3,7 @@ kind: Test
 metadata:
   name: tenant-tokenreview-crbs-generated
 spec:
-  description: |
-    A namespace carrying app.kubernetes.io/part-of=sycophant-tenant — with ANY
-    name, created by ANY actor — triggers the label-matched generate rules in
-    tenant-rolebinding-generator. They must materialize the ClusterRoleBinding
-    binding the SHARED tokenreview ClusterRole to the per-tenant relay-ctrl
-    ServiceAccount, the per-tenant ValidatingAdmissionPolicyBinding scoping
-    cluster-gvisor-pod-policy to the ns, and the tenant-deployer RoleBinding
-    binding the tenant-deployer SA to the tenant-operator ClusterRole.
-
-    The namespace name here is deliberately NOT tenant-* — provisioning keys on
-    the label, not the name.
-
-    Each generated CRB carries an ownerReference to the ns with
-    blockOwnerDeletion: false — ns deletion cascade-GCs them without wedging
-    teardown. We assert apiVersion/kind/name/blockOwnerDeletion (uid is dynamic).
-
-    Generate rules run asynchronously via Kyverno's UpdateRequest reconciler, so
-    a polling pre-step waits for the resources before the assertions run.
-
-    The referenced ClusterRole is pinned: it must grant exactly one rule,
-    exactly authentication.k8s.io/tokenreviews/create. A widening regression
-    (extra rule, extra verb, swapped resource) makes the test go red.
+  description: A tenant-labeled namespace gets the relay tokenreview ClusterRoleBinding and the gVisor VAP binding.
   bindings:
     - name: tenant_ns
       value: (join('-', ['labeled', random('[a-z0-9]{8}')]))
@@ -90,9 +69,7 @@ spec:
                      "${TENANT_NS}-relay-tokenreview" \
                      >/dev/null 2>&1 && \
                    kubectl get validatingadmissionpolicybinding \
-                     "${TENANT_NS}-sycophant-pod-binding" >/dev/null 2>&1 && \
-                   kubectl get rolebinding tenant-deployer \
-                     -n "$TENANT_NS" >/dev/null 2>&1; then
+                     "${TENANT_NS}-sycophant-pod-binding" >/dev/null 2>&1; then
                   exit 0
                 fi
                 sleep 0.5
@@ -108,7 +85,7 @@ spec:
               metadata:
                 name: (join('-', [$tenant_ns, 'relay-tokenreview']))
                 labels:
-                  app.kubernetes.io/component: relay-ctrl
+                  app.kubernetes.io/component: relay-controller
                 ownerReferences:
                   - apiVersion: v1
                     kind: Namespace
@@ -116,7 +93,7 @@ spec:
                     blockOwnerDeletion: false
               subjects:
                 - kind: ServiceAccount
-                  name: relay-ctrl
+                  name: relay-controller
                   namespace: ($tenant_ns)
               roleRef:
                 apiGroup: rbac.authorization.k8s.io
@@ -150,36 +127,6 @@ spec:
             apiVersion: admissionregistration.k8s.io/v1
             kind: ValidatingAdmissionPolicyBinding
             name: (join('-', [$tenant_ns, 'sycophant-pod-binding']))
-    - name: assert-deployer-rolebinding
-      try:
-        - assert:
-            resource:
-              apiVersion: rbac.authorization.k8s.io/v1
-              kind: RoleBinding
-              metadata:
-                name: tenant-deployer
-                namespace: ($tenant_ns)
-                labels:
-                  app.kubernetes.io/component: tenant-deployer
-                ownerReferences:
-                  - apiVersion: v1
-                    kind: Namespace
-                    name: ($tenant_ns)
-                    blockOwnerDeletion: false
-              subjects:
-                - kind: ServiceAccount
-                  name: tenant-deployer
-                  namespace: sycophant-system
-              roleRef:
-                apiGroup: rbac.authorization.k8s.io
-                kind: ClusterRole
-                name: tenant-operator
-      catch:
-        - describe:
-            apiVersion: rbac.authorization.k8s.io/v1
-            kind: RoleBinding
-            name: tenant-deployer
-            namespace: ($tenant_ns)
     - name: teardown
       try:
         - script:
