@@ -44,9 +44,11 @@ ISP sanity check: from a phone on cellular data (NOT your home WiFi), browse to 
 
 ## Deploy with ACME enabled
 
-Add headscale and the app channel to the tenant values file at `$SYCO_CONFIG_DIR/tenants/tenant-<name>/values.yaml` (default `~/.config/sycophant/tenants/tenant-<name>/values.yaml`):
+Headscale and the app channel are the tenant chart's `render=channel` slice, installed host-side into a provisioned tenant namespace. Write their values to `channel-values.yaml`:
 
 ```yaml
+namespace:
+  create: false
 headscale:
   enabled: true
   serverUrl: https://hs.<domain>
@@ -59,10 +61,11 @@ channels:
     loginServer: https://hs.<domain>
 ```
 
-Then provision the tenant, or re-run the same command on an existing tenant to apply the change:
+Then install the slice, or re-run the same command to apply a change:
 
 ```sh
-syco tenant up --ns tenant-<name> --capacity <quantity>
+helm upgrade --install channel-app "$SYCO_CONFIG_DIR/charts/sycophant-tenant" \
+  -n tenant-<name> --set render=channel -f channel-values.yaml
 ```
 
 The chart will:
@@ -140,11 +143,11 @@ Paste that string into the Flutter app's sign-in screen (along with the workspac
 
 ## Gotchas
 
-- **Port-forward dies on every headscale rollout.** Whenever the headscale pod rolls (a `syco tenant up` that changes its config, cert refresh, etc.), the existing port-forward terminates with a stale-pod error. Restart the `sudo kubectl port-forward` command after any change that touches headscale.
-- **The tailnet node takes ~10s to register after pod roll.** After a `syco tenant up` that changes the app channel, the `adapter-app` pod restarts and its `tailscale` container re-registers with headscale. `headscale nodes list` will show no node for ~10 seconds; logs will show the registration handshake. Wait it out.
+- **Port-forward dies on every headscale rollout.** Whenever the headscale pod rolls (a channel slice upgrade that changes its config, cert refresh, etc.), the existing port-forward terminates with a stale-pod error. Restart the `sudo kubectl port-forward` command after any change that touches headscale.
+- **The tailnet node takes ~10s to register after pod roll.** After a channel slice upgrade that changes the app channel, the `adapter-app` pod restarts and its `tailscale` container re-registers with headscale. `headscale nodes list` will show no node for ~10 seconds; logs will show the registration handshake. Wait it out.
 - **Tailscale Mac CLI logout drops your existing tailnet.** `sudo tailscale logout` followed by `sudo tailscale up --login-server=...` switches your Mac off whatever Tailscale account it was on. If you have a personal hosted Tailscale tailnet you use for other things, log back into it when done testing here. The Tailscale Mac GUI may support multiple accounts simultaneously; the CLI's account model is single-tenant.
 - **Cloudflare DNS proxy must stay off.** If you (or someone else managing the zone) flips on the orange-cloud Proxied mode after initial setup, the next ACME renewal will fail. The cert will expire after 90 days. Periodic verification: `curl -v https://hs.<domain>/health` should report a Let's Encrypt-issued cert, not a Cloudflare-managed one.
-- **First ACME issuance can take a minute.** If you `curl https://hs.<domain>/health` immediately after `syco tenant up`, you may get a TLS handshake failure for ~30s while autocert negotiates the challenge. Wait and retry.
+- **First ACME issuance can take a minute.** If you `curl https://hs.<domain>/health` immediately after installing the channel slice, you may get a TLS handshake failure for ~30s while autocert negotiates the challenge. Wait and retry.
 - **headscale 0.28+ needs numeric user ID for preauthkeys.** Don't pass a username to `headscale preauthkeys create -u …`. Look up the ID from `headscale users list -o json` first.
 
 ## What doesn't work (and why)

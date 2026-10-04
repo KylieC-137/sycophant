@@ -27,8 +27,8 @@
 #   config root is SYCO_CONFIG_DIR (default tmp/syco-config), never ~/.config.
 #
 # The bootstrap is `syco setup`, the main tenant is provisioned with `syco
-# tenant up`, and the lifecycle proof drives `syco tenant up/down/remove`. A cluster from before that switch has no Dex operator login:
-# run with --clean once.
+# tenant up`, and the lifecycle proof drives `syco tenant up/down/remove`. A
+# cluster without the Dex operator login needs one run with --clean.
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
@@ -85,12 +85,17 @@ RCLONE_IMAGE="rclone/rclone:1.75.1"
 # the operator that a password entry is imminent (the run is otherwise headless
 # until Step 5).
 SUDO_PENDING_SENTINEL="/tmp/sycophant-e2e-sudo-pending"
-# The in-cluster inference model key. Its `model` entry points baseUrl at the
-# inference-<key> Service, and the chart renders the llama.cpp Deployment, its
-# ingress fence (CNP inference-<key>), and the model's in-cluster egress hole
-# (CNP inference-egress-<key>) from it. Its listen port is the one in that baseUrl.
+# The in-cluster inference model key. Its marker carries `server.image`, so the
+# chart renders the llama.cpp Deployment, its Service and its ingress fence (CNP
+# inference-<key>). Every local model serves on the fixed port 8080.
 INFERENCE_PROFILE="local"
 INFERENCE_PORT="8080"
+# The local model's server.memory in MiB. llama.cpp mmaps the GGUF, so step 1
+# fails the run when this is below the model on disk x 1.4.
+INFERENCE_MEMORY_MIB=2560
+# The remote model the hello-world workspace also lists, reached through a
+# per-call inference job holding the vendor key.
+REMOTE_MODEL="deepseek-v4-flash"
 # Client choice. Prompt when unset + interactive (the "confirm during install"
 # step); honor the env var otherwise so CI/agents run non-interactively.
 # none = backend-only: skip the local Flutter client and connect one remotely.
@@ -350,25 +355,19 @@ step_1_build() {
   local GGUF_PATH="${GGUF_PATH:-${HOME}/.cache/sycophant/weights/MiniCPM5-2B-Q4_K_M.gguf}"
   # The inference container limit must clear the mmap'd model plus its KV cache
   # and runtime, or llama.cpp OOMKills mid-load (exit 137). The model default
-  # lives here; the limit lives in docs/e2e/values.yaml. The two must move
-  # together -- assert it now so a model bump that forgets the limit fails at
-  # preflight, not fifteen minutes into the run.
+  # lives here; the limit is the local inference marker's server.memory. The two
+  # must move together -- assert it now so a model bump that forgets the limit
+  # fails at preflight, not fifteen minutes into the run.
   if [ ! -f "$GGUF_PATH" ]; then
     printf '\n\033[1;31m✗ inference model GGUF not found: %s\033[0m\n' "$GGUF_PATH" >&2
     exit 1
   fi
-  local model_mib inf_mem inf_mib floor_mib
+  local model_mib floor_mib
   model_mib=$(( $(wc -c < "$GGUF_PATH") / 1024 / 1024 ))
-  inf_mem="$(awk '/^inference:/{f=1} f&&/^[[:space:]]+memory:/{print $2; exit}' "$REPO_ROOT/docs/e2e/values.yaml")"
-  case "$inf_mem" in
-    *Gi) inf_mib=$(( ${inf_mem%Gi} * 1024 )) ;;
-    *Mi) inf_mib=${inf_mem%Mi} ;;
-    *)   printf '\n\033[1;31m✗ cannot parse inference.local.memory %q in docs/e2e/values.yaml\033[0m\n' "$inf_mem" >&2; exit 1 ;;
-  esac
   floor_mib=$(( model_mib * 14 / 10 ))
-  if [ "$inf_mib" -lt "$floor_mib" ]; then
-    printf '\n\033[1;31m✗ inference.local.memory (%s = %dMiB) is below the floor for %s (%dMiB on disk).\n   llama.cpp mmaps the model + KV + runtime; set memory >= %dMiB (model x 1.4) in docs/e2e/values.yaml.\033[0m\n' \
-      "$inf_mem" "$inf_mib" "$(basename "$GGUF_PATH")" "$model_mib" "$floor_mib" >&2
+  if [ "$INFERENCE_MEMORY_MIB" -lt "$floor_mib" ]; then
+    printf '\n\033[1;31m✗ server.memory (%dMiB) is below the floor for %s (%dMiB on disk).\n   llama.cpp mmaps the model + KV + runtime; set INFERENCE_MEMORY_MIB >= %d (model x 1.4).\033[0m\n' \
+      "$INFERENCE_MEMORY_MIB" "$(basename "$GGUF_PATH")" "$model_mib" "$floor_mib" >&2
     exit 1
   fi
   local LLAMA_SERVER_REF="${LLAMA_SERVER_REF:-ghcr.io/ggml-org/llama.cpp:server@sha256:9f84380be42d6285a827629c809387349c3541aa8986f7536547ca33cc8dd47a}"
@@ -381,10 +380,12 @@ step_1_build() {
 
   step "Loading images into k3d + pushing toolsets to registry"
   local img
+  # toolset-git:local is the workspace-init image the chart defaults to
+  # (pullPolicy Never), so it is imported rather than pulled.
   for img in inference-runtime:local \
              sycophant-harness:local relay-controller:local \
              sycophant-kubectl:local sycophant-provisioner:local \
-             weights:local; do
+             weights:local toolset-git:local; do
     k3d image import "$img" --cluster "$CLUSTER_NAME" >/dev/null
   done
   # llama-server is a multi-arch index under the containerd store; a plain import
@@ -395,14 +396,14 @@ step_1_build() {
   rm -f "$llama_tar"
 
   # The harness instructions-sync init container's client (rclone, a neutral S3
-  # client). A tenant-workload image pulled from Docker Hub, not a built artifact.
-  # Multi-arch index, so export one arch to a tar (a plain import saves manifests
-  # for absent platforms and fails). The SeaweedFS server image is handled
-  # separately by install_object_store.
+  # client). A tenant-workload image pulled from Docker Hub, not a built artifact,
+  # imported under the chart's default reference. Multi-arch index, so export one
+  # arch to a tar (a plain import saves manifests for absent platforms and
+  # fails). The SeaweedFS server image is handled separately by
+  # install_object_store.
   docker pull -q --platform "linux/${DOCKER_ARCH}" "$RCLONE_IMAGE" >/dev/null
-  docker tag "$RCLONE_IMAGE" rclone:local
   local rclone_tar; rclone_tar="$(mktemp -t rclone.XXXXXX).tar"
-  docker image save --platform "linux/${DOCKER_ARCH}" -o "$rclone_tar" rclone:local
+  docker image save --platform "linux/${DOCKER_ARCH}" -o "$rclone_tar" "$RCLONE_IMAGE"
   k3d image import "$rclone_tar" --cluster "$CLUSTER_NAME" >/dev/null
   rm -f "$rclone_tar"
 
@@ -491,8 +492,8 @@ EOF
 
 # ---- step 2: configure ----
 # Author the tenant's values file where `syco tenant up` reads it. The values are
-# docs/e2e/values.yaml plus this run's overrides: the bound user, the local sync
-# image, each toolset's local-registry digest, and the capability manifest.
+# docs/e2e/values.yaml plus this run's overrides: the bound user, each toolset's
+# local-registry digest, and the capability manifest.
 step_2_configure() {
   step "Step 2: Configure tenant values"
 
@@ -545,13 +546,70 @@ EOF
   helm template e2e-values "$work/merge" \
     -f "$REPO_ROOT/docs/e2e/values.yaml" \
     --set "users[0]=${APISERVER_OIDC_ISSUER}#${TENANT_A_USER_SUB}" \
-    --set-string "harness.instructions.syncImage=rclone:local" \
     --set-string "toolsets.stdlib.image=${stdlib_ref}" \
     --set-string "toolsets.workspace-ro.image=${git_ref}" \
     --set-string "toolsets.ssh-credentials.image=${ssh_ref}" \
     --set-file "workspaces.hello-world.capabilityManifest=${manifest_file}" \
     > "$TENANT_VALUES_FILE"
   ok "Tenant values written to ${TENANT_VALUES_FILE} (client: ${CLIENT_NAME})"
+}
+
+# Write the provision-tenant marker for tenant token $1 with capacity $2 to file
+# $3. The base release installs from chart defaults.
+tenant_marker_file() {
+  mkdir -p "$(dirname "$3")"
+  { marker_yaml provision-tenant sycophant-system; cat <<YAML
+  tenant: $1
+  capacity: $2
+YAML
+  } > "$3"
+}
+
+# The main tenant's marker file for model $1.
+inference_marker_path() {
+  printf '%s/%s-provision-inference-%s.yaml' "$MARKER_DIR" "$NAMESPACE" "$1"
+}
+
+# Write the main tenant's two model markers. The local one carries `server.*`
+# keys, so it renders the llama.cpp server on the fixed local port and carries
+# no baseUrl. The remote one names the job image and the vendor key's Secret.
+#
+# weightsDelivery copy is the only path this cluster clears: the k3d k3s image is
+# not pinned, so the kubelet image-volume floor cannot be assumed.
+# singleNodeException drops the workload node selector and toleration, because
+# this run has one unlabeled node shared by inference and toolset pods.
+# llama.cpp mmaps the GGUF, so server.memory must exceed the model on disk
+# (MiniCPM5-2B Q4_K_M is ~1.62 GB) plus the KV cache and runtime; step 1 fails
+# the run below model size x 1.4. temp 0 is greedy decoding, so the model
+# reproduces the scrubbed tool output verbatim: the redaction proof rides the
+# reply text.
+write_inference_markers() {
+  mkdir -p "$MARKER_DIR"
+  { marker_yaml "provision-inference-${REMOTE_MODEL}" "$NAMESPACE"; cat <<YAML
+  format: openai
+  model: deepseek/deepseek-v4-flash
+  baseUrl: https://openrouter.ai/api/v1
+  image: inference-runtime:local
+  secret: sycophant-llm-openrouter
+YAML
+  } > "$(inference_marker_path "$REMOTE_MODEL")"
+  { marker_yaml "provision-inference-${INFERENCE_PROFILE}" "$NAMESPACE"; cat <<YAML
+  format: openai
+  model: local
+  server.image: llama-server:local
+  server.weights: weights:local
+  server.weightsPath: /weights/model.gguf
+  server.weightsDelivery: copy
+  server.singleNodeException: "true"
+  server.memory: ${INFERENCE_MEMORY_MIB}Mi
+  server.cpu: "2"
+  server.threads: "2"
+  server.contextBudget: "8192"
+  server.slots: "1"
+  server.outputCap: "512"
+  server.temp: "0"
+YAML
+  } > "$(inference_marker_path "$INFERENCE_PROFILE")"
 }
 
 # Seed what the tenant reads but no marker installs: the instructions tree and
@@ -609,13 +667,13 @@ step_3_deploy() {
       --ignore-not-found >/dev/null
   fi
 
-  # The operator's path: `syco tenant up` writes the tenant marker, then one
-  # workspace, user, and toolset marker each, under the operator's Dex login,
-  # and waits on every installer Job. The base install's install-wait hook gates
-  # on the app adapter, which needs a pre-auth key minted from the tenant's own
-  # headscale, so the provision runs in the background while this step seeds the
-  # namespace the reactor generates and mints the key.
-  "$SYCO" tenant up --ns "$NAMESPACE" --capacity "$TENANT_CAPACITY" &
+  # The operator's path: `syco tenant up -f` applies the tenant marker, then
+  # writes one workspace, user, and toolset marker each, under the operator's Dex
+  # login, and waits on every installer Job. The provision runs in the
+  # background while this step seeds the namespace the reactor generates.
+  local tenant_marker="$MARKER_DIR/${NAMESPACE}-provision-tenant.yaml"
+  tenant_marker_file "${NAMESPACE#tenant-}" "$TENANT_CAPACITY" "$tenant_marker"
+  "$SYCO" tenant up -f "$tenant_marker" &
   local up_pid=$!
   CLEANUP_PIDS+=("$up_pid")
 
@@ -684,15 +742,33 @@ POD
   # container syncs its <ns>/<workspace> prefix from the shared store in the
   # system namespace (seeded above) into an emptyDir it mounts read-only.
 
-  wait_for "headscale Deployment rendered by the base installer" 300 \
-    "kubectl get deploy headscale -n '$NAMESPACE' >/dev/null 2>&1"
-  step_3_headscale_authkey
-
   wait "$up_pid" || { warn "syco tenant up failed"; exit 1; }
   ok "syco tenant up: tenant, workspace, user, and toolset markers admitted; each installer Job succeeded (install-wait passed)"
   wait_for "tenant release ${NAMESPACE} deployed" 120 \
     "release_deployed '$NAMESPACE' '$NAMESPACE'"
   ok "tenant release ${NAMESPACE} deployed"
+  kubectl get configmap provision-tenant -n sycophant-system >/dev/null 2>&1 \
+    && { warn "the tenant marker survived a successful install"; exit 1; }
+  ok "the tenant installer deleted its marker"
+
+  # Each model is its own marker, applied once the tenant is up and the vendor
+  # key is seeded. The harness watches the model ConfigMaps, so no restart.
+  write_inference_markers
+  local model
+  for model in "$REMOTE_MODEL" "$INFERENCE_PROFILE"; do
+    "$SYCO" inference up -f "$(inference_marker_path "$model")" \
+      || { warn "syco inference up ${model} failed"; exit 1; }
+    kubectl get configmap "model-${model}" -n "$NAMESPACE" >/dev/null 2>&1 \
+      || { warn "model ConfigMap model-${model} missing after its install"; exit 1; }
+  done
+  ok "syco inference up: ${REMOTE_MODEL} and ${INFERENCE_PROFILE} model markers installed"
+
+  # The app channel installs host-side after the base: its adapter needs a
+  # pre-auth key minted from the tenant's own headscale.
+  helm upgrade --install channel-app "$REPO_ROOT/charts/sycophant-tenant" -n "$NAMESPACE" \
+    --set render=channel -f "$REPO_ROOT/docs/e2e/channel-values.yaml" >/dev/null
+  ok "app channel slice installed"
+  step_3_headscale_authkey
 
   # Grant rows are runtime data, not chart config: the operator writes them
   # into the chart-created `relay-access-grants` ConfigMap. The identity IS the
@@ -719,10 +795,9 @@ EOF
   # `relay-ingress` is the ONE object carrying every relay ingress rule; its
   # whole-object absence is the only way the relay fails open, so the run
   # hard-fails on it.
-  # inference-egress-local is the in-cluster model's egress hole (its inference
-  # job's toEndpoints rule to the inference pod); inference-local is that pod's
-  # own ingress+DNS fence. Both render from the `local` model entry.
-  for cnp in inference-egress-deepseek-v4-flash inference-egress-local inference-local relay-ingress; do
+  # inference-egress-<remote> is the vendor model's job egress hole;
+  # inference-local is the in-cluster model pod's own ingress+DNS fence.
+  for cnp in "inference-egress-${REMOTE_MODEL}" "inference-${INFERENCE_PROFILE}" relay-ingress; do
     if kubectl get ciliumnetworkpolicy "$cnp" -n "$NAMESPACE" >/dev/null 2>&1; then
       ok "CNP present: $cnp"
     else
@@ -1545,7 +1620,7 @@ LIFECYCLE_TENANT_NS="tenant-${LIFECYCLE_TENANT_TOKEN}"
 LIFECYCLE_WORKSPACE="hello-world"
 LIFECYCLE_USER="${APISERVER_OIDC_ISSUER}#lifecycle-bound-user"
 # Toolset names absent from the base install, so their ConfigMaps can only land
-# via the marker. The second is installed by UPDATING the one fixed-name marker.
+# via their markers.
 LIFECYCLE_TOOLSET="lifecycle-tool"
 LIFECYCLE_TOOLSET_2="lifecycle-tool-2"
 
@@ -1571,6 +1646,8 @@ SYCO_PASSWORD_FILE="$REPO_ROOT/tmp/e2e-operator-password"
 SYCO_DEX_CA="$SYCO_CONFIG_DIR/oidc/ca.crt"
 # The main tenant's values, where `syco tenant up` and `syco upgrade` read them.
 TENANT_VALUES_FILE="$SYCO_CONFIG_DIR/tenants/$NAMESPACE/values.yaml"
+# Marker files the operator applies with `syco <kind> up -f`.
+MARKER_DIR="$SYCO_CONFIG_DIR/markers"
 # Memory quota for the main tenant, summed over pod limits: inference 2560Mi;
 # relay, adapter, headscale, harness, workspace-init, and three toolset pods at
 # 256Mi each (the LimitRange default where the chart sets none); install-wait
@@ -1981,9 +2058,12 @@ YAML
 # and base install; workspace, user, and toolset markers each drive one release;
 # suspend scales the tenant down and stamps a reap TTL the reap policy acts on.
 
-# The 10-hex handle a marker writer derives from $1 and the reactor names its
-# per-install objects with.
+# The 10-hex handle of $1: a user marker's name suffix, and the chart's per-user
+# RoleBinding suffix.
 handle_of() { printf '%s' "$1" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10; }
+
+# The installer objects' suffix for marker uid $1.
+uid10_of() { printf '%s' "$1" | tr -d - | cut -c1-10; }
 
 # Emit a lifecycle marker ConfigMap up to `data:`. $1 name; $2 namespace.
 marker_yaml() {
@@ -2000,40 +2080,41 @@ data:
 YAML
 }
 
-# Prove marker file $3 for kind $1 with handle $2: the standing SA ($sa_kube) is
-# refused by marker-provision-$1, the operator ($op_kube) is admitted, and the
-# provision-$1 Job completes. Clears a prior run's Job first, since its selector
-# is immutable.
+# Prove marker file $2 for kind $1: the standing SA ($sa_kube) is refused by
+# marker-provision-$1, the operator ($op_kube) is admitted, the Job named from
+# the marker uid completes, and the marker is gone.
 prove_marker() {
-  local kind="$1" handle="$2" file="$3" err
-  kubectl delete job,serviceaccount "provision-${kind}-${handle}" -n sycophant-system \
-    --ignore-not-found >/dev/null
+  local kind="$1" file="$2" err uid job name
   if err="$(kubectl --kubeconfig="$sa_kube" create -f "$file" 2>&1)"; then
     warn "a standing ServiceAccount wrote a ${kind} marker; the ${kind} VAP failed open"; exit 1
   fi
   printf '%s' "$err" | grep -qi "marker-provision-${kind}" \
     || { warn "SA ${kind} marker was refused, but not by the ${kind} identity VAP: ${err}"; exit 1; }
   ok "a standing ServiceAccount credential cannot write a ${kind} marker"
-  kubectl --kubeconfig="$op_kube" create -f "$file" >/dev/null \
+  uid="$(kubectl --kubeconfig="$op_kube" create -f "$file" -o jsonpath='{.metadata.uid}')" \
     || { warn "the ${kind} VAP refused the IdP-authenticated operator identity"; exit 1; }
   ok "${kind} marker admitted for the IdP-authenticated operator identity"
-  wait_for "provision-${kind} Job succeeded" 600 \
-    "kubectl get job 'provision-${kind}-${handle}' -n sycophant-system -o jsonpath='{.status.succeeded}' 2>/dev/null | grep -qx 1"
+  job="provision-${kind}-$(uid10_of "$uid")"
+  wait_for "${job} Job succeeded" 600 \
+    "kubectl get job '${job}' -n sycophant-system -o jsonpath='{.status.succeeded}' 2>/dev/null | grep -qx 1"
+  name="$(kubectl create --dry-run=client -f "$file" -o jsonpath='{.metadata.namespace}/{.metadata.name}')"
+  wait_for "${kind} marker ${name#*/} deleted by its installer" 30 \
+    "! kubectl get configmap '${name#*/}' -n '${name%%/*}' >/dev/null 2>&1"
 }
 
-# Prove the identity gate on marker file $3 for kind $1, sent with kubectl verb
-# $2: the standing SA ($sa_kube) is refused by marker-provision-$1 on a real
+# Prove the identity gate on marker file $2 for kind $1, sent with kubectl
+# create: the standing SA ($sa_kube) is refused by marker-provision-$1 on a real
 # write, and the second issuer's identity ($op_kube), which Dex never signed, is
 # admitted on a server dry-run so nothing is generated.
 prove_gate() {
-  local kind="$1" verb="$2" file="$3" err
-  if err="$(kubectl --kubeconfig="$sa_kube" "$verb" -f "$file" 2>&1)"; then
+  local kind="$1" file="$2" err
+  if err="$(kubectl --kubeconfig="$sa_kube" create -f "$file" 2>&1)"; then
     warn "a standing ServiceAccount wrote a ${kind} marker; the ${kind} VAP failed open"; exit 1
   fi
   printf '%s' "$err" | grep -qi "marker-provision-${kind}" \
     || { warn "SA ${kind} marker was refused, but not by the ${kind} identity VAP: ${err}"; exit 1; }
   ok "a standing ServiceAccount credential cannot write a ${kind} marker"
-  kubectl --kubeconfig="$op_kube" "$verb" --dry-run=server -f "$file" >/dev/null \
+  kubectl --kubeconfig="$op_kube" create --dry-run=server -f "$file" >/dev/null \
     || { warn "the ${kind} VAP refused an IdP identity Dex never signed"; exit 1; }
   ok "${kind} marker admitted for an IdP identity Dex never signed"
 }
@@ -2049,15 +2130,13 @@ harness_identity() {
       -o jsonpath='{.metadata.generation}' 2>/dev/null)"
 }
 
-# Write the toolset marker for toolset $1 (handle $2, image name $3) to $work.
+# Write the toolset marker for toolset $1 (image name $2) to $work.
 toolset_marker() {
-  { marker_yaml provision-toolset "$LIFECYCLE_TENANT_NS"; cat <<YAML
-  toolset: $1
-  handle: $2
+  { marker_yaml "provision-toolset-$1" "$LIFECYCLE_TENANT_NS"; cat <<YAML
   values: |
     toolsets:
       $1:
-        image: registry.local/$3:local
+        image: registry.local/$2:local
         keepalive: false
 YAML
   } > "$work/toolset-$1.yaml"
@@ -2067,13 +2146,10 @@ verify_tenant_lifecycle() {
   step "Tenant lifecycle marker-contract proof"
   command -v python3 >/dev/null 2>&1 || { warn "python3 required for the lifecycle proof"; exit 1; }
 
-  # The tenant hashes its bare token; workspace, user, and toolset hash
-  # <tenant>/<name>. The chart's per-user RoleBinding hashes the subject alone.
-  local tenant_handle ws_handle user_handle user_rb_handle
-  tenant_handle="$(handle_of "$LIFECYCLE_TENANT_TOKEN")"
-  ws_handle="$(handle_of "${LIFECYCLE_TENANT_TOKEN}/${LIFECYCLE_WORKSPACE}")"
-  user_handle="$(handle_of "${LIFECYCLE_TENANT_TOKEN}/${LIFECYCLE_USER}")"
-  user_rb_handle="$(handle_of "$LIFECYCLE_USER")"
+  # The user marker and the chart's per-user RoleBinding are both suffixed with
+  # the subject's handle.
+  local user_handle
+  user_handle="$(handle_of "$LIFECYCLE_USER")"
 
   local work; work="$(mktemp -d)"
   trap 'rm -rf "$work"' RETURN
@@ -2107,27 +2183,16 @@ verify_tenant_lifecycle() {
     "kubectl --kubeconfig='$op_kube' auth whoami -o jsonpath='{.status.userInfo.username}' 2>/dev/null | grep -qFx '$operator_identity'" \
     || { warn "operator token did not authenticate as ${operator_identity}"; exit 1; }
 
-  { marker_yaml provision-tenant sycophant-system; cat <<YAML
-  tenant: ${LIFECYCLE_TENANT_TOKEN}
-  handle: ${tenant_handle}
-  capacity: 512Mi
-  keepalive: "0"
-  values: "{}"
-YAML
-  } > "$work/provision-marker.yaml"
-  prove_gate tenant create "$work/provision-marker.yaml"
+  local tenant_marker="$MARKER_DIR/${LIFECYCLE_TENANT_NS}-provision-tenant.yaml"
+  tenant_marker_file "$LIFECYCLE_TENANT_TOKEN" 512Mi "$tenant_marker"
+  prove_gate tenant "$tenant_marker"
 
   # The operator's real path: syco writes the tenant, workspace, and user
   # markers under its Dex login and waits on each installer Job, failing loudly
   # on a refused marker or a failed Job.
   local values_file="${SYCO_CONFIG_DIR}/tenants/${LIFECYCLE_TENANT_NS}/values.yaml"
   mkdir -p "$(dirname "$values_file")"
-  # workspaceInit rides the local registry, matching docs/e2e/values.yaml.
   cat > "$values_file" <<YAML
-workspaceInit:
-  image: sycophant-registry:5000/toolset-git
-  tag: latest
-  pullPolicy: IfNotPresent
 users:
   - "${LIFECYCLE_USER}"
 workspaces:
@@ -2137,7 +2202,7 @@ workspaces:
       - workspace-ro
 YAML
   syco_credentials
-  "$SYCO" tenant up --ns "$LIFECYCLE_TENANT_NS" --capacity 512Mi \
+  "$SYCO" tenant up -f "$tenant_marker" \
     || { warn "syco tenant up failed"; exit 1; }
   ok "syco tenant up: tenant, workspace, and user markers admitted for the operator's Dex identity; each installer Job succeeded"
 
@@ -2168,16 +2233,24 @@ YAML
     --serviceaccount=sycophant-system:lifecycle-standing-sa \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
-  # The installed markers, re-sent as UPDATEs: refused for the standing SA,
-  # admitted (dry-run) for the second issuer's identity.
-  kubectl get configmap provision-workspace -n "$LIFECYCLE_TENANT_NS" -o jsonpath='{.data.handle}' \
-    | grep -qx "$ws_handle" || { warn "workspace marker handle is not ${ws_handle}"; exit 1; }
-  kubectl get configmap provision-user -n "$LIFECYCLE_TENANT_NS" -o jsonpath='{.data.handle}' \
-    | grep -qx "$user_handle" || { warn "user marker handle is not ${user_handle}"; exit 1; }
-  kubectl get configmap provision-workspace -n "$LIFECYCLE_TENANT_NS" -o yaml > "$work/workspace-marker.yaml"
-  kubectl get configmap provision-user -n "$LIFECYCLE_TENANT_NS" -o yaml > "$work/user-marker.yaml"
-  prove_gate workspace replace "$work/workspace-marker.yaml"
-  prove_gate user replace "$work/user-marker.yaml"
+  # Each installer deleted its marker. Fresh copies are refused for the standing
+  # SA and admitted (dry-run) for the second issuer's identity.
+  local m
+  for m in "provision-workspace-${LIFECYCLE_WORKSPACE}" "provision-user-${user_handle}"; do
+    kubectl get configmap "$m" -n "$LIFECYCLE_TENANT_NS" >/dev/null 2>&1 \
+      && { warn "marker ${m} survived a successful install"; exit 1; }
+  done
+  ok "the workspace and user installers deleted their markers"
+  { marker_yaml "provision-workspace-${LIFECYCLE_WORKSPACE}" "$LIFECYCLE_TENANT_NS"; cat <<YAML
+  values: "{}"
+YAML
+  } > "$work/workspace-marker.yaml"
+  { marker_yaml "provision-user-${user_handle}" "$LIFECYCLE_TENANT_NS"; cat <<YAML
+  user: "${LIFECYCLE_USER}"
+YAML
+  } > "$work/user-marker.yaml"
+  prove_gate workspace "$work/workspace-marker.yaml"
+  prove_gate user "$work/user-marker.yaml"
 
   wait_for "workspace helm release deployed" 120 \
     "release_deployed 'workspace-${LIFECYCLE_WORKSPACE}' '$LIFECYCLE_TENANT_NS'"
@@ -2198,44 +2271,33 @@ YAML
     || { warn "the harness first init container is not instructions-sync; the exit-0 check inspected the wrong container"; exit 1; }
   ok "harness instructions-sync init container (rclone) synced and exited 0"
 
-  # `syco tenant up` waits for the base relay-controller to be Available before
-  # the workspace marker, so it merges the new grants live.
+  # The base release's install-wait hook holds its installer Job until the
+  # relay-controller is Available, so it is serving before the workspace marker
+  # and merges the new grants live.
   wait_for "relay-controller served the new workspace grants live" 60 \
     "kubectl logs -n '$LIFECYCLE_TENANT_NS' -l app.kubernetes.io/name=relay-controller --tail=80 2>/dev/null | grep -E 'toolset-grants delivery applied.*\"configmaps\":[1-9]' -q"
   ok "relay-controller merged the workspace grants without a pod roll"
 
   wait_for "user helm release deployed" 120 \
     "release_deployed 'user-${user_handle}' '$LIFECYCLE_TENANT_NS'"
-  kubectl get rolebinding "provision-identity-${user_rb_handle}" -n "$LIFECYCLE_TENANT_NS" \
+  kubectl get rolebinding "provision-identity-${user_handle}" -n "$LIFECYCLE_TENANT_NS" \
     -o jsonpath='{.roleRef.kind}/{.roleRef.name}' 2>/dev/null | grep -qx ClusterRole/provision-identity \
     || { warn "per-user provision-identity RoleBinding missing or wrong roleRef"; exit 1; }
-  kubectl get rolebinding "provision-identity-${user_rb_handle}" -n "$LIFECYCLE_TENANT_NS" \
+  kubectl get rolebinding "provision-identity-${user_handle}" -n "$LIFECYCLE_TENANT_NS" \
     -o jsonpath='{.subjects[0].kind}/{.subjects[0].name}' 2>/dev/null | grep -qFx "User/${LIFECYCLE_USER}" \
     || { warn "per-user provision-identity RoleBinding does not bind ${LIFECYCLE_USER}"; exit 1; }
   ok "user release deployed; per-user provision-identity RoleBinding binds the identity in render=user mode"
 
-  # Two toolsets through the one fixed-name marker: a CREATE, then an UPDATE.
-  # The harness merges each per-toolset ConfigMap by watch, so its pod and
-  # Deployment generation must not change.
-  local harness_before ts h image n=0
+  # Two toolsets, one marker each. The harness merges each per-toolset
+  # ConfigMap by watch, so its pod and Deployment generation must not change.
+  local harness_before ts image n=0
   harness_before="$(harness_identity)"
   [ -n "${harness_before%/*}" ] || { warn "no lifecycle harness pod before the toolset add"; exit 1; }
   for ts in "$LIFECYCLE_TOOLSET" "$LIFECYCLE_TOOLSET_2"; do
     n=$((n + 1))
-    h="$(handle_of "${LIFECYCLE_TENANT_TOKEN}/${ts}")"
     image="tool-lifecycle"; [ "$n" = 1 ] || image="tool-lifecycle-$n"
-    toolset_marker "$ts" "$h" "$image"
-    if [ "$n" = 1 ]; then
-      prove_marker toolset "$h" "$work/toolset-${ts}.yaml"
-    else
-      kubectl delete job,serviceaccount "provision-toolset-${h}" -n sycophant-system \
-        --ignore-not-found >/dev/null
-      kubectl --kubeconfig="$op_kube" replace -f "$work/toolset-${ts}.yaml" >/dev/null \
-        || { warn "the toolset VAP refused the IdP-authenticated operator identity on the marker UPDATE"; exit 1; }
-      ok "toolset ${ts} admitted via marker UPDATE"
-      wait_for "provision-toolset Job for ${ts} succeeded" 600 \
-        "kubectl get job 'provision-toolset-${h}' -n sycophant-system -o jsonpath='{.status.succeeded}' 2>/dev/null | grep -qx 1"
-    fi
+    toolset_marker "$ts" "$image"
+    prove_marker toolset "$work/toolset-${ts}.yaml"
 
     wait_for "toolset ${ts} helm release deployed" 120 \
       "release_deployed 'toolset-${ts}' '$LIFECYCLE_TENANT_NS'"
@@ -2285,12 +2347,12 @@ YAML
 
   # `syco tenant down` suspends with no keepalive; `syco tenant remove`
   # re-writes the suspend marker with keepalive 0.
-  "$SYCO" tenant down --ns "$LIFECYCLE_TENANT_NS" || { warn "syco tenant down failed"; exit 1; }
+  "$SYCO" tenant down "$LIFECYCLE_TENANT_TOKEN" || { warn "syco tenant down failed"; exit 1; }
   wait_for "tenant deployments scaled to zero" 120 \
     "kubectl get deploy lifecycle-workload -n '$LIFECYCLE_TENANT_NS' -o jsonpath='{.spec.replicas}' 2>/dev/null | grep -qx 0" \
     || exit 1
   ok "syco tenant down scaled the tenant deployments to zero"
-  "$SYCO" tenant remove --ns "$LIFECYCLE_TENANT_NS" || { warn "syco tenant remove failed"; exit 1; }
+  "$SYCO" tenant remove "$LIFECYCLE_TENANT_TOKEN" || { warn "syco tenant remove failed"; exit 1; }
   wait_for "reap-after TTL stamped on the namespace" 120 \
     "kubectl get namespace '$LIFECYCLE_TENANT_NS' -o jsonpath='{.metadata.annotations.sycophant\.md/reap-after}' 2>/dev/null | grep -q ." \
     || exit 1

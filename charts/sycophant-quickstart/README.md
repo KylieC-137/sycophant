@@ -91,7 +91,7 @@ Then provision one or more tenants. Each reads its values file at
 changed values:
 
 ```sh
-syco tenant up --ns tenant-<name> --capacity <quantity>
+syco tenant up -f <provision-tenant marker file>
 ```
 
 ## Uninstall

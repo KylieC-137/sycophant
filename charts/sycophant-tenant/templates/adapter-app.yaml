@@ -1,4 +1,4 @@
-{{- if eq .Values.render "base" }}
+{{- if eq .Values.render "channel" }}
 {{/*
 App-channel adapter Deployment.
 
@@ -26,9 +26,6 @@ second is refused at render rather than silently colliding.
 {{- fail "channels: at most one app channel is supported per tenant; the adapter state Secret is a single fixed name (adapter-state) and a second adapter would contend the same tailnet node identity" }}
 {{- end }}
 {{- range $channel, $entry := .Values.channels }}
-{{- if ne $entry.kind "app" }}
-{{- fail (printf "channels.%s.kind: unsupported channel kind %q (only \"app\" is supported)" $channel $entry.kind) }}
-{{- end }}
 ---
 apiVersion: v1
 kind: ServiceAccount

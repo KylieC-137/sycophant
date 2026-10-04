@@ -1,6 +1,6 @@
 # Tenant values for the hello-world scenario.
 #
-# Copy this to the tenant config path, then `syco tenant up --ns tenant-hello-world`:
+# Copy this to the tenant config path, then `syco tenant up -f` (see README.md):
 #
 #   mkdir -p ~/.config/sycophant/tenants/tenant-hello-world
 #   cp examples/scenarios/hello-world/values.yaml \
@@ -12,18 +12,12 @@ toolsets:
   ssh-credentials:
     image: sycophant-registry:5000/toolset-ssh-credentials:latest
 
-# The turn destinations: read directly by the harness, not a `toolsets` entry,
-# and bound by no workspace.
-model:
-  deepseek-v4-flash:
-    image: inference-runtime:local
-    format: openai
-    model: deepseek/deepseek-v4-flash
-    baseUrl: https://openrouter.ai/api/v1
-    secret: openrouter
-
 workspaces:
   hello-world:
+    # The model keys this workspace may name. Each is its own inference marker
+    # (see README.md).
+    models:
+      - deepseek-v4-flash
     toolsets:
       - stdlib
       # A secret-only grant: the credential lands where ssh expects it and no

@@ -19,8 +19,6 @@ One test per protected resource:
   delete a NetworkPolicy
 - `rbac-roles-immutable/` — an in-namespace SA cannot CRUD Roles or
   RoleBindings in its own namespace
-- `toolset-config-immutable/` — an in-namespace SA cannot create or update the
-  toolset-config ConfigMap
 - `workspace-admission-rule-immutable/` — the most privileged tenant identity
   cannot delete or change the cluster-wide gVisor rule
 - `workspace-service-accounts-immutable/` — an in-namespace SA cannot CRUD the

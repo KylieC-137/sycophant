@@ -56,10 +56,10 @@ spec:
           && parseServiceAccount(request.userInfo.username).Namespace == request.namespace)
           || request.userInfo.username.startsWith("{{ include "sycophant.idpUserPrefix" . }}")
   variables:
-    # DELETE carries the resource in oldObject; every other operation
-    # carries it in object.
+    # DELETE carries the resource in oldObject (object is empty, not null);
+    # every other operation carries it in object.
     - name: res
-      expression: "object != null ? object : oldObject"
+      expression: "request.operation == \"DELETE\" ? oldObject : object"
     - name: kind
       expression: "request.kind.kind"
     - name: group
@@ -114,11 +114,14 @@ spec:
       message: >-
         Workspace ServiceAccounts in a sycophant tenant namespace
         cannot be modified by workloads inside the namespace.
+    # Each per-model ConfigMap names the model's endpoint, job image and
+    # provider Secret. A writer that could rewrite it could repoint a model at
+    # an attacker endpoint or hand an inference Job a different Secret.
     - expression: >-
-        !(variables.kind == "ConfigMap" && variables.typeLabel == "toolset-config")
+        !(variables.kind == "ConfigMap" && variables.typeLabel == "model")
       message: >-
-        Toolset config ConfigMaps in a sycophant tenant namespace cannot be
-        modified by workloads inside the namespace.
+        Model ConfigMaps in a sycophant tenant namespace cannot be modified by
+        callers inside the namespace.
     # Each per-toolset ConfigMap names the tool's container image, which the
     # harness watches and runs. A namespace writer that could rewrite it could
     # repoint a toolset at a malicious image and get code execution in the

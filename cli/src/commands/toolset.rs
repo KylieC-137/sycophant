@@ -22,6 +22,7 @@ pub(crate) fn run(cmd: ToolsetCmd) -> Result<(), String> {
     match cmd.sub {
         ToolsetSub::Lint(c) => lint(&c.path),
         ToolsetSub::Manifest(c) => manifest(&c.image, c.toolset.as_deref(), c.grants.as_deref()),
+        ToolsetSub::Up(c) => crate::commands::marker::up("toolset", &c.file),
     }
 }
 

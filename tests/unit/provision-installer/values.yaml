@@ -1,0 +1,12 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Value
+metadata:
+  name: values
+namespaceSelector:
+  - name: sycophant-system
+    labels:
+      kubernetes.io/metadata.name: sycophant-system
+  - name: tenant-acme
+    labels:
+      kubernetes.io/metadata.name: tenant-acme
+      app.kubernetes.io/part-of: sycophant-tenant

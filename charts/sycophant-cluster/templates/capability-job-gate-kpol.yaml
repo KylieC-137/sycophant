@@ -165,10 +165,24 @@ spec:
     # Resolved only when a Secret is actually referenced: every use below sits
     # behind a short-circuit, so a Job naming no Secret needs no grants object
     # and a workspace without one is not denied for that alone.
-    - name: allowed
+    - name: grants
       expression: >-
         resource.get("v1", "configmaps", request.namespace,
           "capability-grants-" + variables.workspace).?data.orValue({})
+    # An inference Job may also reference the one Secret named by the `secret`
+    # key of its own model's ConfigMap, `model-<key>`, where `<key>` is the
+    # Job's model label. Only that model's install writes the ConfigMap.
+    - name: modelSecret
+      expression: >-
+        object.spec.template.metadata.?labels["sycophant.md/job-kind"].orValue("") == "inference"
+          && object.spec.template.metadata.?labels["sycophant.md/model"].orValue("") != ""
+          ? resource.get("v1", "configmaps", request.namespace,
+              "model-" + object.spec.template.metadata.labels["sycophant.md/model"]).?data.secret.orValue("")
+          : ""
+    - name: allowed
+      expression: >-
+        variables.grants.map(k, k)
+          + (variables.modelSecret == "" ? [] : [variables.modelSecret])
   validations:
     - expression: >-
         variables.pod.?runtimeClassName.orValue("") == "gvisor"
@@ -248,5 +262,6 @@ spec:
           && variables.pod.?imagePullSecrets.orValue([]).all(s, s.name in variables.allowed)
       message: >-
         capability-job references a Secret name that is not in the workspace's
-        capability-grants allowlist.
+        capability-grants allowlist or, for an inference Job, its model's
+        ConfigMap.
 {{- end }}

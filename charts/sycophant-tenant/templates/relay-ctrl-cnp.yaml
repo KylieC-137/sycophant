@@ -41,7 +41,6 @@ spec:
         - ports:
             - port: "9092"
               protocol: TCP
-{{- if gt (include "sycophant.appChannelCount" . | atoi) 0 }}
     # App port (9091) — the transport-class adapter pipe, and nothing else.
     # A bare component match would admit every adapter, platform adapters
     # included.
@@ -54,7 +53,6 @@ spec:
         - ports:
             - port: "9091"
               protocol: TCP
-{{- end }}
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy

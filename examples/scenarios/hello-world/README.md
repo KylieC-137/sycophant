@@ -52,23 +52,55 @@ cp examples/instructions/simple/AGENTS.md ~/sycophant/tmp/hello-world-data/AGENT
 
 ## 3. Workspace + deploy
 
-Toolsets, the workspace's instructions mount, and the toolset attachment all live in
-the tenant values file. The `prompt` toolset's profile key is the model the
-turn names. Seed the file from the scenario, then deploy:
+Toolsets, the workspace's instructions mount, the toolset attachment, and the
+workspace's `models` list all live in the tenant values file. Seed the file from
+the scenario, then deploy:
 
 ```sh
 mkdir -p ~/.config/sycophant/tenants/tenant-hello-world
 cp examples/scenarios/hello-world/values.yaml \
   ~/.config/sycophant/tenants/tenant-hello-world/values.yaml
-syco tenant up --ns tenant-hello-world --capacity 2Gi
+cat > provision-tenant.yaml <<'YAML'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-tenant
+  namespace: sycophant-system
+  labels:
+    sycophant.md/lifecycle-marker: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  tenant: hello-world
+  capacity: 2Gi
+YAML
+syco tenant up -f provision-tenant.yaml
+cat > provision-inference.yaml <<'YAML'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-inference-deepseek-v4-flash
+  namespace: tenant-hello-world
+  labels:
+    sycophant.md/lifecycle-marker: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  format: openai
+  model: deepseek/deepseek-v4-flash
+  baseUrl: https://openrouter.ai/api/v1
+  image: inference-runtime:local
+  secret: openrouter
+YAML
+syco inference up -f provision-inference.yaml
 ```
 
 `tenant up` prompts for the operator password you set during `syco setup` and
-writes lifecycle markers under short-lived Dex tokens: the tenant marker (the
-cluster creates the `tenant-hello-world` namespace, its memory quota, and the
-base release from the file's non-workspace settings, such as `model`), then one
-marker each for the workspace and each toolset in the values file. Re-run it
-after editing the values file to upgrade the tenant in place.
+applies the tenant marker file under a short-lived Dex token: the cluster
+creates the `tenant-hello-world` namespace, its memory quota, and the base
+release from chart defaults. Once the installer succeeds it deletes the marker.
+`tenant up` then writes one marker each for the workspace and each toolset in
+the values file. `inference up` installs the model the workspace lists; `syco
+inference down deepseek-v4-flash --tenant hello-world` removes it. Re-run it after editing either file to upgrade the
+tenant in place.
 
 ## 4. Tenant content
 
@@ -148,6 +180,6 @@ kubectl logs -n tenant-hello-world deployment/hello-world -c harness \
 ## Teardown
 
 ```sh
-syco tenant remove --ns tenant-hello-world   # reaped with its data on the next sweep
+syco tenant remove hello-world               # reaped with its data on the next sweep
 syco destroy                                 # delete the whole cluster
 ```

@@ -1,0 +1,15 @@
+# Lets the tenant install Job delete its own marker once helm succeeds. The
+# provision-tenant-grant policy binds it to each install ServiceAccount, and the
+# reap-tenant sweep removes that binding. The marker is the one object reachable.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: provision-tenant-marker
+  namespace: sycophant-system
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["{{ include "sycophant.provisionMarkerName" . }}"]
+    verbs: ["delete"]

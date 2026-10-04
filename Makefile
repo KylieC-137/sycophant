@@ -35,16 +35,23 @@ test-unit: test-unit-rust test-unit-k8s ## All unit tests (hermetic, seconds)
 test-unit-rust: ## Inline #[cfg(test)] units across the workspace
 	cargo test --workspace --lib --bins
 
-# The policy fixture is rendered from the chart on every run and is not
-# tracked. `--api-versions` stands in for the Kyverno CRDs; no cluster is
-# contacted.
+# The two policy fixtures are rendered from the chart on every run and are not
+# tracked. `--api-versions` stands in for the Kyverno CRDs. The three acceptance
+# suites render the charts themselves. No cluster is contacted.
 .PHONY: test-unit-k8s
-test-unit-k8s: ## Render the offline policy fixture from the chart, then run it
+test-unit-k8s: ## Render the two policy fixtures, run them, then the three chart acceptance suites
 	@helm template c charts/sycophant-cluster -n kyverno \
 		--api-versions policies.kyverno.io/v1/ValidatingPolicy \
 		--show-only templates/capability-job-gate-kpol.yaml \
 		> tests/unit/kyverno-policies/capability-job-gate-as-harness/policy.yaml
+	@helm template c charts/sycophant-cluster -n kyverno \
+		--api-versions policies.kyverno.io/v1/ValidatingPolicy \
+		--show-only templates/protect-security-kpol.yaml \
+		> tests/unit/kyverno-policies/protect-security-idp-delete/policy.yaml
 	@kyverno test tests/unit/kyverno-policies
+	@bash tests/unit/marker-vap/acceptance.sh
+	@bash tests/unit/provision-installer/acceptance.sh
+	@bash tests/unit/tenant-chart/acceptance.sh
 
 .PHONY: test-integration
 test-integration: test-integration-rust test-integration-k8s ## All integration tests (k8s leg needs a cluster)

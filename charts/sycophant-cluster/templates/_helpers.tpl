@@ -26,6 +26,7 @@ out of the reserved ones.
 {{- define "sycophant.workspaceProvisionMarkerName" -}}provision-workspace{{- end -}}
 {{- define "sycophant.userProvisionMarkerName" -}}provision-user{{- end -}}
 {{- define "sycophant.toolsetProvisionMarkerName" -}}provision-toolset{{- end -}}
+{{- define "sycophant.inferenceProvisionMarkerName" -}}provision-inference{{- end -}}
 {{- define "sycophant.suspendMarkerName" -}}suspend-tenant{{- end -}}
 {{- define "sycophant.reapAfterAnnotation" -}}sycophant.md/reap-after{{- end -}}
 {{- define "sycophant.tenantNsPrefix" -}}tenant-{{- end -}}
@@ -61,10 +62,7 @@ variables:
     expression: "variables.containers + variables.initContainers"
 {{- end -}}
 
-{{/*
-Match for the reactors on the tenant marker in sycophant-system. A free-form
-keepalive matches nothing, so nothing is stamped.
-*/}}
+{{/* Match for the reactors on the tenant marker in sycophant-system. */}}
 {{- define "sycophant.provisionMarkerSystemMatchConstraints" -}}
 matchConstraints:
   namespaceSelector:
@@ -79,10 +77,6 @@ matchConstraints:
       operations: ["CREATE", "UPDATE"]
       resources: ["configmaps"]
       resourceNames: ["{{ include "sycophant.provisionMarkerName" . }}"]
-matchConditions:
-  - name: keepalive-is-a-policy-value
-    expression: >-
-      object.?data["keepalive"].orValue("") in ["0", "30", "60", "90"]
 {{- end -}}
 
 {{- define "sycophant.labels" -}}
@@ -120,23 +114,29 @@ marker's sibling reactor creates it), and its retry must never re-apply the Job,
 whose spec.selector is immutable. Both the ServiceAccount and the RoleBinding
 carry a reap-after annotation the scheduled reap sweeps.
 
-The tenant marker lives in sycophant-system and installs the base release. Its
-values ride into the Job as an env var, since the installer cannot read
-sycophant-system. Every other marker lives in the tenant namespace it targets,
-so the tenant is the marker's own namespace, and installs one `<kind>-<name>`
-release with render=<kind>. render and namespace.create=false are forced on the
-command line so a marker cannot change the slice it renders or manage the
-namespace.
+Every generated object is named `provision-<kind>-<uid10>`, from the marker's
+uid, so a re-created marker never collides with an earlier run's Job, even
+within its TTL.
 
-A re-written marker re-runs its installer, which upgrades the release in place.
-The slices render disjoint object sets, so no slice takes another's.
+The tenant marker lives in sycophant-system and installs the base release from
+chart defaults. Every other marker is `provision-<kind>-<name>` in the tenant
+namespace it targets, so the tenant is the marker's own namespace, and installs
+one `<kind>-<name>` release with render=<kind>. render and
+namespace.create=false are forced on the command line so a marker cannot change
+the slice it renders or manage the namespace. Only the tenant install takes
+ownership of existing objects; a capability install refuses a name another
+release holds.
+
+Markers are one-shot: once helm succeeds the Job deletes its marker. A failed
+install exits first and leaves the marker in place. The tenant install deletes
+its marker through Role/provision-tenant-marker in sycophant-system.
 */ -}}
 {{- define "sycophant.provisionInstallerMatch" -}}
 {{- $ctx := .ctx -}}
 {{- if eq .kind "tenant" -}}
 {{ include "sycophant.provisionMarkerSystemMatchConstraints" $ctx }}
 {{- else -}}
-{{- $marker := printf "provision-%s" .kind -}}
+{{- $prefix := .prefix | default (include (printf "sycophant.%sProvisionMarkerName" .kind) $ctx) -}}
 matchConstraints:
   namespaceSelector:
     matchLabels:
@@ -147,47 +147,178 @@ matchConstraints:
   resourceRules:
     - apiGroups: [""]
       apiVersions: ["v1"]
-      operations: ["CREATE", "UPDATE"]
+      operations: {{ .operations | default (list "CREATE" "UPDATE") | toJson }}
       resources: ["configmaps"]
-      resourceNames: ["{{ $marker }}"]
-# A webhook rule cannot filter by resourceName, and the generate handler queues
-# an update request before the name is checked. The apiserver honors webhook
-# matchConditions, so this drops a foreign marker before Kyverno is called.
+# resourceNames cannot hold a prefix, so the apiserver drops a foreign marker
+# here before Kyverno is called.
 matchConditions:
-  - name: marker-name-is-the-{{ .kind }}-marker
+  - name: marker-name-is-a-{{ .prefix | default .kind }}-marker
     expression: >-
-      object.metadata.name == '{{ $marker }}'
+      object.metadata.name.startsWith('{{ $prefix }}-')
 {{- end }}
 variables:
-  {{- if and .stack (has .kind (list "workspace" "toolset")) }}
-  - name: {{ .kind }}
-    expression: 'object.data["{{ .kind }}"]'
-  {{- end }}
-  {{- if and .stack (eq .kind "tenant") }}
-  # The kubelet expands $(VAR) and collapses $$ in env values, so every $ is
-  # doubled to arrive unchanged.
-  - name: values
-    expression: 'object.data["values"].replace("$", "$$")'
-  {{- end }}
   - name: tenant
 {{- if eq .kind "tenant" }}
     expression: '"{{ include "sycophant.tenantNsPrefix" $ctx }}" + object.data["tenant"]'
 {{- else }}
     expression: 'object.metadata.namespace'
 {{- end }}
-  - name: handle
-    expression: 'object.data["handle"]'
+  - name: uid10
+    expression: 'object.metadata.uid.replace("-", "").substring(0, 10)'
   # Past the Job's activeDeadline, so the reap removes the identity only after
   # the install has finished or timed out.
   - name: reapAfter
     expression: 'string(time.now() + duration("1800s"))'
 {{- end -}}
 
+{{- /*
+The ServiceAccount and Job a lifecycle reactor stamps in sycophant-system, both
+named `<name>-<uid10>` and labelled component `<name>`. Params: ctx, name, script. Rendered at zero
+indent inside a CEL-interpolated generate template.
+*/ -}}
+{{- define "sycophant.provisionerJob" -}}
+{{- $ctx := .ctx -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: (( "{{ .name }}-" + variables.uid10 ))
+  namespace: sycophant-system
+  labels:
+    {{- include "sycophant.labels" $ctx | nindent 4 }}
+    app.kubernetes.io/component: {{ .name }}
+  annotations:
+    {{ include "sycophant.reapAfterAnnotation" $ctx }}: (( variables.reapAfter ))
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: (( "{{ .name }}-" + variables.uid10 ))
+  namespace: sycophant-system
+  labels:
+    {{- include "sycophant.labels" $ctx | nindent 4 }}
+    app.kubernetes.io/component: {{ .name }}
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        {{- include "sycophant.labels" $ctx | nindent 8 }}
+        app.kubernetes.io/component: {{ .name }}
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: (( "{{ .name }}-" + variables.uid10 ))
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: helm
+          image: "{{ $ctx.Values.provisioner.image }}:{{ $ctx.Values.provisioner.tag }}"
+          imagePullPolicy: {{ $ctx.Values.provisioner.pullPolicy }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests: { cpu: "50m", memory: "128Mi" }
+            limits:   { cpu: "500m", memory: "256Mi" }
+          env:
+            - name: HOME
+              value: /tmp
+            # Release state lives in ConfigMaps, which the
+            # provision-write role can read; Secrets are write-only.
+            - name: HELM_DRIVER
+              value: configmap
+            - name: TENANT
+              value: (( variables.tenant ))
+            - name: MARKER
+              value: (( object.metadata.name ))
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: kube-api-token
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+          command: [sh, -c]
+          args:
+            - |
+              {{- .script | trim | nindent 14 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: kube-api-token
+          projected:
+            defaultMode: 420
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
+{{- end -}}
+
+{{- /* The install script for one kind; see sycophant.provisionInstaller. */ -}}
+{{- define "sycophant.provisionInstallScript" -}}
+{{- $ctx := .ctx -}}
+{{- $kind := .kind -}}
+set -eu
+{{- if eq $kind "tenant" }}
+# The sibling reactor creates the Namespace from the same marker.
+for i in $(seq 1 60); do
+  kubectl get namespace "$TENANT" >/dev/null 2>&1 && break
+  sleep 2
+done
+helm upgrade --install "$TENANT" {{ $ctx.Values.provisioner.chartPath }} \
+  --namespace "$TENANT" \
+  --set render=base \
+  --set namespace.create=false \
+  --take-ownership \
+  --timeout 10m
+kubectl delete configmap "$MARKER" -n sycophant-system
+{{- else }}
+NAME="${MARKER#provision-{{ $kind }}-}"
+{{- if eq $kind "user" }}
+# Quoted so the subject's `:` and `#` stay one scalar.
+SUBJECT="$(kubectl get configmap "$MARKER" \
+  -n "$TENANT" -o "jsonpath={.data.user}")"
+printf 'users:\n  - "%s"\n' "$SUBJECT" > /tmp/values.yaml
+{{- else if eq $kind "inference" }}
+# The marker's flat data rides into the chart verbatim as .Values.marker.
+printf '{"marker":%s}' "$(kubectl get configmap "$MARKER" \
+  -n "$TENANT" -o 'jsonpath={.data}')" > /tmp/values.yaml
+{{- else }}
+kubectl get configmap "$MARKER" \
+  -n "$TENANT" -o "jsonpath={.data.values}" > /tmp/values.yaml
+{{- end }}
+helm upgrade --install "{{ $kind }}-$NAME" {{ $ctx.Values.provisioner.chartPath }} \
+  --namespace "$TENANT" \
+  --set render={{ $kind }} \
+  --set-string name="$NAME" \
+  --set namespace.create=false \
+  -f /tmp/values.yaml \
+  --timeout 10m
+kubectl delete configmap "$MARKER" -n "$TENANT"
+{{- end }}
+{{- end -}}
+
 {{- define "sycophant.provisionInstaller" -}}
 {{- $ctx := .ctx -}}
 {{- $kind := .kind -}}
 {{- $component := printf "provision-%s" $kind -}}
-{{- $env := dict "workspace" "WORKSPACE" "toolset" "TOOLSET" "user" "HANDLE" -}}
 apiVersion: policies.kyverno.io/v1
 kind: GeneratingPolicy
 metadata:
@@ -200,140 +331,12 @@ spec:
       enabled: false
     synchronize:
       enabled: false
-  {{- include "sycophant.provisionInstallerMatch" (dict "ctx" $ctx "kind" $kind "stack" true) | nindent 2 }}
+  {{- include "sycophant.provisionInstallerMatch" (dict "ctx" $ctx "kind" $kind) | nindent 2 }}
   generate:
     - template:
         interpolate: cel
         value: |
-          apiVersion: v1
-          kind: ServiceAccount
-          metadata:
-            name: (( "{{ $component }}-" + variables.handle ))
-            namespace: sycophant-system
-            labels:
-              {{- include "sycophant.labels" $ctx | nindent 14 }}
-              app.kubernetes.io/component: {{ $component }}
-            annotations:
-              {{ include "sycophant.reapAfterAnnotation" $ctx }}: (( variables.reapAfter ))
-          ---
-          apiVersion: batch/v1
-          kind: Job
-          metadata:
-            name: (( "{{ $component }}-" + variables.handle ))
-            namespace: sycophant-system
-            labels:
-              {{- include "sycophant.labels" $ctx | nindent 14 }}
-              app.kubernetes.io/component: {{ $component }}
-          spec:
-            backoffLimit: 4
-            activeDeadlineSeconds: 900
-            ttlSecondsAfterFinished: 600
-            template:
-              metadata:
-                labels:
-                  {{- include "sycophant.labels" $ctx | nindent 18 }}
-                  app.kubernetes.io/component: {{ $component }}
-              spec:
-                restartPolicy: OnFailure
-                serviceAccountName: (( "{{ $component }}-" + variables.handle ))
-                automountServiceAccountToken: false
-                securityContext:
-                  runAsNonRoot: true
-                  runAsUser: 65532
-                  runAsGroup: 65532
-                  seccompProfile:
-                    type: RuntimeDefault
-                containers:
-                  - name: helm
-                    image: "{{ $ctx.Values.provisioner.image }}:{{ $ctx.Values.provisioner.tag }}"
-                    imagePullPolicy: {{ $ctx.Values.provisioner.pullPolicy }}
-                    securityContext:
-                      readOnlyRootFilesystem: true
-                      allowPrivilegeEscalation: false
-                      capabilities:
-                        drop: [ALL]
-                    resources:
-                      requests: { cpu: "50m", memory: "128Mi" }
-                      limits:   { cpu: "500m", memory: "256Mi" }
-                    env:
-                      - name: HOME
-                        value: /tmp
-                      # Release state lives in ConfigMaps, which the
-                      # provision-write role can read; Secrets are write-only.
-                      - name: HELM_DRIVER
-                        value: configmap
-                      - name: TENANT
-                        value: (( variables.tenant ))
-                      {{- with get $env $kind }}
-                      - name: {{ . }}
-                        value: (( variables.{{ ternary "handle" $kind (eq $kind "user") }} ))
-                      {{- end }}
-                      {{- if eq $kind "tenant" }}
-                      - name: VALUES
-                        value: (( variables.values ))
-                      {{- end }}
-                    volumeMounts:
-                      - name: tmp
-                        mountPath: /tmp
-                      - name: kube-api-token
-                        mountPath: /var/run/secrets/kubernetes.io/serviceaccount
-                        readOnly: true
-                    command: [sh, -c]
-                    args:
-                      - |
-                        set -eu
-                        {{- if eq $kind "tenant" }}
-                        # The sibling reactor creates the Namespace from the same marker.
-                        for i in $(seq 1 60); do
-                          kubectl get namespace "$TENANT" >/dev/null 2>&1 && break
-                          sleep 2
-                        done
-                        printf '%s\n' "$VALUES" > /tmp/values.yaml
-                        helm upgrade --install "$TENANT" {{ $ctx.Values.provisioner.chartPath }} \
-                          --namespace "$TENANT" \
-                          --set render=base \
-                          --set namespace.create=false \
-                          -f /tmp/values.yaml \
-                          --take-ownership \
-                          --timeout 10m
-                        {{- else }}
-                        {{- if eq $kind "user" }}
-                        # Quoted so the subject's `:` and `#` stay one scalar.
-                        SUBJECT="$(kubectl get configmap {{ $component }} \
-                          -n "$TENANT" -o "jsonpath={.data.user}")"
-                        printf 'users:\n  - "%s"\n' "$SUBJECT" > /tmp/values.yaml
-                        {{- else }}
-                        kubectl get configmap {{ $component }} \
-                          -n "$TENANT" -o "jsonpath={.data.values}" > /tmp/values.yaml
-                        {{- end }}
-                        helm upgrade --install "{{ $kind }}-${{ get $env $kind }}" {{ $ctx.Values.provisioner.chartPath }} \
-                          --namespace "$TENANT" \
-                          --set render={{ $kind }} \
-                          --set namespace.create=false \
-                          -f /tmp/values.yaml \
-                          --take-ownership \
-                          --timeout 10m
-                        {{- end }}
-                volumes:
-                  - name: tmp
-                    emptyDir: {}
-                  - name: kube-api-token
-                    projected:
-                      defaultMode: 420
-                      sources:
-                        - serviceAccountToken:
-                            path: token
-                            expirationSeconds: 3600
-                        - configMap:
-                            name: kube-root-ca.crt
-                            items:
-                              - key: ca.crt
-                                path: ca.crt
-                        - downwardAPI:
-                            items:
-                              - path: namespace
-                                fieldRef:
-                                  fieldPath: metadata.namespace
+          {{- include "sycophant.provisionerJob" (dict "ctx" $ctx "name" $component "script" (include "sycophant.provisionInstallScript" (dict "ctx" $ctx "kind" $kind))) | nindent 10 }}
 ---
 apiVersion: policies.kyverno.io/v1
 kind: GeneratingPolicy
@@ -347,35 +350,89 @@ spec:
       enabled: false
     synchronize:
       enabled: false
-  {{- include "sycophant.provisionInstallerMatch" (dict "ctx" $ctx "kind" $kind "stack" false) | nindent 2 }}
+  {{- include "sycophant.provisionInstallerMatch" (dict "ctx" $ctx "kind" $kind) | nindent 2 }}
   generate:
     - template:
         interpolate: cel
         value: |
-          apiVersion: rbac.authorization.k8s.io/v1
-          kind: RoleBinding
-          metadata:
-            name: (( "{{ $component }}-" + variables.handle ))
-            namespace: (( variables.tenant ))
-            labels:
-              {{- include "sycophant.labels" $ctx | nindent 14 }}
-              app.kubernetes.io/component: {{ $component }}
-            annotations:
-              {{ include "sycophant.reapAfterAnnotation" $ctx }}: (( variables.reapAfter ))
-          subjects:
-            - kind: ServiceAccount
-              name: (( "{{ $component }}-" + variables.handle ))
-              namespace: sycophant-system
-          roleRef:
-            apiGroup: rbac.authorization.k8s.io
-            kind: ClusterRole
-            name: provision-write
+          {{- include "sycophant.provisionerBinding" (dict "ctx" $ctx "name" $component "namespace" "(( variables.tenant ))" "kind" "ClusterRole" "role" "provision-write") | nindent 10 }}
+          {{- if eq $kind "tenant" }}
+          ---
+          {{- include "sycophant.provisionerBinding" (dict "ctx" $ctx "name" $component "namespace" "sycophant-system" "kind" "Role" "role" "provision-tenant-marker") | nindent 10 }}
+          {{- end }}
+{{- end -}}
+
+{{- /* A RoleBinding named `<name>-<uid10>`, labelled component `<name>`, for the reactor's ServiceAccount. */ -}}
+{{- define "sycophant.provisionerBinding" -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: (( "{{ .name }}-" + variables.uid10 ))
+  namespace: {{ .namespace }}
+  labels:
+    {{- include "sycophant.labels" .ctx | nindent 4 }}
+    app.kubernetes.io/component: {{ .name }}
+  annotations:
+    {{ include "sycophant.reapAfterAnnotation" .ctx }}: (( variables.reapAfter ))
+subjects:
+  - kind: ServiceAccount
+    name: (( "{{ .name }}-" + variables.uid10 ))
+    namespace: sycophant-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: {{ .kind }}
+  name: {{ .role }}
+{{- end -}}
+
+{{- /* The uninstall script for one kind; see sycophant.provisionUninstaller. */ -}}
+{{- define "sycophant.provisionUninstallScript" -}}
+set -eu
+NAME="${MARKER#reap-{{ .kind }}-}"
+helm uninstall "{{ .kind }}-$NAME" -n "$TENANT" --timeout 10m
+kubectl delete configmap "$MARKER" -n "$TENANT"
+{{- end -}}
+
+{{- /*
+One single-shot uninstall per reap marker `reap-<kind>-<name>` in a tenant
+namespace. The ServiceAccount and Job `uninstall-<kind>-<uid10>` live in
+sycophant-system; the RoleBinding of the same name binds them to
+ClusterRole/provision-write in the marker's namespace, which exists already.
+The Job runs `helm uninstall <kind>-<name>` and then deletes the reap marker; a
+failed uninstall exits first and leaves the marker in place. The ServiceAccount
+and RoleBinding carry component `uninstall-<kind>` and the reap-after
+annotation, so `reap-<kind>` sweeps them.
+*/ -}}
+{{- define "sycophant.provisionUninstaller" -}}
+{{- $ctx := .ctx -}}
+{{- $kind := .kind -}}
+{{- $name := printf "uninstall-%s" $kind -}}
+{{- $script := include "sycophant.provisionUninstallScript" (dict "kind" $kind) -}}
+apiVersion: policies.kyverno.io/v1
+kind: GeneratingPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "sycophant.labels" $ctx | nindent 4 }}
+spec:
+  evaluation:
+    generateExisting:
+      enabled: false
+    synchronize:
+      enabled: false
+  {{- include "sycophant.provisionInstallerMatch" (dict "ctx" $ctx "kind" $kind "prefix" (printf "reap-%s" $kind) "operations" (list "CREATE")) | nindent 2 }}
+  generate:
+    - template:
+        interpolate: cel
+        value: |
+          {{- include "sycophant.provisionerJob" (dict "ctx" $ctx "name" $name "script" $script) | nindent 10 }}
+          ---
+          {{- include "sycophant.provisionerBinding" (dict "ctx" $ctx "name" $name "namespace" "(( variables.tenant ))" "kind" "ClusterRole" "role" "provision-write") | nindent 10 }}
 {{- end -}}
 
 {{/*
-Reaps each per-install ServiceAccount and RoleBinding once its reap-after
-instant passes, so no apply-capable credential persists between installs. The
-installer Job self-cleans on its own ttlSecondsAfterFinished.
+Reaps each install and uninstall ServiceAccount and RoleBinding once its
+reap-after instant passes, so no apply-capable credential persists between runs.
+Each Job self-cleans on its own ttlSecondsAfterFinished.
 */}}
 {{- define "sycophant.provisionReap" -}}
 {{- $ctx := .ctx -}}
@@ -390,8 +447,10 @@ spec:
   schedule: {{ $ctx.Values.reap.schedule | quote }}
   matchConstraints:
     objectSelector:
-      matchLabels:
-        app.kubernetes.io/component: provision-{{ $kind }}
+      matchExpressions:
+        - key: app.kubernetes.io/component
+          operator: In
+          values: [provision-{{ $kind }}, uninstall-{{ $kind }}]
     resourceRules:
       - apiGroups: [""]
         apiVersions: ["v1"]

@@ -1,4 +1,4 @@
-{{- if eq .Values.render "base" }}
+{{- if eq .Values.render "channel" }}
 {{- if .Values.headscale.enabled }}
 {{- $serverUrl := required "headscale.serverUrl is required when headscale.enabled=true" .Values.headscale.serverUrl }}
 {{- $acmeEnabled := and .Values.headscale.acme .Values.headscale.acme.enabled }}

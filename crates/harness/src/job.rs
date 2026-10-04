@@ -572,10 +572,9 @@ pub(crate) fn build_inference_job(
     // The Job CREATE gate admits `job-kind: inference`; the label is what routes
     // this Job into the inference arm of the allowlist.
     pod_labels.insert("sycophant.md/job-kind".to_string(), "inference".to_string());
-    // The resolver KEY (the `.Values.model` map key), never the provider model
-    // string. The per-model egress policy selects the pod by this label, so a
-    // pod carrying no model label matches no provider hole and stays on the
-    // fail-closed baseline floor.
+    // The model key, never the provider model string. The per-model egress
+    // policy selects the pod by this label, so a pod carrying no model label
+    // matches no provider hole and stays on the fail-closed baseline floor.
     pod_labels.insert("sycophant.md/model".to_string(), model_key.to_string());
 
     Job {
@@ -740,9 +739,8 @@ mod tests {
             "test-ns",
             "capability-test",
             "test",
-            // The resolver KEY (the `.Values.model` map key), deliberately
-            // distinct from the provider model string below so a build that
-            // confuses the two is caught.
+            // The model key, deliberately distinct from the provider model
+            // string below so a build that confuses the two is caught.
             "deepseek-v4-flash",
             &SchedulingConfig::default(),
             "ghcr.io/sycophant/inference-runtime:1",
@@ -802,12 +800,12 @@ mod tests {
         );
     }
 
-    /// The pod carries `sycophant.md/model` set to the resolver KEY — the
-    /// `.Values.model` map key the harness dispatched, never the provider model
-    /// string. The per-model egress policy selects the inference pod by exactly
-    /// this label, so a build that stamps the provider model id here, or omits
-    /// the label, matches no provider-egress rule and leaves the job on the
-    /// fail-closed baseline floor.
+    /// The pod carries `sycophant.md/model` set to the model key the harness
+    /// dispatched, never the provider model string. The per-model egress
+    /// policy selects the inference pod by exactly this label, so a build that
+    /// stamps the provider model id here, or omits the label, matches no
+    /// provider-egress rule and leaves the job on the fail-closed baseline
+    /// floor.
     #[test]
     fn inference_job_pod_carries_the_model_key_label() {
         let job = test_inference_job(None);

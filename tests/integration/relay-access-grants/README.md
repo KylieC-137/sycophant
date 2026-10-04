@@ -14,11 +14,11 @@ Two ownership rules meet here and they pull in opposite directions:
 The chart resolves that with a template guarded by `.Release.IsInstall`
 carrying `helm.sh/resource-policy: keep`. Rendered only at install; absent from
 the upgrade manifest, so Helm has nothing to diff; `keep` blocks the delete that
-absence would otherwise trigger.
+absence would otherwise trigger. That render is checked in
+`tests/unit/tenant-chart/`.
 
 | Test | Property |
 |---|---|
-| `grants-cm-created-on-install-only/` | Install renders it with `keep` and `sycophant.md/type: relay-access-grants`; `--is-upgrade` renders it not at all |
 | `deployed-relay-reconciles-relay-access-grants-configmap/` | The deployed relay reconciles the `relay-access-grants` ConfigMap into a non-empty table (`"rows":1`), proving the compiled ConfigMap-name const equals the name the chart deploys |
 
 Write protection on the object lives in

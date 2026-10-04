@@ -20,7 +20,7 @@ fn config_dir_from(over: Option<OsString>, home: Option<OsString>) -> Option<Pat
 
 /// A sycophant config scope rooted at the global config dir
 /// (`~/.config/sycophant`). Charts/examples live at the root; when `tenant` is
-/// set (every `syco tenant … --ns <name>` command), the namespace-scoped
+/// set (every `syco tenant` command but `up`), the namespace-scoped
 /// accessors (`release_name`, `values_file`) resolve to that tenant.
 pub(crate) struct Scope {
     pub root: PathBuf,

@@ -6,34 +6,30 @@
 //! directly; a remote model is reached through a per-call inference-runtime job
 //! the harness creates. An absent name is refused, never defaulted.
 //!
-//! The harness reads an operator-authored config from a chart-rendered
-//! ConfigMap mounted read-only into the pod; a change rolls the harness.
+//! Each model is one `model-<key>` ConfigMap labelled `sycophant.md/type:
+//! model`, its data the operator's flat marker fields. The harness watches the
+//! label set and rebuilds the table on every change, so a model added, changed
+//! or removed takes effect on the next turn without a restart.
 
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use k8s_openapi::api::core::v1::ConfigMap;
 
-/// One model the harness can dial, keyed in `ModelConfigs` by the value an
+/// The one port every local model's `inference-<key>` Service serves on.
+pub(crate) const LOCAL_INFERENCE_PORT: u16 = 8080;
+
+/// One model the harness can dial, keyed in `ModelTable` by the value an
 /// agent definition's `model:` names. `format` is the provider wire format and
-/// `model` the provider-side model id; the `kind` discriminator carries how the
-/// harness reaches it.
-#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "lowercase")]
+/// `model` the provider-side model id.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ModelConfig {
-    /// A warm in-cluster model served by a chart-static Deployment behind the
-    /// `inference-<key>` ClusterIP Service. The harness dials the Service
+    /// A warm in-cluster model served by the `inference-<key>` ClusterIP
+    /// Service on [`LOCAL_INFERENCE_PORT`]. The harness dials the Service
     /// directly; no per-call job is created.
-    Local {
-        format: String,
-        model: String,
-        /// The Service's serving port, parsed by the chart from the profile
-        /// `baseUrl`.
-        port: u16,
-    },
-    /// A provider reached over the public internet through a per-call
-    /// inference-runtime job the harness creates. The job holds the provider
-    /// credential and the external egress; the harness dials the job.
-    #[serde(rename_all = "camelCase")]
+    Local { format: String, model: String },
+    /// A provider reached through a per-call inference-runtime job the harness
+    /// creates. The job holds the provider credential and the external egress;
+    /// the harness dials the job.
     Remote {
         format: String,
         model: String,
@@ -61,30 +57,67 @@ impl ModelConfig {
             ModelConfig::Local { model, .. } | ModelConfig::Remote { model, .. } => model,
         }
     }
+
+    /// Build one model from a ConfigMap's flat data. A `server.image` key makes
+    /// it local, which carries no `baseUrl`.
+    fn from_data(data: &std::collections::BTreeMap<String, String>) -> Result<Self, String> {
+        let field = |k: &str| {
+            data.get(k)
+                .filter(|v| !v.is_empty())
+                .cloned()
+                .ok_or_else(|| format!("missing {k}"))
+        };
+        let format = field("format")?;
+        let model = field("model")?;
+        if data.contains_key("server.image") {
+            return Ok(ModelConfig::Local { format, model });
+        }
+        Ok(ModelConfig::Remote {
+            format,
+            model,
+            base_url: field("baseUrl")?,
+            image: field("image")?,
+            secret: data.get("secret").filter(|v| !v.is_empty()).cloned(),
+        })
+    }
 }
 
-/// The harness's model catalog. Keyed by the value an agent definition's
-/// `model:` names; an absent key is refused, never defaulted.
-#[derive(Deserialize, Clone, Debug, Default)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ModelConfigs {
-    #[serde(default)]
+/// The live model table, keyed by the `app.kubernetes.io/name` label of each
+/// model ConfigMap. An absent key is refused, never defaulted.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ModelTable {
     models: HashMap<String, ModelConfig>,
 }
 
-impl ModelConfigs {
-    /// Read once at startup from the chart-rendered ConfigMap mounted into the
-    /// harness pod; a change rolls the harness.
-    pub(crate) fn load(path: &str) -> Result<Self, String> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read model config file {path}: {e}"))?;
-        serde_yaml::from_str(&content)
-            .map_err(|e| format!("failed to parse model config YAML: {e}"))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_map(models: HashMap<String, ModelConfig>) -> Self {
-        Self { models }
+impl ModelTable {
+    /// Merge every model ConfigMap into one table. A ConfigMap that fails to
+    /// parse is skipped and named in the returned errors.
+    pub(crate) fn merge_configmaps<'a, I>(cms: I) -> (Self, Vec<String>)
+    where
+        I: IntoIterator<Item = &'a ConfigMap>,
+    {
+        let mut models = HashMap::new();
+        let mut errors = Vec::new();
+        for cm in cms {
+            let name = cm.metadata.name.as_deref().unwrap_or("<unnamed>");
+            let Some(key) = cm
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|l| l.get("app.kubernetes.io/name"))
+            else {
+                errors.push(format!("{name}: no app.kubernetes.io/name label"));
+                continue;
+            };
+            let empty = Default::default();
+            match ModelConfig::from_data(cm.data.as_ref().unwrap_or(&empty)) {
+                Ok(config) => {
+                    models.insert(key.clone(), config);
+                }
+                Err(e) => errors.push(format!("{name}: {e}")),
+            }
+        }
+        (Self { models }, errors)
     }
 
     /// The model the agent-definition value names. Absent is refused, never
@@ -92,164 +125,104 @@ impl ModelConfigs {
     pub(crate) fn get(&self, name: &str) -> Option<&ModelConfig> {
         self.models.get(name)
     }
-
-    /// The configured model names, sorted, for diagnostics.
-    pub(crate) fn names(&self) -> Vec<String> {
-        let mut out: Vec<String> = self.models.keys().cloned().collect();
-        out.sort();
-        out
-    }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use std::collections::BTreeMap;
+
+    use k8s_openapi::api::core::v1::ConfigMap;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+
     use super::*;
 
-    /// Parse at the depth the harness actually loads: the whole catalog, not a
-    /// bare inner entry.
-    fn parse(yaml: &str) -> Result<ModelConfigs, serde_yaml::Error> {
-        serde_yaml::from_str(yaml)
-    }
-
-    const CATALOG: &str = "\
-models:
-  in-cluster:
-    kind: local
-    format: openai
-    model: liquid/lfm2.5-8b-a1b
-    port: 8080
-  deepseek-v4-flash:
-    kind: remote
-    format: openai
-    model: deepseek/deepseek-v4-flash
-    baseUrl: https://openrouter.ai/api/v1
-    image: ghcr.io/sycophant/inference-runtime:1
-    secret: sycophant-llm-openrouter
-";
-
-    /// A named local config resolves to a local target carrying the warm
-    /// Service's serving port. The discriminator must survive the round trip:
-    /// a mutant that maps a `local` entry to `Remote` (or defaults the port)
-    /// fails the port assertion.
-    #[test]
-    fn a_named_local_config_resolves_to_a_local_target() {
-        let catalog = parse(CATALOG).expect("the catalog parses");
-        match catalog.get("in-cluster") {
-            Some(ModelConfig::Local {
-                format,
-                model,
-                port,
-            }) => {
-                assert_eq!(format, "openai");
-                assert_eq!(model, "liquid/lfm2.5-8b-a1b");
-                assert_eq!(*port, 8080);
-            }
-            other => panic!("a local entry must resolve to ModelConfig::Local, got {other:?}"),
+    pub(crate) fn model_cm(key: &str, data: &[(&str, &str)]) -> ConfigMap {
+        ConfigMap {
+            metadata: ObjectMeta {
+                name: Some(format!("model-{key}")),
+                labels: Some(BTreeMap::from([
+                    ("sycophant.md/type".to_string(), "model".to_string()),
+                    ("app.kubernetes.io/name".to_string(), key.to_string()),
+                ])),
+                ..Default::default()
+            },
+            data: Some(
+                data.iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            ),
+            ..Default::default()
         }
     }
 
-    /// A named remote config resolves to a remote target carrying its provider
-    /// base URL, job image, and the name of its credential secret.
-    #[test]
-    fn a_named_remote_config_resolves_to_a_remote_target_with_its_secret() {
-        let catalog = parse(CATALOG).expect("the catalog parses");
-        match catalog.get("deepseek-v4-flash") {
-            Some(ModelConfig::Remote {
-                format,
-                model,
-                base_url,
-                image,
-                secret,
-            }) => {
-                assert_eq!(format, "openai");
-                assert_eq!(model, "deepseek/deepseek-v4-flash");
-                assert_eq!(base_url, "https://openrouter.ai/api/v1");
-                assert_eq!(image, "ghcr.io/sycophant/inference-runtime:1");
-                assert_eq!(secret.as_deref(), Some("sycophant-llm-openrouter"));
-            }
-            other => panic!("a remote entry must resolve to ModelConfig::Remote, got {other:?}"),
-        }
-    }
-
-    /// A remote destination inside the cluster authenticates nobody, so its
-    /// config names no secret and still resolves.
-    #[test]
-    fn a_remote_config_resolves_when_it_names_no_secret() {
-        let yaml = CATALOG.replace("    secret: sycophant-llm-openrouter\n", "");
-        let catalog = parse(&yaml).expect("a remote config with no secret still parses");
-        match catalog.get("deepseek-v4-flash") {
-            Some(ModelConfig::Remote { secret, .. }) => assert_eq!(*secret, None),
-            other => panic!("expected a remote target, got {other:?}"),
-        }
-    }
-
-    /// An absent name resolves to `None` — never a default. A mutant that
-    /// invents a fallback model fails this.
-    #[test]
-    fn an_absent_name_resolves_to_none() {
-        let catalog = parse(CATALOG).expect("the catalog parses");
-        assert_eq!(catalog.get("no-such-model"), None);
-    }
-
-    /// The empty catalog refuses every name; nothing is defaulted.
-    #[test]
-    fn the_empty_catalog_resolves_every_name_to_none() {
-        let catalog = ModelConfigs::default();
-        assert_eq!(catalog.get("in-cluster"), None);
-    }
+    pub(crate) const REMOTE: &[(&str, &str)] = &[
+        ("format", "openai"),
+        ("model", "deepseek/deepseek-v4-flash"),
+        ("baseUrl", "https://openrouter.ai/api/v1"),
+        ("image", "inference-runtime:local"),
+        ("secret", "llm-openrouter"),
+    ];
 
     #[test]
-    fn names_returns_sorted_model_keys() {
-        let catalog = parse(CATALOG).expect("the catalog parses");
+    fn a_marker_with_a_server_image_is_local_without_a_base_url() {
+        let (table, errors) = ModelTable::merge_configmaps(&[model_cm(
+            "local",
+            &[
+                ("format", "openai"),
+                ("model", "liquid/lfm2.5-8b-a1b"),
+                ("server.image", "llama-server:local"),
+                ("server.weights", "ghcr.io/example/weights:1"),
+                ("server.weightsPath", "/weights/model.gguf"),
+                ("server.slots", "2"),
+            ],
+        )]);
+        assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(
-            catalog.names(),
-            vec!["deepseek-v4-flash".to_string(), "in-cluster".to_string()]
-        );
-    }
-
-    /// `format`/`model` read the shared fields regardless of target, so a
-    /// caller need not destructure the discriminator to compose the provider
-    /// call.
-    #[test]
-    fn format_and_model_read_the_shared_fields_on_both_targets() {
-        let catalog = parse(CATALOG).expect("the catalog parses");
-        let local = catalog.get("in-cluster").expect("local present");
-        assert_eq!(local.format(), "openai");
-        assert_eq!(local.model(), "liquid/lfm2.5-8b-a1b");
-        let remote = catalog.get("deepseek-v4-flash").expect("remote present");
-        assert_eq!(remote.format(), "openai");
-        assert_eq!(remote.model(), "deepseek/deepseek-v4-flash");
-    }
-
-    /// `from_map` builds a catalog the resolver reads the same as a parsed one.
-    #[test]
-    fn from_map_builds_a_resolvable_catalog() {
-        let mut models = HashMap::new();
-        models.insert(
-            "in-cluster".to_string(),
-            ModelConfig::Local {
+            table.get("local"),
+            Some(&ModelConfig::Local {
                 format: "openai".to_string(),
                 model: "liquid/lfm2.5-8b-a1b".to_string(),
-                port: 8080,
-            },
+            })
         );
-        let catalog = ModelConfigs::from_map(models);
-        assert!(matches!(
-            catalog.get("in-cluster"),
-            Some(ModelConfig::Local { port: 8080, .. })
-        ));
     }
 
-    /// `load` reads and parses the mounted file, the harness's startup path.
     #[test]
-    fn load_reads_and_parses_the_mounted_file() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("model.yaml");
-        std::fs::write(&path, CATALOG).unwrap();
-        let catalog = ModelConfigs::load(path.to_str().unwrap()).expect("the mounted file loads");
-        assert!(matches!(
-            catalog.get("deepseek-v4-flash"),
-            Some(ModelConfig::Remote { .. })
-        ));
+    fn a_marker_without_a_server_image_is_remote_with_its_optional_secret() {
+        let unauthenticated: Vec<_> = REMOTE
+            .iter()
+            .copied()
+            .filter(|(k, _)| *k != "secret")
+            .collect();
+        let (table, errors) = ModelTable::merge_configmaps(&[
+            model_cm("deepseek", REMOTE),
+            model_cm("open", &unauthenticated),
+        ]);
+        assert!(errors.is_empty(), "{errors:?}");
+        let remote = |secret: Option<&str>| ModelConfig::Remote {
+            format: "openai".to_string(),
+            model: "deepseek/deepseek-v4-flash".to_string(),
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            image: "inference-runtime:local".to_string(),
+            secret: secret.map(str::to_string),
+        };
+        assert_eq!(table.get("deepseek"), Some(&remote(Some("llm-openrouter"))));
+        assert_eq!(table.get("open"), Some(&remote(None)));
+    }
+
+    #[test]
+    fn a_configmap_missing_format_is_skipped_and_named() {
+        let unformatted: Vec<_> = REMOTE
+            .iter()
+            .copied()
+            .filter(|(k, _)| *k != "format")
+            .collect();
+        let (table, errors) = ModelTable::merge_configmaps(&[
+            model_cm("deepseek", REMOTE),
+            model_cm("broken", &unformatted),
+        ]);
+        assert!(table.get("deepseek").is_some());
+        assert_eq!(table.get("broken"), None);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("model-broken"), "{errors:?}");
     }
 }

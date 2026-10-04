@@ -138,20 +138,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let scheduling =
         SchedulingConfig::load_or_default(&config.scheduling_file, kube_client.is_some())
             .map_err(|e| format!("scheduling config: {e}"))?;
-    // The harness's model catalog. Read the same way the toolset config is:
-    // from a mounted operator-authored ConfigMap in cluster, empty in local dev
-    // where no kube client exists to create inference jobs.
-    let models = if kube_client.is_some() {
-        model_config::ModelConfigs::load(&config.model_config_file)
-            .map_err(|e| format!("model config: {e}"))?
-    } else {
-        model_config::ModelConfigs::default()
-    };
+    // The live model table, empty at boot; the model watcher below fills it.
+    let models = Arc::new(RwLock::new(model_config::ModelTable::default()));
     // The inference dispatcher shares the tool dispatcher's kube client and
     // scheduling, so clone them before `DispatchState::new` consumes the
     // originals.
     let kube_for_inference = kube_client.clone();
     let kube_for_toolset = kube_client.clone();
+    let kube_for_models = kube_client.clone();
     let scheduling_for_inference = scheduling.clone();
     let dispatch = DispatchState::new(
         kube_client,
@@ -195,11 +189,37 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     }
 
+    // The live model table. A model ConfigMap added, changed or removed takes
+    // effect on the next turn.
+    if let Some(client) = kube_for_models {
+        shared::watcher_retry::spawn_and_await_ready(
+            "model",
+            "model",
+            client,
+            config.namespace.clone(),
+            models.clone(),
+            |client, ns, table, tx| async move {
+                shared::configmap_watcher::watch_configmaps(
+                    client,
+                    &ns,
+                    "sycophant.md/type=model",
+                    "model",
+                    table,
+                    tx,
+                    |cms| model_config::ModelTable::merge_configmaps(cms.values()),
+                )
+                .await
+            },
+        )
+        .await?;
+    }
+
     // The harness dials the model directly: a warm local Service in-process, or
     // a per-call inference-runtime Job it creates and dials. The message loop
     // drives turns through this seam rather than the toolset controller.
     let mut inference = dispatch::InferenceDispatch::new(
         models,
+        config.models.clone(),
         kube_for_inference,
         config.namespace.clone(),
         config.capability_service.clone(),

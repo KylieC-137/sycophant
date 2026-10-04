@@ -25,6 +25,16 @@ fn main() {
         Command::Upgrade(cmd) => commands::upgrade::run(cmd),
         Command::Tenant(cmd) => commands::tenant::run(cmd),
         Command::Toolset(cmd) => commands::toolset::run(cmd),
+        Command::Workspace(cli::MarkerCmd {
+            sub: cli::MarkerSub::Up(c),
+        }) => commands::marker::up("workspace", &c.file),
+        Command::User(cli::MarkerCmd {
+            sub: cli::MarkerSub::Up(c),
+        }) => commands::marker::up("user", &c.file),
+        Command::Inference(cli::InferenceCmd { sub }) => match sub {
+            cli::InferenceSub::Up(c) => commands::marker::up("inference", &c.file),
+            cli::InferenceSub::Down(c) => commands::marker::down("inference", &c.name, &c.tenant),
+        },
     };
 
     if let Err(e) = result {

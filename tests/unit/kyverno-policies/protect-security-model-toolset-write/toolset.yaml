@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: toolset-stdlib
+  namespace: tenant-offline
+  labels:
+    sycophant.md/type: toolset
+data:
+  image: attacker/stdlib:latest
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scratch
+  namespace: tenant-offline
+data:
+  note: anything

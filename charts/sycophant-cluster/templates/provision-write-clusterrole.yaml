@@ -1,8 +1,8 @@
 # Shared per-tenant write role. Its consumers bind it via a generated
-# per-namespace RoleBinding, never a ClusterRoleBinding: the per-install
-# installer SAs `provision-<kind>-<handle>` in sycophant-system, one per
-# tenant, workspace, user, and toolset provision marker. RBAC's namespacing
-# rules scope these verbs to that one tenant namespace only.
+# per-namespace RoleBinding, never a ClusterRoleBinding: every
+# `provision-<kind>` and `uninstall-<kind>` ServiceAccount in sycophant-system,
+# one per marker, binds it. RBAC's namespacing rules scope these verbs to that
+# one tenant namespace only.
 #
 # Result: the holder has write access to Secrets, Deployments, etc. in
 # its one tenant namespace only, never in kube-system, sycophant-system, or

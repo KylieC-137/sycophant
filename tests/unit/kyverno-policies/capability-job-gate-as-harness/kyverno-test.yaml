@@ -7,7 +7,9 @@ policies:
 resources:
   - resource-mounts.yaml
   - jobs.yaml
+  - model-secret.yaml
 userinfo: user-harness-research.yaml
+context: context.yaml
 variables: values.yaml
 results:
   - policy: cluster-capability-job-gate
@@ -15,6 +17,7 @@ results:
     result: pass
     resources:
       - tenant-offline/own-workspace-pvc
+      - tenant-offline/inference-own-model-secret
   - policy: cluster-capability-job-gate
     kind: Job
     result: fail
@@ -24,6 +27,8 @@ results:
       - tenant-offline/configmap-volume
       - tenant-offline/configmap-env
       - tenant-offline/configmap-envfrom
+      - tenant-offline/inference-other-model-secret
+      - tenant-offline/tool-model-secret
   - policy: cluster-capability-job-gate-envelope
     isMutatingPolicy: true
     kind: Job

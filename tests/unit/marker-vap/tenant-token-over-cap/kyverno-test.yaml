@@ -1,0 +1,16 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: marker-vap-tenant-token-over-cap
+policies:
+  - ../policy.yaml
+resources:
+  - marker.yaml
+userinfo: ../operator.yaml
+results:
+  - policy: marker-provision-tenant
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: fail
+    resources:
+      - sycophant-system/provision-tenant

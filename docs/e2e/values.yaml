@@ -1,19 +1,5 @@
-# The provision reactor generates the tenant namespace, so the chart installs
-# into it rather than creating it. The installers force this off as well.
-namespace:
-  create: false
-
 # Images use the chart defaults (local builds, pullPolicy: Never) — no override
 # needed here. Only the genuinely-different e2e settings remain below.
-
-# workspaceInit: toolset-git is pushed to the in-cluster registry
-# (sycophant-registry:5000) by e2e.sh (~line 279-281), NOT imported into
-# the nodes -- so the kubelet must pull it. pullPolicy IfNotPresent (Never
-# would fail because the image is not present on the node).
-workspaceInit:
-  image: sycophant-registry:5000/toolset-git
-  tag: latest
-  pullPolicy: IfNotPresent
 
 # Toolsets are chart values now, not CRs. e2e.sh overrides each `image` with the
 # local-registry digest via --set-string, so only the shape lives here.
@@ -26,66 +12,13 @@ toolsets:
   ssh-credentials:
     keepalive: true
 
-# The turn destinations. Each key is a turn's `model` value -- here the model
-# the hello-world agent requests. This is not a `toolsets` entry and no
-# workspace binds it.
-#
-# Two models run side by side. `deepseek-v4-flash` is the external vendor and
-# carries a `secret`; keeping it in the run is the check that tightening the
-# egress derivation to a single host did not break a real provider. `local`
-# points at the in-cluster inference Service below, carries no secret (the engine
-# needs no API key), and its baseUrl host is the bare `inference-local` form the
-# destination helper accepts.
-model:
-  deepseek-v4-flash:
-    image: inference-runtime:local
-    format: openai
-    model: deepseek/deepseek-v4-flash
-    baseUrl: https://openrouter.ai/api/v1
-    secret: sycophant-llm-openrouter
-  local:
-    image: inference-runtime:local
-    format: openai
-    model: local
-    baseUrl: http://inference-local:8080/v1
-
-# The in-cluster inference server for the `local` model above. Its presence is
-# what makes that model's baseUrl resolve to a Service instead of an external
-# name, and it renders the llama.cpp Deployment, its ClusterIP Service, the pod's
-# ingress fence, and the model's in-cluster egress hole. Both images are
-# local builds (scripts/e2e.sh Step 1) imported into k3d.
-#
-# weightsDelivery: copy is the default and the only path this cluster clears: the
-# k3d k3s image is not pinned, so the kubelet image-volume floor cannot be
-# assumed. singleNodeException: true drops the workload node selector and
-# toleration because this run has one unlabeled node, so inference and toolset
-# pods must share it.
-inference:
-  local:
-    image: llama-server:local
-    weights: weights:local
-    weightsPath: /weights/model.gguf
-    weightsDelivery: copy
-    singleNodeException: true
-    # llama.cpp mmaps the GGUF, so the limit must exceed the model on disk
-    # (MiniCPM5-2B Q4_K_M is ~1.62 GB) plus the KV cache and runtime. Keep this
-    # >= model size x 1.4; e2e preflight fails the run if it drops below.
-    memory: 2560Mi
-    cpu: 2
-    threads: 2
-    contextBudget: 8192
-    slots: 1
-    outputCap: 512
-    # Greedy decoding so the model reproduces the scrubbed tool output verbatim
-    # instead of rewording it — the demo's redaction proof rides the reply text.
-    temp: 0
-
-# The hello-world instructions content is authored out-of-band on the read-only
-# volume (see scripts/e2e.sh), delivered by the per-workspace hostPath PV the
-# harness mounts. Its node-side location is driven by chart values
-# (harness.instructions.hostPathBase + this workspaces block), not a Instructions CR.
 workspaces:
   hello-world:
+    # Each model is its own inference marker (scripts/e2e.sh
+    # write_inference_markers); the harness may name only these.
+    models:
+      - deepseek-v4-flash
+      - local
     toolsets:
       - stdlib
       - workspace-ro
@@ -98,23 +31,3 @@ workspaces:
           demo-key:
             secret: demo-ssh-key
             path: /home/agent/.ssh/id_ed25519
-
-# In-cluster headscale, ACME off, so it serves plain HTTP on :8080. The
-# operator reaches it by port-forward; the app adapter reaches it at the
-# Service DNS name.
-headscale:
-  enabled: true
-  serverUrl: http://localhost:8080
-  acme:
-    enabled: false
-
-# The app channel. Presence in this map is the enable signal; the entry
-# renders the adapter Deployment, its ServiceAccount, its egress policy, and
-# the relay's app-port ingress rule. scripts/e2e.sh mints the pre-auth key
-# into `relay-tsnet-authkey` after headscale is Available.
-#
-# loginServer is set explicitly: the chart has no in-cluster default.
-channels:
-  app:
-    kind: app
-    loginServer: http://headscale:8080

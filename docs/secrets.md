@@ -1,6 +1,6 @@
 # Secrets: backend recipes
 
-The sycophant chart consumes per-tenant LLM API keys via a model entry's `secret`, and per-tenant tool credentials via a workspace's grants. Ephemeral Jobs mount the referenced K8s Secret by reference; no controller reads an API key, and the harness never reads one.
+The sycophant chart consumes per-tenant LLM API keys via an inference marker's `secret`, and per-tenant tool credentials via a workspace's grants. Ephemeral Jobs mount the referenced K8s Secret by reference; no controller reads an API key, and the harness never reads one.
 
 This doc shows minimal-working-example recipes for getting that Secret into the cluster. The chart imposes no preference among them — choose by ops cost vs. blast radius vs. existing tooling in your cluster.
 
@@ -41,19 +41,26 @@ kubectl create secret generic sycophant-llm-openrouter \
   --from-literal=sycophant-llm-openrouter="$OPENROUTER_API_KEY"
 ```
 
-Then in the chart's `values.yaml`:
+Then in the model's inference marker, applied with `syco inference up -f`:
 
 ```yaml
-model:
-  deepseek-v4-flash:
-    image: inference-runtime
-    format: openai
-    model: deepseek/deepseek-v4-flash
-    baseUrl: https://openrouter.ai/api/v1
-    secret: sycophant-llm-openrouter
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-inference-deepseek-v4-flash
+  namespace: tenant-foo
+  labels:
+    sycophant.md/lifecycle-marker: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  format: openai
+  model: deepseek/deepseek-v4-flash
+  baseUrl: https://openrouter.ai/api/v1
+  image: ghcr.io/calebfaruki/inference-runtime:latest
+  secret: sycophant-llm-openrouter
 ```
 
-A model entry names the Secret only. Kubelet mounts it read-only at
+A model marker names the Secret only. Kubelet mounts it read-only at
 `/run/secrets/provider/credential`, the path the inference image reads, and no
 component reads the value itself.
 

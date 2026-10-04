@@ -18,6 +18,9 @@ pub(crate) enum Command {
     Upgrade(UpgradeCmd),
     Tenant(TenantCmd),
     Toolset(ToolsetCmd),
+    Workspace(MarkerCmd),
+    User(MarkerCmd),
+    Inference(InferenceCmd),
 }
 
 // --- setup / destroy (cluster — no --ns) ---
@@ -49,13 +52,13 @@ pub(crate) struct UpgradeCmd {
     pub check: bool,
 }
 
-// --- tenant (everything namespace-scoped; --ns selects the namespace) ---
+// --- tenant ---
 
-/// Operate on a tenant (namespace). `--ns <name>` selects it and may appear
-/// anywhere on the line (it is a global flag declared once here).
+/// Operate on a tenant. `--ns <name>` selects the namespace for secret,
+/// workspace and audit, and may appear anywhere on the line.
 #[derive(Args)]
 pub(crate) struct TenantCmd {
-    /// tenant namespace (required for every subcommand)
+    /// tenant namespace (secret, workspace and audit only)
     #[arg(long, global = true)]
     pub ns: Option<String>,
     #[command(subcommand)]
@@ -72,28 +75,36 @@ pub(crate) enum TenantSub {
     Audit(AuditCmd),
 }
 
-/// Provision or re-provision a tenant through lifecycle markers. `--ns` must be
-/// `tenant-<name>`. Prompts for the operator password. Writes the tenant marker
-/// with the base settings, then one marker per workspace, user, and toolset in
-/// the tenant values file; each installer upgrades its release in place. A
-/// tenant installed as one helm release is migrated onto the markers. The
+/// Provision or re-provision a tenant through lifecycle markers. Prompts for the
+/// operator password. Applies the tenant marker file and waits for its
+/// installer, then writes one marker per workspace, user, and toolset in the
+/// tenant values file; each installer upgrades its release in place. The
 /// capacity quota is set on first provision and not resized after
 #[derive(Args)]
 pub(crate) struct TenantUp {
-    /// tenant memory quota (a Kubernetes quantity, e.g. 2Gi)
-    #[arg(long)]
-    pub capacity: String,
+    /// the provision-tenant marker file
+    #[arg(short = 'f', long = "file")]
+    pub file: String,
 }
 
 /// Suspend the tenant: scales it to zero, keeps all data. Prompts for the
 /// operator password
 #[derive(Args)]
-pub(crate) struct TenantDown {}
+pub(crate) struct TenantDown {
+    /// tenant name (the namespace is tenant-<name>)
+    pub name: String,
+    /// days to keep the suspended tenant before the cluster reaps it
+    #[arg(long)]
+    pub keepalive: Option<String>,
+}
 
 /// Delete the tenant completely, including its PVCs/data (irreversible). The
 /// cluster reaps it on its next sweep. Prompts for the operator password
 #[derive(Args)]
-pub(crate) struct TenantRemove {}
+pub(crate) struct TenantRemove {
+    /// tenant name (the namespace is tenant-<name>)
+    pub name: String,
+}
 
 // --- secret ---
 
@@ -195,9 +206,60 @@ pub(crate) struct AuditCmd {
     pub workspace: String,
 }
 
-// --- toolset (cluster-independent — no --ns) ---
+// --- marker files (the marker names its own namespace) ---
 
-/// Inspect and build from toolset images
+/// Apply a lifecycle marker file
+#[derive(Args)]
+pub(crate) struct MarkerCmd {
+    #[command(subcommand)]
+    pub sub: MarkerSub,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum MarkerSub {
+    Up(MarkerUp),
+}
+
+/// Apply a marker file as the operator and wait for its installer. Prompts for
+/// the operator password. A leftover marker of the same name is replaced; a
+/// rejected marker or a failed install exits non-zero
+#[derive(Args)]
+pub(crate) struct MarkerUp {
+    /// the provision marker file
+    #[arg(short = 'f', long = "file")]
+    pub file: String,
+}
+
+// --- inference ---
+
+/// Install or remove one model through its lifecycle markers
+#[derive(Args)]
+pub(crate) struct InferenceCmd {
+    #[command(subcommand)]
+    pub sub: InferenceSub,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum InferenceSub {
+    Up(MarkerUp),
+    Down(MarkerDown),
+}
+
+/// Remove a component: write its reap marker as the operator and wait for the
+/// uninstall. Prompts for the operator password. A failed uninstall leaves the
+/// reap marker and exits non-zero
+#[derive(Args)]
+pub(crate) struct MarkerDown {
+    /// the component name (the marker name suffix)
+    pub name: String,
+    /// tenant name (the namespace is tenant-<name>)
+    #[arg(long)]
+    pub tenant: String,
+}
+
+// --- toolset ---
+
+/// Inspect and build from toolset images, and apply toolset markers
 #[derive(Args)]
 pub(crate) struct ToolsetCmd {
     #[command(subcommand)]
@@ -208,6 +270,7 @@ pub(crate) struct ToolsetCmd {
 pub(crate) enum ToolsetSub {
     Lint(ToolsetLint),
     Manifest(ToolsetManifest),
+    Up(MarkerUp),
 }
 
 /// Statically check a toolset directory for shell-injection vulnerabilities

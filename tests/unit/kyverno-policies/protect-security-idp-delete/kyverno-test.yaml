@@ -1,0 +1,21 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: protect-security-idp-delete
+policies:
+  - policy.yaml
+resources:
+  - marker.yaml
+userinfo: user-idp.yaml
+variables: values.yaml
+results:
+  - policy: cluster-protect-security
+    kind: ConfigMap
+    result: pass
+    resources:
+      - tenant-offline/suspend-tenant
+  - policy: cluster-protect-security
+    kind: ConfigMap
+    result: fail
+    resources:
+      - tenant-offline/model-deepseek

@@ -10,7 +10,6 @@ use std::path::Path;
 
 use crate::cli::UpgradeCmd;
 use crate::commands::common::{ok, step, warn};
-use crate::commands::marker::TENANT_NS_PREFIX;
 use crate::commands::operator::Operator;
 use crate::commands::up;
 use crate::runner::{run_output, run_passthrough, run_silent};
@@ -77,6 +76,18 @@ const KYVERNO_POLICIES: &[(&str, &str)] = &[
         "generatingpolicies.policies.kyverno.io",
         "provision-toolset-grant",
     ),
+    (
+        "generatingpolicies.policies.kyverno.io",
+        "provision-inference",
+    ),
+    (
+        "generatingpolicies.policies.kyverno.io",
+        "provision-inference-grant",
+    ),
+    (
+        "generatingpolicies.policies.kyverno.io",
+        "uninstall-inference",
+    ),
 ];
 
 pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
@@ -106,14 +117,20 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
     require(
         &mut cluster_fails,
         "Kyverno scheduled policies present",
-        ["reap-tenant", "reap-workspace", "reap-user", "reap-toolset"]
-            .iter()
-            .all(|name| {
-                run_silent(
-                    "kubectl",
-                    &["get", "deletingpolicies.policies.kyverno.io", name],
-                )
-            }),
+        [
+            "reap-tenant",
+            "reap-workspace",
+            "reap-user",
+            "reap-toolset",
+            "reap-inference",
+        ]
+        .iter()
+        .all(|name| {
+            run_silent(
+                "kubectl",
+                &["get", "deletingpolicies.policies.kyverno.io", name],
+            )
+        }),
         "reap policy missing \u{2014} check `kubectl get dpol`",
     );
     // No-downgrade guard: `syco upgrade` applies the charts bundled in THIS
@@ -198,23 +215,13 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
     )?;
     ok("cluster upgraded");
 
-    // Earlier releases bound the tenant-deployer SA to tenant-operator in every
-    // tenant namespace and ran the relay as SA `relay-ctrl`. The binding is now
-    // inert. The relay tokenreview binding keeps `relay-ctrl` beside
-    // `relay-controller` until the tenant's base installer has swapped the
-    // relay's SA, so a relay still running as `relay-ctrl` keeps its TokenReview.
-    for ns in &tenants {
-        run_output("kubectl", &as_strs(&deployer_rolebinding_delete_args(ns)))?;
-        patch_relay_crb(ns, &[RELAY_SA, LEGACY_RELAY_SA])?;
-    }
-
     if !plans.is_empty() {
         let op = Operator::login(&scope.oidc_dir())?;
         for (ns, capacity) in &plans {
             step(&format!("Re-provisioning tenant `{ns}`"));
-            up::provision(&Scope::for_tenant(ns)?, &op, capacity, &mut || {
-                patch_relay_crb(ns, &[RELAY_SA])
-            })?;
+            let tenant = Scope::for_tenant(ns)?;
+            let manifest = up::tenant_manifest(&tenant, capacity)?;
+            up::provision(&tenant, &op, &manifest, capacity)?;
             ok(&format!("tenant `{ns}` re-provisioned"));
         }
     }
@@ -222,34 +229,23 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
 }
 
 /// Whether a tenant can be re-provisioned through its markers, and at what
-/// capacity. A tenant needs the `tenant-<token>` name the markers compose, its
-/// values file on this host, and the capacity quota a provision marker
-/// generated. A tenant installed before the markers has no quota and migrates
-/// with one `syco tenant up`.
+/// capacity. A tenant needs its values file on this host and the capacity quota
+/// a provision marker generated.
 fn tenant_plan(
     ns: &str,
     has_values: bool,
     values: &Path,
     capacity: &Option<String>,
 ) -> Result<String, String> {
-    if !ns.starts_with(TENANT_NS_PREFIX) {
-        return Err(format!(
-            "namespace predates the {TENANT_NS_PREFIX}<name> form the markers compose; \
-             recreate it as {TENANT_NS_PREFIX}<name>"
-        ));
-    }
     if !has_values {
         return Err(format!(
             "no values file at {}; re-provisioning reads it",
             values.display()
         ));
     }
-    capacity.clone().ok_or_else(|| {
-        format!(
-            "no {ns}-capacity quota, so it was installed before the lifecycle markers; \
-             migrate it once with `syco tenant up --ns {ns} --capacity <quantity>`"
-        )
-    })
+    capacity
+        .clone()
+        .ok_or_else(|| format!("no {ns}-capacity quota"))
 }
 
 fn skipped_result(skipped: &[(String, Vec<String>)]) -> Result<(), String> {
@@ -283,64 +279,6 @@ fn tenant_capacity(ns: &str) -> Option<String> {
     )
     .ok()
     .filter(|c| !c.is_empty())
-}
-
-const RELAY_SA: &str = "relay-controller";
-const LEGACY_RELAY_SA: &str = "relay-ctrl";
-
-fn as_strs(args: &[String]) -> Vec<&str> {
-    args.iter().map(String::as_str).collect()
-}
-
-/// Deletes only the tenant-deployer RoleBinding earlier releases generated.
-fn deployer_rolebinding_delete_args(ns: &str) -> Vec<String> {
-    [
-        "delete",
-        "rolebinding",
-        "tenant-deployer",
-        "-n",
-        ns,
-        "--ignore-not-found",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect()
-}
-
-/// Replaces the tenant's relay tokenreview binding subjects with `sas`. The
-/// roleRef is immutable and left alone.
-fn relay_crb_patch_args(ns: &str, sas: &[&str]) -> Vec<String> {
-    let subjects: Vec<_> = sas
-        .iter()
-        .map(|sa| serde_json::json!({ "kind": "ServiceAccount", "name": sa, "namespace": ns }))
-        .collect();
-    vec![
-        "patch".into(),
-        "clusterrolebinding".into(),
-        format!("{ns}-relay-tokenreview"),
-        "--type=merge".into(),
-        "-p".into(),
-        serde_json::json!({ "subjects": subjects }).to_string(),
-    ]
-}
-
-/// Patches the binding when it exists. A tenant without one has nothing to
-/// move; any other read failure is an error.
-fn patch_relay_crb(ns: &str, sas: &[&str]) -> Result<(), String> {
-    let name = format!("{ns}-relay-tokenreview");
-    match run_output(
-        "kubectl",
-        &["get", "clusterrolebinding", &name, "-o", "name"],
-    ) {
-        Ok(_) => {}
-        Err(e) if is_not_found(&e) => return Ok(()),
-        Err(e) => return Err(format!("reading clusterrolebinding {name}: {e}")),
-    }
-    run_output("kubectl", &as_strs(&relay_crb_patch_args(ns, sas))).map(|_| ())
-}
-
-fn is_not_found(kubectl_err: &str) -> bool {
-    kubectl_err.contains("NotFound") || kubectl_err.contains("not found")
 }
 
 // Local copy of setup::require; unify only if a 3rd caller appears.
@@ -449,21 +387,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tenant_plan_needs_prefix_values_and_quota() {
+    fn tenant_plan_needs_values_and_quota() {
         let v = Path::new("/c/tenants/x/values.yaml");
         assert_eq!(
             tenant_plan("tenant-acme", true, v, &Some("2Gi".into())).unwrap(),
             "2Gi"
         );
-        assert!(tenant_plan("acme", true, v, &Some("2Gi".into()))
-            .unwrap_err()
-            .contains("tenant-<name>"));
         assert!(tenant_plan("tenant-acme", false, v, &Some("2Gi".into()))
             .unwrap_err()
             .contains("no values file"));
         assert!(tenant_plan("tenant-acme", true, v, &None)
             .unwrap_err()
-            .contains("syco tenant up --ns tenant-acme --capacity"));
+            .contains("no tenant-acme-capacity quota"));
     }
 
     #[test]
@@ -471,61 +406,6 @@ mod tests {
         assert!(skipped_result(&[]).is_ok());
         let err = skipped_result(&[("tenant-a".into(), vec!["x".into()])]).unwrap_err();
         assert!(err.contains("tenant-a"), "{err}");
-    }
-
-    #[test]
-    fn not_found_is_distinguished_from_other_errors() {
-        assert!(is_not_found(
-            "kubectl failed: Error from server (NotFound): clusterrolebindings.rbac.authorization.k8s.io \"x\" not found"
-        ));
-        assert!(!is_not_found(
-            "kubectl failed: Unable to connect to the server: dial tcp"
-        ));
-        assert!(!is_not_found(
-            "kubectl failed: Error from server (Forbidden): forbidden"
-        ));
-    }
-
-    #[test]
-    fn deployer_rolebinding_delete_targets_only_that_name() {
-        assert_eq!(
-            deployer_rolebinding_delete_args("tenant-acme"),
-            [
-                "delete",
-                "rolebinding",
-                "tenant-deployer",
-                "-n",
-                "tenant-acme",
-                "--ignore-not-found"
-            ]
-        );
-    }
-
-    #[test]
-    fn relay_crb_patch_sets_subjects_only() {
-        let args = relay_crb_patch_args("acme", &[RELAY_SA, LEGACY_RELAY_SA]);
-        assert_eq!(
-            &args[..5],
-            [
-                "patch",
-                "clusterrolebinding",
-                "acme-relay-tokenreview",
-                "--type=merge",
-                "-p"
-            ]
-        );
-        let body: serde_json::Value = serde_json::from_str(&args[5]).unwrap();
-        assert!(body.get("roleRef").is_none());
-        assert_eq!(
-            body["subjects"],
-            serde_json::json!([
-                { "kind": "ServiceAccount", "name": "relay-controller", "namespace": "acme" },
-                { "kind": "ServiceAccount", "name": "relay-ctrl", "namespace": "acme" }
-            ])
-        );
-        let after = relay_crb_patch_args("acme", &[RELAY_SA]);
-        let body: serde_json::Value = serde_json::from_str(&after[5]).unwrap();
-        assert_eq!(body["subjects"].as_array().unwrap().len(), 1);
     }
 
     #[test]

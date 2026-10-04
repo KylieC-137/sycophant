@@ -133,36 +133,43 @@ namespace default-deny egress floor.
 
 ### The model configuration
 
-The turn destinations are not entries of the `toolsets` map and no workspace
-binds them. They get their own `model` values section, read directly by the
-harness. A key is the turn's `model` value; a `model` absent from the map is
-rejected, never defaulted. Each entry pins one provider endpoint and its
-credential.
+The turn destinations are not toolsets. Each model is its own inference
+marker, `provision-inference-<key>`, which renders one `model-<key>` ConfigMap
+the harness watches. A key is the turn's `model` value; a key absent from the
+table or from the workspace's `models` list is rejected, never defaulted. Each
+marker pins one provider endpoint and its credential.
 
 ```yaml
-model:
-  deepseek-v4-flash:
-    image: ghcr.io/calebfaruki/inference-runtime:latest
-    format: openai
-    model: deepseek/deepseek-v4-flash
-    baseUrl: https://openrouter.ai/api/v1
-    secret: sycophant-llm-openrouter
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-inference-deepseek-v4-flash
+  namespace: tenant-foo
+  labels:
+    sycophant.md/lifecycle-marker: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  format: openai
+  model: deepseek/deepseek-v4-flash
+  baseUrl: https://openrouter.ai/api/v1
+  image: ghcr.io/calebfaruki/inference-runtime:latest
+  secret: sycophant-llm-openrouter
 ```
 
 The Secret holds one value: the API key. Kubelet projects it into the inference
 job at the declared path; the Harness never reads it. See
 [`docs/secrets.md`](secrets.md) for backend recipes.
 
-`secret` is the one optional key. A `baseUrl` inside the cluster authenticates
-nobody, so its entry omits `secret` and the inference job spawns with no
-credential volume and nothing registered to scrub. A `baseUrl` naming an
-in-cluster inference Service takes no job at all: the harness dials the warm
-Service directly.
+`secret` is optional. A remote model whose `baseUrl` points inside the cluster
+authenticates nobody, so its marker omits `secret` and the inference job spawns with no
+credential volume and nothing registered to scrub. A local model (a marker with
+`server.image`) carries no `baseUrl` and takes no job at all: the harness dials
+its warm `inference-<key>` Service directly on the fixed port 8080.
 
 ## The Model Call
 
-The harness owns the model call. It resolves the turn's `model` against the
-`model` configuration and dials the destination directly. A local `baseUrl` (an
+The harness owns the model call. It resolves the turn's `model` against its
+live model table and dials the destination directly. A local model (an
 in-cluster inference Service) is called in-process over the Service's own fence.
 
 A remote `baseUrl` takes a per-call `inference-runtime` Job the harness creates

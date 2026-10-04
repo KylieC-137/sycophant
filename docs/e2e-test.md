@@ -35,7 +35,7 @@ The shape:
 ```sh
 syco setup                                            # cluster + images (idempotent)
 # … wire content + workspace per the scenario …
-syco tenant up    --ns tenant-<scenario> --capacity <quantity>
+syco tenant up    -f <provision-tenant marker file>
 # … from the Flutter client, send a tool-calling message (see the scenario) …
 syco tenant audit <workspace> --ns tenant-<scenario>  # 7-check pass/fail (the threat model's six security clauses + the workspace-SA provisioning probe)
 ```
@@ -47,7 +47,7 @@ syco tenant audit <workspace> --ns tenant-<scenario>  # 7-check pass/fail (the t
 | Cluster | `syco setup` | Prompt for the operator's Dex email + password → Dex TLS cert + apiserver auth config → k3d cluster (Dex NodePort 30443 mapped to the host) → Dex TLS Secret → gVisor (runsc) → Cilium → CoreDNS registry wiring → Kyverno → sycophant cluster layer (idp = Dex at `https://127.0.0.1:30443/dex`) → Dex with the operator as its one password user (bcrypt hash in the cluster only) → one login to read the operator's `<issuer>#<sub>` → that identity may write the tenant marker |
 | Images | `syco setup` (from a checkout) | Cross-compile Rust → Docker build all images → `k3d image import` + push toolsets to the in-cluster registry |
 | Content | `syco tenant secret set` + the chart's `toolsets` values | LLM creds (Secrets applied from outside the tenant); toolsets, and each workspace's grants and their egress, declared in the tenant values |
-| Deploy | `syco tenant up` | Prompts for the operator password, then writes lifecycle markers, each under a fresh 10-minute Dex ID token: the tenant marker (`tenant`, `handle`, `capacity`, `keepalive`, and `values`, the base settings: every values-file key but `workspaces`, `users`, `toolsets`; Kyverno generates the `part-of=sycophant-tenant` namespace, its quota, and the base-release installer Job), then, once the base relay-controller is Available, one workspace, user, and toolset marker per values-file entry, each waiting on its installer Job |
+| Deploy | `syco tenant up` | Prompts for the operator password, then writes lifecycle markers, each under a fresh 10-minute Dex ID token: the tenant marker file (`tenant` and `capacity`; Kyverno generates the `part-of=sycophant-tenant` namespace, its quota, and the base-release installer Job, which installs chart defaults), then, once that Job succeeds (its install-wait hook holds it until the relay-controller is Available), one workspace, user, and toolset marker per values-file entry, each waiting on its installer Job. `syco inference up -f` then applies one marker per model |
 | Exercise | Flutter client | A tool-calling message (sent from an enrolled client) lazy-spawns the stdlib toolset pod the audit probes |
 | Audit | `syco tenant audit` | gVisor `dmesg`, secret-scrubbing count, tool `exit_code=0`, egress timeout, L7 DNS block, no LLM creds in the sandbox, workspace SA |
 
@@ -127,7 +127,7 @@ kubectl rollout restart -n tenant-e2e-test deployment/hello-world
 kubectl rollout status -n tenant-e2e-test deployment/hello-world --timeout=60s
 ```
 
-Note: the harness reads its model catalog and capability manifest once at boot, so changes propagate by re-running `syco tenant up` on the edited values file. The capability manifest ConfigMap name carries its hash, so a manifest change rolls the pod automatically. A model or scheduling change does not; restart the workspace after it with `kubectl rollout restart deployment/<workspace> -n <tenant ns>`. The toolset map is watched, not read at boot.
+Note: the harness reads its capability manifest once at boot, so changes propagate by re-running `syco tenant up` on the edited values file. The capability manifest ConfigMap name carries its hash, so a manifest change rolls the pod automatically. A scheduling change does not; restart the workspace after it with `kubectl rollout restart deployment/<workspace> -n <tenant ns>`. The toolset and model tables are watched, not read at boot: re-apply a model with `syco inference up -f` and the next turn uses it.
 
 ### Wipe conversation logs between runs
 The harness persists conversation history to its own `conversation-data-<workspace>` PVC (mounted at `/var/lib/harness/conversations`). Stale entries from a previous run can mislead the LLM on subsequent turns. Delete the PVC and restart the harness so it starts from an empty log:

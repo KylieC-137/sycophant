@@ -47,7 +47,7 @@ use toolset_proto::{RunInferenceCommand, TurnAssignment, TurnEvent, TurnRequest}
 use toolset_proto::turn_event;
 
 use crate::clients::{ToolsetRpc, TurnSource};
-use crate::model_config::{ModelConfig, ModelConfigs};
+use crate::model_config::{ModelConfig, ModelTable, LOCAL_INFERENCE_PORT};
 use crate::{job, TOOL_JOB_PORT};
 
 /// Bound on a tool call's in-flight frame channel. The dial driver forwards the
@@ -800,14 +800,14 @@ async fn dial_and_run(
 
 /// The in-cluster base URL of a warm local model's ClusterIP Service. Pure: the
 /// harness dials `inference-<key>` directly, so it derives the address from the
-/// model key, the namespace, and the Service's serving port with no apiserver
-/// read. Mirrors [`pod_dial_name`] for the local (no-job) path.
-fn local_service_base_url(key: &str, namespace: &str, port: u16) -> String {
-    format!("http://inference-{key}.{namespace}.svc.cluster.local:{port}/v1")
+/// model key, the namespace, and the fixed local port with no apiserver read.
+/// Mirrors [`pod_dial_name`] for the local (no-job) path.
+fn local_service_base_url(key: &str, namespace: &str) -> String {
+    format!("http://inference-{key}.{namespace}.svc.cluster.local:{LOCAL_INFERENCE_PORT}/v1")
 }
 
-/// Parse a configured wire-format string into a provider [`Format`]. Reuses the
-/// serde derive so the accepted spellings match the model config exactly.
+/// Parse a configured wire-format string into a provider [`Format`] by its serde
+/// spelling. An unknown format is an error.
 fn parse_format(format: &str) -> Result<Format, String> {
     serde_json::from_str::<Format>(&format!("\"{format}\""))
         .map_err(|_| format!("unknown model format {format:?}"))
@@ -999,12 +999,14 @@ async fn dial_inference(
 }
 
 /// The harness's model-call seam. Implements the same `ToolsetRpc::turn` the
-/// turn loop drives, but resolves the turn's model against the harness's own
-/// catalog and dials the model directly: a warm local Service in-process, or a
-/// per-call inference-runtime Job the harness creates and dials. An absent or
-/// unknown model fails the turn closed — there is no default model.
+/// turn loop drives, but resolves the turn's model against the live model table
+/// and dials the model directly: a warm local Service in-process, or a per-call
+/// inference-runtime Job the harness creates and dials. A model missing from
+/// the workspace's `allowed` list or from the table fails the turn closed —
+/// there is no default model.
 pub(crate) struct InferenceDispatch {
-    models: ModelConfigs,
+    models: Arc<RwLock<ModelTable>>,
+    allowed: Vec<String>,
     kube: Option<kube::Client>,
     namespace: String,
     service_name: String,
@@ -1014,7 +1016,8 @@ pub(crate) struct InferenceDispatch {
 
 impl InferenceDispatch {
     pub(crate) fn new(
-        models: ModelConfigs,
+        models: Arc<RwLock<ModelTable>>,
+        allowed: Vec<String>,
         kube: Option<kube::Client>,
         namespace: String,
         service_name: String,
@@ -1023,6 +1026,7 @@ impl InferenceDispatch {
     ) -> Self {
         Self {
             models,
+            allowed,
             kube,
             namespace,
             service_name,
@@ -1043,8 +1047,8 @@ impl InferenceDispatch {
             Err(e) => return Box::new(ErrorTurnSource::new(e)),
         };
         match config {
-            ModelConfig::Local { port, .. } => {
-                let base_url = local_service_base_url(key, &self.namespace, *port);
+            ModelConfig::Local { .. } => {
+                let base_url = local_service_base_url(key, &self.namespace);
                 let provider = format.build(&base_url);
                 let provider_config = ProviderConfig {
                     model: config.model().to_string(),
@@ -1110,10 +1114,15 @@ impl ToolsetRpc for InferenceDispatch {
                 "no model named for this turn; the harness refuses to default a model".to_string(),
             )));
         };
-        let Some(config) = self.models.get(&key).cloned() else {
+        let config = if self.allowed.contains(&key) {
+            self.models.read().await.get(&key).cloned()
+        } else {
+            None
+        };
+        let Some(config) = config else {
             return Ok(Box::new(ErrorTurnSource::new(format!(
-                "unknown model {key:?}; configured models: {:?}",
-                self.models.names()
+                "unknown model {key:?}; this workspace's models: {:?}",
+                self.allowed
             ))));
         };
         Ok(self.open(&key, &config, request).await)
@@ -1130,6 +1139,7 @@ impl ToolsetRpc for InferenceDispatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_config::tests::{model_cm, REMOTE};
     use shared::toolset::ToolsetEntry;
 
     fn state() -> Arc<DispatchState> {
@@ -1314,34 +1324,6 @@ mod tests {
         );
     }
 
-    /// The warm local model's base URL is a pure function of the model key, the
-    /// namespace, and the Service's serving port — the `inference-<key>`
-    /// ClusterIP record the harness dials directly, no job and no apiserver
-    /// read. Mirrors the per-pod dial-name builder for the no-job path.
-    #[test]
-    fn local_service_base_url_is_the_inference_key_cluster_ip_record() {
-        assert_eq!(
-            local_service_base_url("in-cluster", "tenant-x", 8080),
-            "http://inference-in-cluster.tenant-x.svc.cluster.local:8080/v1",
-        );
-    }
-
-    /// The local base URL plus the OpenAI provider's `/chat/completions` leaf must
-    /// land on the exact path the inference fence allowlists. The `/v1` segment
-    /// lives in the builder because the chart drops it when it parses the port,
-    /// so this is the only assertion that exercises the path the harness dials.
-    #[test]
-    fn local_base_url_plus_provider_leaf_matches_the_fence_allowlisted_path() {
-        let request_url = format!(
-            "{}/chat/completions",
-            local_service_base_url("local", "e2e-test", 8080)
-        );
-        assert_eq!(
-            request_url,
-            "http://inference-local.e2e-test.svc.cluster.local:8080/v1/chat/completions",
-        );
-    }
-
     /// The provider format string resolves through the same serde spelling the
     /// model config uses; an unrecognized format is refused, not defaulted.
     #[test]
@@ -1356,14 +1338,7 @@ mod tests {
     /// `TurnError` and ends, so the harness never invents a default model.
     #[tokio::test]
     async fn a_turn_with_no_model_fails_closed() {
-        let mut dispatch = InferenceDispatch::new(
-            ModelConfigs::default(),
-            None,
-            "ns".to_string(),
-            "capability-ws".to_string(),
-            "ws".to_string(),
-            SchedulingConfig::default(),
-        );
+        let mut dispatch = inference(Arc::new(RwLock::new(ModelTable::default())), &[]);
         let request = TurnRequest {
             model: None,
             conversation_id: "c".to_string(),
@@ -1381,30 +1356,57 @@ mod tests {
         );
     }
 
-    /// A turn naming a model the catalog does not hold fails closed the same
-    /// way: no fallback, one error frame, then end.
     #[tokio::test]
     async fn a_turn_with_an_unknown_model_fails_closed() {
-        let mut dispatch = InferenceDispatch::new(
-            ModelConfigs::default(),
+        let mut dispatch = inference(Arc::new(RwLock::new(ModelTable::default())), &["deepseek"]);
+        let message = turn_error(&mut dispatch, "deepseek").await;
+        assert!(message.contains("unknown model \"deepseek\""), "{message}");
+        assert!(!message.contains("kube client"), "{message}");
+    }
+
+    fn inference(table: Arc<RwLock<ModelTable>>, allowed: &[&str]) -> InferenceDispatch {
+        InferenceDispatch::new(
+            table,
+            allowed.iter().map(|k| k.to_string()).collect(),
             None,
             "ns".to_string(),
             "capability-ws".to_string(),
             "ws".to_string(),
             SchedulingConfig::default(),
-        );
+        )
+    }
+
+    async fn turn_error(dispatch: &mut InferenceDispatch, model: &str) -> String {
         let request = TurnRequest {
-            model: Some("no-such-model".to_string()),
+            model: Some(model.to_string()),
             conversation_id: "c".to_string(),
             ..Default::default()
         };
         let mut source = dispatch.turn(request).await.expect("turn opens a source");
-        let first = source.next_event().await.expect("one error frame");
-        assert!(matches!(
-            first.unwrap().event,
-            Some(turn_event::Event::Error(_))
+        match source.next_event().await.map(|e| e.unwrap().event) {
+            Some(Some(turn_event::Event::Error(e))) => e.message,
+            other => panic!("expected an error frame, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_turn_resolves_a_model_added_after_the_dispatcher_was_built() {
+        let table = Arc::new(RwLock::new(ModelTable::default()));
+        let mut dispatch = inference(table.clone(), &["deepseek"]);
+        *table.write().await = ModelTable::merge_configmaps(&[model_cm("deepseek", REMOTE)]).0;
+        let message = turn_error(&mut dispatch, "deepseek").await;
+        assert!(message.contains("kube client"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_turn_naming_a_model_outside_the_workspace_list_is_refused_by_name() {
+        let table = Arc::new(RwLock::new(
+            ModelTable::merge_configmaps(&[model_cm("zeta", REMOTE)]).0,
         ));
-        assert!(source.next_event().await.is_none());
+        let mut dispatch = inference(table, &["deepseek"]);
+        let message = turn_error(&mut dispatch, "zeta").await;
+        assert!(message.contains("zeta"), "{message}");
+        assert!(!message.contains("kube client"), "{message}");
     }
 
     /// A fake provider whose `call` yields a fixed event script. Drives

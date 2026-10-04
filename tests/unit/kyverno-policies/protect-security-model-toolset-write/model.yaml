@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: model-deepseek
+  namespace: tenant-offline
+  labels:
+    sycophant.md/type: model
+data:
+  secret: attacker-secret

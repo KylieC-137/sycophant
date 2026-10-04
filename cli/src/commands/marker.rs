@@ -1,29 +1,29 @@
-//! Lifecycle markers: the fixed-name ConfigMaps the cluster's reactors act on.
-//! Each is written under the operator's IdP token. A provision marker stamps a
-//! single-shot `provision-<kind>-<handle>` installer Job in sycophant-system.
+//! Lifecycle markers: the ConfigMaps the cluster's reactors act on. Each is
+//! written under the operator's IdP token. A provision marker stamps a
+//! single-shot `provision-<kind>-<uid10>` installer Job in sycophant-system,
+//! and a reap marker an `uninstall-<kind>-<uid10>` Job; each deletes its marker
+//! once it succeeds.
 
 use serde_json::{json, Map, Value};
-use sha2::{Digest, Sha256};
 
 use crate::commands::common::{ok, wait_for};
 use crate::commands::operator::{self, Operator, OperatorKube};
-use crate::runner::{run_output, run_silent, run_stdin};
+use crate::runner::{run_output, run_stdin, run_stdin_bytes};
 
 pub(crate) const SYSTEM_NS: &str = "sycophant-system";
 pub(crate) const TENANT_NS_PREFIX: &str = "tenant-";
-// Fixed-name markers in a tenant namespace are re-written, so get and update too.
-pub(crate) const TENANT_MARKER_VERBS: &str = "create,update,get";
+// A leftover marker is deleted before its replacement is created.
+pub(crate) const MARKER_WRITER_VERBS: &str = "create,delete";
 
-fn sha256_hex(s: &str) -> String {
-    Sha256::digest(s.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+/// The namespace of tenant `name`.
+pub(crate) fn tenant_ns(name: &str) -> String {
+    format!("{TENANT_NS_PREFIX}{name}")
 }
 
-/// The 10-hex handle the reactor names a marker's installer objects with.
-pub(crate) fn handle_of(s: &str) -> String {
-    sha256_hex(s)[..10].to_string()
+/// The first ten hex of a uid, which the reactor names a marker's installer
+/// objects with.
+pub(crate) fn uid10(uid: &str) -> String {
+    uid.replace('-', "").chars().take(10).collect()
 }
 
 /// A marker ConfigMap named `name` in `ns` carrying `data`.
@@ -43,88 +43,126 @@ pub(crate) fn marker(name: &str, ns: &str, data: Map<String, Value>) -> Value {
     })
 }
 
-/// Write `m` as the operator: create it, or replace the fixed-name marker a
-/// prior write left.
-fn write(kube: &OperatorKube, m: &Value) -> Result<(), String> {
-    let name = m["metadata"]["name"].as_str().unwrap_or_default();
-    let ns = m["metadata"]["namespace"].as_str().unwrap_or_default();
+/// Write `manifest` as the operator, clearing any leftover marker of the same
+/// name first, and return the new marker's uid. A rejection fails here.
+fn write(kube: &OperatorKube, manifest: &str) -> Result<String, String> {
     let kc = kube.path();
-    let exists = run_silent(
-        "kubectl",
-        &["--kubeconfig", &kc, "get", "configmap", name, "-n", ns],
-    );
-    let verb = if exists { "replace" } else { "create" };
     run_stdin(
         "kubectl",
-        &["--kubeconfig", &kc, verb, "-f", "-"],
-        &m.to_string(),
+        &[
+            "--kubeconfig",
+            &kc,
+            "delete",
+            "-f",
+            "-",
+            "--ignore-not-found",
+        ],
+        manifest,
     )?;
-    ok(&format!("{name} marker written in {ns}"));
-    Ok(())
+    let uid = run_stdin_bytes(
+        "kubectl",
+        &[
+            "--kubeconfig",
+            &kc,
+            "create",
+            "-f",
+            "-",
+            "-o",
+            "jsonpath={.metadata.uid}",
+        ],
+        manifest,
+    )?;
+    Ok(String::from_utf8_lossy(&uid).trim().to_string())
 }
 
-/// Write a provision marker for tenant namespace `ns` and wait for its
-/// installer Job. The marker's installer objects from a prior run are cleared
-/// first: Kyverno skips a downstream object a different trigger generated and
-/// only updates one this trigger did, so a finished Job would never re-run and
-/// a stale RoleBinding could be reaped mid-install.
-pub(crate) fn provision(
-    op: &Operator,
-    kind: &str,
-    handle: &str,
-    ns: &str,
-    m: &Value,
-) -> Result<(), String> {
-    let job = format!("provision-{kind}-{handle}");
-    for args in clear_installer_args(&job, ns) {
-        run_output(
-            "kubectl",
-            &args.iter().map(String::as_str).collect::<Vec<_>>(),
-        )?;
+/// Done, still running, or failed, from a Job's `.status`.
+pub(crate) fn job_state(status: &Value) -> Result<bool, String> {
+    let failed = status["conditions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|c| c["type"] == "Failed" && c["status"] == "True");
+    if failed {
+        return Err("Job failed; the marker was left in place".into());
     }
-    write(&op.kubeconfig()?, m)?;
-    wait_for(&format!("installer Job {job} succeeded"), 600, || {
-        run_output(
+    Ok(status["succeeded"].as_i64() == Some(1))
+}
+
+/// Apply a `kind` marker manifest as the operator and wait for the installer
+/// Job its uid names.
+pub(crate) fn apply(op: &Operator, kind: &str, manifest: &str) -> Result<(), String> {
+    let uid = write(&op.kubeconfig()?, manifest)?;
+    wait_job(&format!("provision-{kind}-{}", uid10(&uid)))
+}
+
+/// Write the empty `reap-<kind>-<name>` marker into tenant `tenant` as the
+/// operator and wait for the uninstall Job its uid names.
+pub(crate) fn reap(op: &Operator, kind: &str, name: &str, tenant: &str) -> Result<(), String> {
+    let ns = tenant_ns(tenant);
+    let kube = op.kubeconfig()?;
+    let manifest = marker(&format!("reap-{kind}-{name}"), &ns, Map::new()).to_string();
+    let uid = write(&kube, &manifest)?;
+    wait_job(&format!("uninstall-{kind}-{}", uid10(&uid)))
+}
+
+/// Poll Job `job` in sycophant-system until it succeeds or fails.
+fn wait_job(job: &str) -> Result<(), String> {
+    ok(&format!("marker written; waiting on Job {job}"));
+    let mut failure = None;
+    wait_for(&format!("Job {job} finished"), 600, || {
+        let status = run_output(
             "kubectl",
             &[
                 "get",
                 "job",
-                &job,
+                job,
                 "-n",
                 SYSTEM_NS,
                 "-o",
-                "jsonpath={.status.succeeded}",
+                "jsonpath={.status}",
             ],
         )
-        .is_ok_and(|s| s == "1")
-    })
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(Value::Null);
+        match job_state(&status) {
+            Ok(done) => done,
+            Err(e) => {
+                failure = Some(format!("{job}: {e}"));
+                true
+            }
+        }
+    })?;
+    failure.map_or(Ok(()), Err)
 }
 
-fn clear_installer_args(job: &str, ns: &str) -> [Vec<String>; 2] {
-    let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    [
-        v(&[
-            "delete",
-            "job,serviceaccount",
-            job,
-            "-n",
-            SYSTEM_NS,
-            "--ignore-not-found",
-        ]),
-        v(&["delete", "rolebinding", job, "-n", ns, "--ignore-not-found"]),
-    ]
+/// `syco <kind> up -f <file>`: apply a marker file and wait for its installer.
+pub(crate) fn up(kind: &str, file: &str) -> Result<(), String> {
+    let manifest =
+        std::fs::read_to_string(file).map_err(|e| format!("failed to read {file}: {e}"))?;
+    let op = Operator::login(&crate::scope::Scope::global()?.oidc_dir())?;
+    apply(&op, kind, &manifest)
+}
+
+/// `syco <kind> down <name> --tenant <t>`: write the reap marker and wait for
+/// its uninstall.
+pub(crate) fn down(kind: &str, name: &str, tenant: &str) -> Result<(), String> {
+    let op = Operator::login(&crate::scope::Scope::global()?.oidc_dir())?;
+    reap(&op, kind, name, tenant)
 }
 
 /// Write the suspend marker into tenant namespace `ns`. Without a keepalive the
 /// tenant scales to zero and stays; with one the reap deletes it that many days on.
 pub(crate) fn suspend(op: &Operator, ns: &str, keepalive: Option<&str>) -> Result<(), String> {
     let kube = op.kubeconfig()?;
-    operator::grant_marker_writer(ns, TENANT_MARKER_VERBS, &kube.identity)?;
+    operator::grant_marker_writer(ns, MARKER_WRITER_VERBS, &kube.identity)?;
     let mut data = Map::new();
     if let Some(k) = keepalive {
         data.insert("keepalive".into(), k.into());
     }
-    write(&kube, &marker("suspend-tenant", ns, data))
+    write(&kube, &marker("suspend-tenant", ns, data).to_string())?;
+    ok(&format!("suspend-tenant marker written in {ns}"));
+    Ok(())
 }
 
 #[cfg(test)]
@@ -132,36 +170,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn handle_is_first_ten_hex_of_sha256() {
-        assert_eq!(handle_of("acme"), "822b33ad87");
+    fn uid10_strips_dashes_before_truncating() {
+        assert_eq!(uid10("0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"), "0a1b2c3d4e");
     }
 
     #[test]
-    fn clears_installer_job_sa_and_grant() {
-        let [system, tenant] =
-            clear_installer_args("provision-workspace-822b33ad87", "tenant-acme");
+    fn job_state_succeeded_is_done() {
+        assert_eq!(job_state(&json!({"succeeded": 1})), Ok(true));
+    }
+
+    #[test]
+    fn job_state_failed_condition_is_an_error_naming_the_marker() {
+        let err = job_state(&json!({
+            "failed": 1,
+            "conditions": [{"type": "Failed", "status": "True"}],
+        }))
+        .unwrap_err();
+        assert!(err.contains("marker"), "{err}");
+    }
+
+    #[test]
+    fn job_state_running_is_pending() {
+        assert_eq!(job_state(&json!({"active": 1})), Ok(false));
         assert_eq!(
-            system,
-            [
-                "delete",
-                "job,serviceaccount",
-                "provision-workspace-822b33ad87",
-                "-n",
-                SYSTEM_NS,
-                "--ignore-not-found"
-            ]
+            job_state(&json!({"conditions": [{"type": "Failed", "status": "False"}]})),
+            Ok(false)
         );
-        assert_eq!(
-            tenant,
-            [
-                "delete",
-                "rolebinding",
-                "provision-workspace-822b33ad87",
-                "-n",
-                "tenant-acme",
-                "--ignore-not-found"
-            ]
-        );
+        assert_eq!(job_state(&json!({})), Ok(false));
     }
 
     #[test]

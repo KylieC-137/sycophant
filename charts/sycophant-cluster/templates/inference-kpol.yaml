@@ -1,0 +1,13 @@
+{{- /*
+The inference lifecycle: the provision-inference installer and its grant, the
+uninstall-inference reactor on a reap marker, and the reap of both identities'
+ServiceAccounts and RoleBindings.
+*/}}
+{{- if include "sycophant.renderKyverno" . }}
+---
+{{ include "sycophant.provisionInstaller" (dict "ctx" $ "kind" "inference") }}
+---
+{{ include "sycophant.provisionUninstaller" (dict "ctx" $ "kind" "inference") }}
+---
+{{ include "sycophant.provisionReap" (dict "ctx" $ "kind" "inference") }}
+{{- end }}

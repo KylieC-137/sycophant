@@ -33,10 +33,6 @@ matchConstraints:
 # label, which chains into the relay tokenreview and pod-VAP bindings the
 # tenant-rolebinding-generator policy produces, and the restricted Pod Security
 # labels the tenant-namespace-psa-required VAP demands.
-#
-# The keepalive match condition constrains the marker's keepalive to the policy
-# set 0, 30, 60, 90 days; a free-form value does not match and the marker
-# generates nothing.
 apiVersion: policies.kyverno.io/v1
 kind: GeneratingPolicy
 metadata:
@@ -152,9 +148,10 @@ spec:
 # DeletingPolicy acts on. Two policies because a CEL mutating policy resolves
 # one set of targets. The keepalive gate is a target match condition: as a
 # trigger condition it would move the policy into Kyverno's per-policy webhook
-# and the marker would be admitted twice. A free-form keepalive still scales
-# down but stamps no TTL. Targets resolve off the trigger's own namespace,
-# which bounds a marker to its tenant.
+# and the marker would be admitted twice. A marker with no keepalive scales
+# down but stamps no TTL; the suspend marker VAP admits only the policy values.
+# Targets resolve off the trigger's own namespace, which bounds a marker to its
+# tenant.
 apiVersion: policies.kyverno.io/v1
 kind: MutatingPolicy
 metadata:
@@ -201,9 +198,9 @@ spec:
     expression: >-
       resource.get("v1", "namespaces", "", object.metadata.namespace)
   targetMatchConditions:
-    - name: keepalive-is-a-policy-value
+    - name: keepalive-is-set
       expression: >-
-        request.object.?data["keepalive"].orValue("") in ["0", "30", "60", "90"]
+        request.object.?data["keepalive"].orValue("") != ""
   mutations:
     - patchType: ApplyConfiguration
       applyConfiguration:

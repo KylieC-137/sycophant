@@ -77,24 +77,40 @@ harness:
 An agent file (or `AGENTS.md` itself) MAY declare a `model:` field in YAML frontmatter at the top of the file. The **harness** owns the whole path:
 
 1. It parses the frontmatter (delimited by `---` lines, max 4 KiB), selects the `model:` name (or resolves `inherit` from the conversation log), and strips the frontmatter from the system prompt before dispatch — the LLM never sees the YAML.
-2. It resolves the name against its own catalog — a key of the operator-declared `model` configuration — and dials that destination directly: a warm in-cluster inference Service in-process, or a per-call `inference-runtime` Job the harness creates and dials. A name with no matching entry is refused, never defaulted.
+2. It resolves the name against its live model table — one `model-<key>` ConfigMap per inference marker, limited to the workspace's `models` list — and dials that destination directly: a warm in-cluster inference Service in-process, or a per-call `inference-runtime` Job the harness creates and dials. A name with no matching entry is refused, never defaulted.
 
-Example. With two models (`fast` and `smart`):
+Example. With two models (`fast` and `smart`), each applied with `syco inference up -f`:
 
 ```yaml
-model:
-  fast:
-    image: ghcr.io/calebfaruki/inference-runtime:latest
-    format: openai
-    model: deepseek/deepseek-v4-flash
-    baseUrl: https://openrouter.ai/api/v1
-    secret: sycophant-llm-openrouter
-  smart:
-    image: ghcr.io/calebfaruki/inference-runtime:latest
-    format: openai
-    model: deepseek/deepseek-r1
-    baseUrl: https://openrouter.ai/api/v1
-    secret: sycophant-llm-openrouter
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-inference-fast
+  namespace: tenant-foo
+  labels:
+    sycophant.md/lifecycle-marker: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  format: openai
+  model: deepseek/deepseek-v4-flash
+  baseUrl: https://openrouter.ai/api/v1
+  image: ghcr.io/calebfaruki/inference-runtime:latest
+  secret: sycophant-llm-openrouter
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-inference-smart
+  namespace: tenant-foo
+  labels:
+    sycophant.md/lifecycle-marker: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  format: openai
+  model: deepseek/deepseek-r1
+  baseUrl: https://openrouter.ai/api/v1
+  image: ghcr.io/calebfaruki/inference-runtime:latest
+  secret: sycophant-llm-openrouter
 ```
 
 Agent files declare which to use:
@@ -117,7 +133,7 @@ Files without frontmatter dispatch to whichever model the request specified. If 
 
 **Audit story.** The `system_prompt_sha256` field on each assistant log entry is computed on the **pre-strip** value — i.e., the verbatim file contents the orchestrator passed. External auditors run `sha256sum agents/alice.md` on the canonical file and the value matches the log directly. No frontmatter-stripping step needed in the audit tooling.
 
-**Failure mode.** If `model:` references a name with no declared model entry, the call fails fast with a `failed_precondition` error naming the missing model. Operators discover available names under `model` in the chart's values.
+**Failure mode.** If `model:` references a name with no declared model entry, the call fails fast with a `failed_precondition` error naming the missing model. A model the workspace's `models` list does not name is refused the same way.
 
 ## Narrowing advertised tools per agent
 

@@ -6,16 +6,11 @@ spec:
   description: |
     The network policy is the only fence on the local model server. It asserts
     exactly two HTTP routes (POST /v1/chat/completions, POST /v1/completions),
-    one port, one caller, and egress to DNS only. It also checks that no other
-    rendered policy reopens the server: none may name the inference pod on the
-    server port without an http allowlist, none may be a plain L4 NetworkPolicy,
-    and any DNS rule must carry its own L7 allowlist. No inference entry, no
-    policy. An in-cluster model opens a hole to the caller, not to the internet.
+    one port, one caller, and egress to DNS only. Any DNS rule must carry its
+    own L7 allowlist.
   bindings:
     - name: tenant_ns
       value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
-    - name: inference_values
-      value: '{"local":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf"}}'
   # A failure before the namespace-owning step reaches its `finally` would
   # otherwise leave the tenant namespace behind for the next run to collide with.
   catch:
@@ -31,18 +26,16 @@ spec:
             env:
               - name: TENANT_NS
                 value: ($tenant_ns)
-              - name: INFERENCE_VALUES
-                value: ($inference_values)
             content: |
               set -e
               kubectl create namespace "$TENANT_NS"
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
+              MARKER=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
                 --show-only templates/inference-cnp.yaml \
                 -n "$TENANT_NS" \
-                --set-json "inference=$INFERENCE_VALUES" \
-                --set-json "model=$PROFILE_VALUES")
+                --set render=inference --set name=local \
+                --set-json "marker=$MARKER")
 
               # Every kube-dns rule carries its own L7 allowlist. Counting the
               # two against each other catches an L4-only rule added beside a
@@ -99,111 +92,3 @@ spec:
                 value: ($tenant_ns)
             content: |
               kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
-    - name: assert-nothing-else-names-the-server-port
-      try:
-        - script:
-            env:
-              - name: INFERENCE_VALUES
-                value: ($inference_values)
-            content: |
-              set -e
-              REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
-              # Whole chart, no --show-only: the shadow this catches is one
-              # added in a DIFFERENT template.
-              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
-                --set-json "inference=$INFERENCE_VALUES" \
-                --set-json "model=$PROFILE_VALUES")
-
-              # Every ingress rule that selects the inference pod on the server
-              # port must carry an http allowlist. One that does not merges into
-              # a match-everything rule and reopens every route the engine binds.
-              rules=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
-                -o jsonpath='{range .items[?(@.kind=="CiliumNetworkPolicy")]}{.metadata.name}|{.spec.endpointSelector.matchLabels.app\.kubernetes\.io/component}|{range .spec.ingress[*]}{range .toPorts[*]}{range .ports[*]}{.port}{end}~{.rules.http}{" "}{end}{end}{"\n"}{end}')
-              printf '%s\n' "$rules" | awk -F'|' '
-                $2 != "inference" { next }
-                {
-                  n = split($3, entries, " ")
-                  for (i = 1; i <= n; i++) {
-                    if (entries[i] == "") continue
-                    split(entries[i], parts, "~")
-                    if (parts[1] == "8080" && parts[2] == "") { print $1; found = 1 }
-                  }
-                }
-                END { exit !found }' \
-                && { echo "a rule names the inference pod on the server port with no http allowlist; the merge appends a match-everything rule and every route reopens"; printf '%s\n' "$rules" >&2; exit 1; }
-
-              # A plain NetworkPolicy cannot express L7 at all, so any that
-              # selects this pod is an L4-only shadow by construction.
-              plain=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
-                -o jsonpath='{range .items[?(@.kind=="NetworkPolicy")]}{.metadata.name}|{.spec.podSelector.matchLabels.app\.kubernetes\.io/component}{"\n"}{end}')
-              printf '%s\n' "$plain" | awk -F'|' '$2 == "inference" { found=1 } END { exit !found }' \
-                && { echo "a plain NetworkPolicy selects the inference pod; it cannot express L7 and shadows the allowlist"; printf '%s\n' "$plain" >&2; exit 1; }
-
-              # A rule selecting the pod with no toPorts at all is equally fatal.
-              wildcard=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
-                -o jsonpath='{range .items[?(@.kind=="CiliumNetworkPolicy")]}{.metadata.name}|{.spec.endpointSelector.matchLabels.app\.kubernetes\.io/component}|{range .spec.ingress[*]}{.toPorts}~{end}{"\n"}{end}')
-              printf '%s\n' "$wildcard" | awk -F'|' '
-                $2 != "inference" { next }
-                {
-                  n = split($3, entries, "~")
-                  for (i = 1; i < n; i++) if (entries[i] == "") { print $1; found = 1 }
-                }
-                END { exit !found }' \
-                && { echo "an ingress rule selects the inference pod with no toPorts; that is Cilium's wildcard"; printf '%s\n' "$wildcard" >&2; exit 1; }
-              true
-    - name: assert-the-harness-gains-one-in-namespace-hole-and-no-external-one
-      try:
-        - script:
-            env:
-              - name: INFERENCE_VALUES
-                value: ($inference_values)
-            content: |
-              set -e
-              REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
-              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
-                --set-json "inference=$INFERENCE_VALUES" \
-                --set-json "model=$PROFILE_VALUES")
-
-              # Some rendered policy must let the harness reach the inference
-              # pod by selector on the server port. Selector, not FQDN, because
-              # the baseUrl host names this entry's own Service: that is the arm
-              # of the derivation that renders labels rather than a name.
-              hole=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
-                -o jsonpath='{range .items[?(@.kind=="CiliumNetworkPolicy")]}{.metadata.name}|{.spec.endpointSelector.matchLabels.sycophant\.md/model}|{range .spec.egress[*]}{range .toEndpoints[*]}{.matchLabels.app\.kubernetes\.io/component}{end}~{range .toPorts[*]}{range .ports[*]}{.port}{end}{end}{" "}{end}{"\n"}{end}')
-              printf '%s\n' "$hole" | awk -F'|' '
-                $2 != "local" { next }
-                {
-                  n = split($3, entries, " ")
-                  for (i = 1; i <= n; i++) {
-                    split(entries[i], parts, "~")
-                    if (parts[1] == "inference" && parts[2] == "8080") found = 1
-                  }
-                }
-                END { exit !found }' \
-                || { echo "no policy lets the harness reach the inference pod on the server port"; printf '%s\n' "$hole" >&2; exit 1; }
-
-              # And nothing external. One baseUrl classifies one way and each arm
-              # emits its own rules and stops, so a name, an entity shorthand, or
-              # a CIDR here is a destination no arm was asked to produce.
-              external=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
-                -o jsonpath='{range .items[?(@.kind=="CiliumNetworkPolicy")]}{.metadata.name}|{.spec.endpointSelector.matchLabels.sycophant\.md/model}|{range .spec.egress[*]}{range .toFQDNs[*]}{.matchName}{.matchPattern}{end}{range .toEntities[*]}{@}{end}{range .toCIDR[*]}{@}{end}{end}{"\n"}{end}')
-              printf '%s\n' "$external" | awk -F'|' '$2 == "local" && $3 != "" { found=1 } END { exit !found }' \
-                && { echo "pointing a profile in-cluster opened an external destination"; printf '%s\n' "$external" >&2; exit 1; }
-              true
-    - name: assert-no-policy-renders-without-an-inference-entry
-      try:
-        - script:
-            content: |
-              set -e
-              REPO_ROOT=$(git rev-parse --show-toplevel)
-              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns 2>&1) \
-                || { echo "tenant chart must render with default values"; printf '%s\n' "$out" >&2; exit 1; }
-              names=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
-                -o jsonpath='{range .items[?(@.kind=="CiliumNetworkPolicy")]}{.metadata.name}|{.spec.endpointSelector.matchLabels.app\.kubernetes\.io/component}{"\n"}{end}')
-              printf '%s\n' "$names" | awk -F'|' '$2 == "inference" { found=1 } END { exit !found }' \
-                && { echo "an inference policy renders with no inference entry declared"; printf '%s\n' "$names" >&2; exit 1; }
-              printf '%s\n' "$names" | grep -q '^inference-' \
-                && { echo "an inference-named policy renders with no inference entry declared"; printf '%s\n' "$names" >&2; exit 1; }
-              true

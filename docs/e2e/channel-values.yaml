@@ -1,0 +1,23 @@
+# The app channel slice (render=channel), installed host-side by scripts/e2e.sh
+# into the tenant namespace the provision reactor generated.
+namespace:
+  create: false
+
+# In-cluster headscale, ACME off, so it serves plain HTTP on :8080. The
+# operator reaches it by port-forward; the app adapter reaches it at the
+# Service DNS name.
+headscale:
+  enabled: true
+  serverUrl: http://localhost:8080
+  acme:
+    enabled: false
+
+# The app channel. Presence in this map is the enable signal; the entry
+# renders the adapter Deployment, its ServiceAccount, and its egress policy. scripts/e2e.sh mints the pre-auth key
+# into `relay-tsnet-authkey` after headscale is Available.
+#
+# loginServer is set explicitly: the chart has no in-cluster default.
+channels:
+  app:
+    kind: app
+    loginServer: http://headscale:8080

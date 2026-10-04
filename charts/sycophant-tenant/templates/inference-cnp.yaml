@@ -1,6 +1,6 @@
-{{- if eq .Values.render "base" }}
+{{- if eq .Values.render "inference" }}
 {{/*
-The inference pod's own fence. One CiliumNetworkPolicy per `inference` entry,
+The inference pod's own fence. One CiliumNetworkPolicy per local model,
 `inference-<key>`, selecting that pod and carrying every ingress rule for it in
 this single object. No other template may name this pod on the server port: an
 ingress rule without an L7 allowlist merges with this one into a
@@ -21,14 +21,11 @@ name. The :53 rule carries its own L7 `rules.dns` block: unrestricted DNS is a
 destination the pod is not granted. This policy is the only one selecting the
 pod, so this DNS rule cannot shadow the capability-job floor.
 
-The port is parsed from the model's `baseUrl` via `sycophant.modelDestination`
-and appears nowhere as a literal.
+The port is `sycophant.inferenceLocalPort` and appears nowhere as a literal.
 */}}
-{{- $profiles := (default dict .Values.model) -}}
-{{- range $key, $entry := (default dict .Values.inference) }}
-{{- if hasKey $profiles $key }}
-{{- $profile := index $profiles $key }}
-{{- $dest := fromJson (include "sycophant.modelDestination" (dict "model" $profile "key" $key "context" $)) }}
+{{- if hasKey .Values.marker "server.image" }}
+{{- $key := .Values.name }}
+{{- $port := include "sycophant.inferenceLocalPort" . }}
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -56,7 +53,7 @@ spec:
             app.kubernetes.io/part-of: sycophant
       toPorts:
         - ports:
-            - port: {{ $dest.port | quote }}
+            - port: {{ $port | quote }}
               protocol: TCP
           # A non-empty http list makes the port default-deny: a non-matching
           # request gets 403, not the route. Both fields on every rule.
@@ -73,6 +70,5 @@ spec:
     {{- include "sycophant.dnsEgress" . | nindent 4 }}
           rules:
             dns: []
-{{- end }}
 {{- end }}
 {{- end }}

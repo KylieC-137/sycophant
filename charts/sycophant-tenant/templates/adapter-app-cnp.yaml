@@ -1,4 +1,4 @@
-{{- if eq .Values.render "base" }}
+{{- if eq .Values.render "channel" }}
 {{/*
 Fail-closed egress for transport-class adapters.
 

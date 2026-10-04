@@ -1,4 +1,4 @@
-{{- if eq .Values.render "base" }}
+{{- if eq .Values.render "channel" }}
 {{- if .Values.headscale.enabled }}
 {{- $acmeEnabled := and .Values.headscale.acme .Values.headscale.acme.enabled }}
 ---

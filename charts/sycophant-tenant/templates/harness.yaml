@@ -99,10 +99,10 @@ spec:
   template:
     metadata:
       annotations:
-        # Roll the harness on model-catalog or scheduling changes (read once at
-        # boot). The toolset map is watched, so it is absent. The capability
-        # manifest ConfigMap name carries its hash, so a change rolls the pod.
-        checksum/model: {{ include (print $.Template.BasePath "/toolset-config.yaml") $ | sha256sum }}
+        # Roll the harness on scheduling changes (read once at boot). The
+        # toolset and model tables are watched, so they are absent. The
+        # capability manifest ConfigMap name carries its hash, so a change rolls
+        # the pod.
         checksum/scheduling: {{ include (print $.Template.BasePath "/scheduling-cm.yaml") $ | sha256sum }}
       labels:
         {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 8 }}
@@ -202,11 +202,10 @@ spec:
             # serves no pod-facing surface, so a popped tool pod can open no
             # socket back. The toolset map is watched in this namespace.
             - { name: TOOLSET_NAMESPACE,        value: {{ $.Release.Namespace | quote }} }
-            # The harness owns model selection: it resolves the agent
-            # definition's model to a config in this catalog and dials the model
-            # itself. The catalog rides the toolset-config ConfigMap already
-            # mounted below.
-            - { name: HARNESS_MODEL_CONFIG_FILE, value: "/etc/sycophant/toolset-config/model.yaml" }
+            # The model keys this harness may name. Each model's config is its
+            # own watched `model-<key>` ConfigMap; a turn naming a key outside
+            # this list is refused.
+            - { name: MODELS, value: {{ join "," ($ws.models | default list) | quote }} }
             # This workspace's tool catalog: each bound toolset's tools with
             # their argument schemas and resolved grants (Secret name, mount
             # path, egress), read from this workspace's own manifest ConfigMap.
@@ -241,9 +240,6 @@ spec:
             # the pod-hardening-vap hostPath ban holds and the serving container
             # mounts no credential.
             - { name: instructions-{{ $name }}, mountPath: {{ printf "/etc/instructions/%s" $name | quote }}, readOnly: true }
-            - name: toolset-config
-              mountPath: /etc/sycophant/toolset-config
-              readOnly: true
             - name: capability-manifest
               mountPath: /etc/sycophant/capability-manifest
               readOnly: true
@@ -271,9 +267,6 @@ spec:
         # readOnlyRootFilesystem. Never mounted by the serving container.
         - name: instructions-sync-scratch
           emptyDir: {}
-        - name: toolset-config
-          configMap:
-            name: toolset-config
         - name: capability-manifest
           configMap:
             name: {{ include "sycophant.capabilityManifestConfigMapName" (dict "name" $name "workspace" $ws "context" $) }}

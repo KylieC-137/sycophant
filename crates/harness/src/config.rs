@@ -27,10 +27,9 @@ pub(crate) struct HarnessConfig {
     /// middle DNS label the harness dials at
     /// `<call-id>.<capability_service>.<namespace>.svc.cluster.local`.
     pub capability_service: String,
-    /// Operator-authored model catalog, read once at boot from a mounted
-    /// ConfigMap. Maps each agent-definition `model:` value to how the harness
-    /// reaches it — a warm local Service or a per-call inference-runtime job.
-    pub model_config_file: String,
+    /// The model keys this workspace may name, from the comma list `MODELS`.
+    /// A turn naming any other key is refused.
+    pub models: Vec<String>,
 }
 
 impl HarnessConfig {
@@ -69,8 +68,13 @@ impl HarnessConfig {
         let capability_service = std::env::var("CAPABILITY_SERVICE_NAME")
             .map_err(|_| "CAPABILITY_SERVICE_NAME is required")?;
 
-        let model_config_file = std::env::var("HARNESS_MODEL_CONFIG_FILE")
-            .unwrap_or_else(|_| "/etc/sycophant/model-config/models.yaml".to_string());
+        let models = std::env::var("MODELS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(str::to_string)
+            .collect();
 
         Ok(Self {
             relay_gateway_addr,
@@ -82,7 +86,7 @@ impl HarnessConfig {
             capability_manifest_file,
             scheduling_file,
             capability_service,
-            model_config_file,
+            models,
         })
     }
 }

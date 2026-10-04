@@ -7,27 +7,39 @@
 # several charts and baking several charts into the provisioner image.
 
 # Which slice of the chart this release renders.
-#   base      (default) the tenant's shared control plane (relay, adapter,
-#             inference, toolset-config, scheduling, relay-access-grants) plus
-#             every workspace under `workspaces`. What the tenant marker
-#             renders.
+#   base      (default) the tenant's shared control plane (relay, scheduling,
+#             relay-access-grants) plus every workspace under `workspaces`.
+#             What the tenant marker renders, from chart defaults.
 #   workspace only the per-workspace objects for the workspaces under
 #             `workspaces`. A per-workspace marker installs one workspace into an
 #             existing tenant namespace as its own release (release name
 #             workspace-<name>), leaving the base release and sibling workspaces
-#             untouched. The shared objects it references (toolset-config,
-#             scheduling, relay-controller) are owned by the base release and read by
-#             name at runtime.
+#             untouched. The shared objects it references (scheduling,
+#             relay-controller) are owned by the base release and read by name
+#             at runtime.
 #   user      the per-user provision-identity RoleBinding for the identities
 #             under `users`. A per-user marker binds one identity into an existing
 #             tenant namespace as its own release (release name user-<handle>).
 #   toolset   the per-toolset ConfigMaps for the toolsets under `toolsets`. A
 #             per-toolset marker installs one toolset into an existing tenant
 #             namespace as its own release (release name toolset-<name>).
+#   channel   the app channel adapter and headscale under `channels` and
+#             `headscale`, installed host-side as its own release.
+#   inference one model from the marker under `marker`, keyed by `name`: its
+#             `model-<name>` ConfigMap, plus the `inference-<name>` server,
+#             Service and fence when `server.image` is set, or the
+#             `inference-egress-<name>` policy for its job pods when not. A
+#             per-model marker installs it as its own release (release name
+#             inference-<name>).
 #   Workspace and toolset templates are not gated on `render`: user and toolset
 #   also render whatever sits under `workspaces` and `toolsets`. `syco tenant up`
 #   leaves `workspaces` empty in both, and `toolsets` empty in the user marker.
 render: base
+
+# A capability marker's name suffix and flat data, set by the installer. Read
+# only by the slice the marker installs.
+name: ""
+marker: {}
 
 # Bound user identities. The full issuer-prefixed identity subjects exactly
 # as the apiserver presents them, <issuer>#<sub>, one per identity the
@@ -124,8 +136,7 @@ workspaceInit:
 # Those come from the binding workspace's grants under `workspaces` below,
 # so one generic toolset definition serves every workspace. `env` forwards each
 # key into the tool job as an env var, the key verbatim as the name and its
-# scalar as the value. The model catalog is not here: it lives in the `model`
-# section below.
+# scalar as the value. Models are not here: each is its own inference marker.
 #
 # A toolset's tools are authored here under `tools`. Each tool declares its
 # argument schema and the env var each argument reaches the tool job under. The
@@ -174,92 +185,6 @@ workspaceInit:
 #               description: the query
 toolsets: {}
 
-# Model catalog -- the models the harness can dial.
-#
-# A flat map keyed by the value a workspace's AGENTS.md frontmatter
-# (`model: <key>`) names per turn; see docs/harness.md. A turn naming a key
-# that is absent here is refused; there is no default model.
-#
-# Each entry is read from the harness side. An entry with a matching `inference`
-# entry (same key) is a warm in-cluster Service the harness dials directly; an
-# entry with none is a provider reached through a per-call inference-runtime job
-# the harness creates, whose job image is the entry's own `image`.
-#
-# The provider secret lives here and only here: the inference job receives it,
-# the harness does not.
-#
-# Schema (validated by values.schema.json):
-#   <model-name>:
-#     image: <inference image ref>
-#     format: anthropic | openai | gemini
-#     model: <provider's own model id>
-#     baseUrl: <provider API base URL>
-#     secret: <k8s secret name>   (optional; mounted read-only in the inference
-#                                  job; omit when the baseUrl needs no
-#                                  credential)
-#
-# Example:
-#   model:
-#     deepseek-v4-flash:
-#       image: inference-runtime:local
-#       format: openai
-#       model: deepseek/deepseek-v4-flash
-#       baseUrl: https://openrouter.ai/api/v1
-#       secret: openrouter-key
-model: {}
-
-# Inference -- in-cluster model servers.
-#
-# A map keyed by the `model` key each entry serves. The shared key is the only
-# link: an entry makes that model's baseUrl resolve to a local inference Service
-# instead of a vendor. An entry keyed to a name no model carries fails the
-# render.
-#
-# The entry declares no port. The port is the one in the model's baseUrl, and
-# the engine listen flag, container port, Service port and network policies all
-# read it from there.
-#
-# weightsDelivery is an explicit operator choice, never detected: the chart can
-# observe neither the cluster's ImageVolume feature-gate state nor the nodes'
-# containerd runtime version, so it cannot pick the mount path safely. copy
-# works on every supported cluster and is the default.
-#
-# image, weights and weightsPath are required. Every other key carries a
-# reference default applied by the template.
-#
-# Schema (validated by values.schema.json):
-#   <model-key>:                      (must name an existing model key)
-#     image: <engine image ref>
-#     weights: <oci image ref holding the GGUF>
-#     weightsPath: <path inside the weight image>
-#     weightsDelivery: mount | copy   (default copy)
-#     contextBudget: <tokens>         (KV buffer size)
-#     slots: <count>                  (concurrent requests sharing the buffer)
-#     outputCap: <tokens>             (default reply length)
-#     threads: <count>                (pinned, never the engine's auto value)
-#     temp: <float>                   (optional --temp; 0 = greedy/deterministic, omit for engine default)
-#     memory: <K8s memory quantity>   (container limit)
-#     cpu: <CPU count>                (container limit)
-#     singleNodeException: <bool>     (default false)
-#     chatTemplate: <template string> (optional; default empty, GGUF-embedded template used)
-#
-# Example:
-#   inference:
-#     <model-key>:              # must match a model key
-#       image: llama-server:local
-#       weights: <oci image ref holding the GGUF>
-#       weightsPath: /weights/model.gguf
-#       weightsDelivery: copy    # copy | mount, default copy
-#       contextBudget: 65536
-#       slots: 2
-#       outputCap: 4096
-#       threads: 4
-#       memory: 8Gi
-#       cpu: 4
-#       singleNodeException: false
-#       chatTemplate: ""         # optional; default empty, GGUF-embedded template used
-inference: {}
-
 # Workspaces -- one entry per agent workspace.
 # Each workspace materializes a harness Pod (always-on, single
 # container) and binds the toolsets listed under `toolsets:`. All tool
@@ -287,6 +212,9 @@ inference: {}
 #                                          /run/secrets/grant/credential)
 #             egress: <domain>            (optional; one domain, opened by a
 #                                          per-grant CiliumNetworkPolicy)
+#     models:                           (optional, list of model keys this
+#       - <model-key>                    workspace's harness may name; a turn
+#                                        naming any other key is refused)
 #     instructions:                           (operator-set; optional)
 #       prefix: <bucket key prefix>       (optional; overrides the convention
 #                                          <namespace>/<workspace>)

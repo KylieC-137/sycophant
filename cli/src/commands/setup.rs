@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use crate::cli::SetupCmd;
 use crate::commands::build;
 use crate::commands::common::{ok, step, warn};
+use crate::commands::marker::{MARKER_WRITER_VERBS, SYSTEM_NS};
 use crate::commands::operator;
 use crate::runner::{run_output, run_passthrough, run_silent, run_stdin};
 use crate::scope::Scope;
@@ -14,7 +15,6 @@ use crate::scope::Scope;
 pub(crate) const CLUSTER: &str = "sycophant";
 const NODE: &str = "k3d-sycophant-server-0";
 const REGISTRY: &str = "sycophant-registry";
-const SYSTEM_NS: &str = "sycophant-system";
 const APISERVER_AUTH_CONFIG: &str = "/etc/rancher/k3s/auth-config.yaml";
 
 // Optional inputs for non-default clusters (the e2e harness sets them all).
@@ -151,7 +151,7 @@ pub(crate) fn run(_cmd: SetupCmd) -> Result<(), String> {
         install_operator(&scope, need_dex, email, password)?;
     }
     eprintln!(
-        "\n\x1b[1;32m==> Cluster ready.\x1b[0m Next: `syco tenant up --ns tenant-<name> --capacity <quantity>`."
+        "\n\x1b[1;32m==> Cluster ready.\x1b[0m Next: `syco tenant up -f <tenant marker file>`."
     );
     Ok(())
 }
@@ -187,7 +187,7 @@ fn install_operator(
         operator::save_email(&scope.oidc_dir(), &email)?;
     }
     let kube = operator::Operator::with_password(email, password)?.kubeconfig()?;
-    operator::grant_marker_writer(SYSTEM_NS, "create", &kube.identity)?;
+    operator::grant_marker_writer(SYSTEM_NS, MARKER_WRITER_VERBS, &kube.identity)?;
     ok(&format!("{} may write the tenant marker", kube.identity));
     Ok(())
 }

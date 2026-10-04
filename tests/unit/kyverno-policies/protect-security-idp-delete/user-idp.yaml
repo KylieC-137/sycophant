@@ -1,0 +1,8 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: UserInfo
+metadata:
+  name: idp-user
+userInfo:
+  username: https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#alice
+  groups:
+    - system:authenticated

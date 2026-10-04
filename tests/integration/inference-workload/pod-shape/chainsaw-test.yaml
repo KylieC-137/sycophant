@@ -32,8 +32,6 @@ spec:
   bindings:
     - name: tenant_ns
       value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
-    - name: inference_values
-      value: '{"local":{"image":"llama-server:local","weights":"ghcr.io/example/lfm2-q4km:1","weightsPath":"/weights/model.gguf"}}'
   # A failure before the namespace-owning step reaches its `finally` would
   # otherwise leave the tenant namespace behind for the next run to collide with.
   catch:
@@ -49,18 +47,16 @@ spec:
             env:
               - name: TENANT_NS
                 value: ($tenant_ns)
-              - name: INFERENCE_VALUES
-                value: ($inference_values)
             content: |
               set -e
               kubectl create namespace "$TENANT_NS"
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
+              MARKER=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
                 --show-only templates/inference.yaml \
                 -n "$TENANT_NS" \
-                --set-json "inference=$INFERENCE_VALUES" \
-                --set-json "model=$PROFILE_VALUES" \
+                --set render=inference --set name=local \
+                --set-json "marker=$MARKER" \
                 | kubectl apply -f -
     - name: assert-inference-pod-shape
       try:
@@ -107,17 +103,15 @@ spec:
             env:
               - name: TENANT_NS
                 value: ($tenant_ns)
-              - name: INFERENCE_VALUES
-                value: ($inference_values)
             content: |
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              PROFILE_VALUES=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
+              MARKER=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               out=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
                 --show-only templates/inference.yaml \
                 -n "$TENANT_NS" \
-                --set-json "inference=$INFERENCE_VALUES" \
-                --set-json "model=$PROFILE_VALUES")
+                --set render=inference --set name=local \
+                --set-json "marker=$MARKER")
 
               pod=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
                 -o jsonpath='{range .items[?(@.kind=="Deployment")]}{.spec.template.spec.runtimeClassName}|{.spec.template.spec.hostNetwork}|{.spec.template.spec.hostPID}|{.spec.template.spec.hostIPC}|{.spec.template.spec.serviceAccountName}{"\n"}{end}')

@@ -1,0 +1,27 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: protect-security-model-toolset-write
+policies:
+  - ../protect-security-idp-delete/policy.yaml
+resources:
+  - model.yaml
+  - toolset.yaml
+userinfo: ../capability-job-gate-as-harness/user-harness-research.yaml
+variables: ../capability-job-gate-as-harness/values.yaml
+results:
+  - policy: cluster-protect-security
+    kind: ConfigMap
+    result: fail
+    resources:
+      - tenant-offline/model-deepseek
+  - policy: cluster-protect-security
+    kind: ConfigMap
+    result: fail
+    resources:
+      - tenant-offline/toolset-stdlib
+  - policy: cluster-protect-security
+    kind: ConfigMap
+    result: pass
+    resources:
+      - tenant-offline/scratch
