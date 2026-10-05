@@ -3,32 +3,33 @@ The tenant lifecycle: provision (Namespace, quota, installer and its grant),
 suspend, and the reap of the namespace and the installer's identity.
 */}}
 {{- /*
-Fires only on markers inside a tenant namespace. Without the namespace bound a
-suspend marker in sycophant-system would scale the system Deployments to zero.
+Fires only on suspend commands inside a tenant namespace. Without the
+namespace bound a suspend command in sycophant-system would scale the system
+Deployments to zero.
 */}}
-{{- define "sycophant.suspendMarkerMatch" -}}
+{{- define "sycophant.suspendCommandMatch" -}}
 matchConstraints:
   namespaceSelector:
     matchLabels:
       app.kubernetes.io/part-of: sycophant-tenant
   objectSelector:
     matchLabels:
-      {{ include "sycophant.lifecycleMarkerLabel" . }}: "true"
+      {{ include "sycophant.commandLabel" . }}: "true"
       app.kubernetes.io/part-of: sycophant
   resourceRules:
     - apiGroups: [""]
       apiVersions: ["v1"]
       operations: ["CREATE", "UPDATE"]
       resources: ["configmaps"]
-      resourceNames: ["{{ include "sycophant.suspendMarkerName" . }}"]
+      resourceNames: ["{{ include "sycophant.suspendCommandName" . }}"]
 {{- end -}}
 {{- if include "sycophant.renderKyverno" . }}
-# Provision reactor. Fires on lifecycle-marker configmaps created in
+# Provision reactor. Fires on provision command configmaps created in
 # sycophant-system and gates the reserved provision name in its own match block
 # (RBAC ignores resourceNames on create, so the name gate lives here). It
 # materializes the tenant Namespace, a nested ResourceQuota sized from the
-# marker's capacity, and a LimitRange, under Kyverno's own ServiceAccount
-# rights, and generates nothing else. The quota rejects a container that sets no
+# provision command's capacity, and a LimitRange, under Kyverno's own
+# ServiceAccount rights, and generates nothing else. The quota rejects a container that sets no
 # memory, so the LimitRange gives one a 64Mi request and a 256Mi limit. The generated Namespace carries the part-of=sycophant-tenant
 # label, which chains into the relay tokenreview and pod-VAP bindings the
 # tenant-rolebinding-generator policy produces, and the restricted Pod Security
@@ -45,7 +46,7 @@ spec:
       enabled: false
     synchronize:
       enabled: false
-  {{- include "sycophant.provisionMarkerSystemMatchConstraints" . | nindent 2 }}
+  {{- include "sycophant.provisionCommandSystemMatchConstraints" . | nindent 2 }}
   variables:
     - name: tenant
       expression: '"{{ include "sycophant.tenantNsPrefix" . }}" + object.data["tenant"]'
@@ -148,10 +149,10 @@ spec:
 # DeletingPolicy acts on. Two policies because a CEL mutating policy resolves
 # one set of targets. The keepalive gate is a target match condition: as a
 # trigger condition it would move the policy into Kyverno's per-policy webhook
-# and the marker would be admitted twice. A marker with no keepalive scales
-# down but stamps no TTL; the suspend marker VAP admits only the policy values.
-# Targets resolve off the trigger's own namespace, which bounds a marker to its
-# tenant.
+# and the suspend command would be admitted twice. One with no keepalive scales
+# down but stamps no TTL; the suspend command VAP admits only the policy values.
+# Targets resolve off the trigger's own namespace, which bounds a suspend
+# command to its tenant.
 apiVersion: policies.kyverno.io/v1
 kind: MutatingPolicy
 metadata:
@@ -165,7 +166,7 @@ spec:
       enabled: true
     # Defaults true, which suppresses mutateExisting entirely.
     skipBackgroundRequests: false
-  {{- include "sycophant.suspendMarkerMatch" . | nindent 2 }}
+  {{- include "sycophant.suspendCommandMatch" . | nindent 2 }}
   targetMatchConstraints:
     expression: >-
       resource.list("apps/v1", "deployments", object.metadata.namespace)
@@ -188,7 +189,7 @@ spec:
       enabled: true
     # See above.
     skipBackgroundRequests: false
-  {{- include "sycophant.suspendMarkerMatch" . | nindent 2 }}
+  {{- include "sycophant.suspendCommandMatch" . | nindent 2 }}
   variables:
     # Keepalive is in days; the annotation is an absolute RFC3339 instant.
     - name: reapAfter

@@ -28,11 +28,11 @@ render() {
 render base "${CHANNEL[@]}" --set render=base
 render channel "${CHANNEL[@]}" --set render=channel
 render bare --set render=base
-render local --set render=inference --set name=local --set-json "marker=$LOCAL"
-render remote --set render=inference --set name=deepseek --set-json "marker=$REMOTE"
-render toolset --set render=toolset --set name=git --set-json "marker=$TOOLSET"
-render workspace --set render=workspace --set name=one --set-json "marker=$WORKSPACE"
-render wsbase --set render=workspace --set name=one --set-json 'marker={}'
+render local --set render=inference --set name=local --set-json "command=$LOCAL"
+render remote --set render=inference --set name=deepseek --set-json "command=$REMOTE"
+render toolset --set render=toolset --set name=git --set-json "command=$TOOLSET"
+render workspace --set render=workspace --set name=one --set-json "command=$WORKSPACE"
+render wsbase --set render=workspace --set name=one --set-json 'command={}'
 render upgrade --set render=base --is-upgrade
 render channel-off --set render=channel
 render acme "${CHANNEL[@]}" --set render=channel \
@@ -45,7 +45,7 @@ for m in override:'{"server.weightsPath":"/opt/m.gguf","server.contextBudget":"8
          tpl-mount:'{"server.weightsDelivery":"mount","server.chatTemplate":"TEMPLATE-BODY"}' \
          single-true:'{"server.singleNodeException":"true"}' \
          single-false:'{"server.singleNodeException":"false"}'; do
-  render "local-${m%%:*}" --set render=inference --set name=local --set-json "marker=$(printf '%s' "$LOCAL" | jq -c ". + ${m#*:}")"
+  render "local-${m%%:*}" --set render=inference --set name=local --set-json "command=$(printf '%s' "$LOCAL" | jq -c ". + ${m#*:}")"
 done
 
 python3 - "$WORK" "$REMOTE" "$TOOLSET" "$WORKSPACE" <<'PY'
@@ -319,9 +319,9 @@ def local_server(docs):
     labels = pod(get(docs, "Deployment", "inference-local"))["metadata"]["labels"]
     if svc.get("type") != "ClusterIP" or not selects(svc.get("selector"), labels):
         return f"Service {svc} does not select pod labels {labels}"
-check("local marker renders the model server and its model ConfigMap, no provider egress", "local", local_server)
+check("local command renders the model server and its model ConfigMap, no provider egress", "local", local_server)
 
-check("remote marker renders only its model ConfigMap and provider egress", "remote",
+check("remote command renders only its model ConfigMap and provider egress", "remote",
       lambda docs: None if objects(docs) == ["CiliumNetworkPolicy/inference-egress-deepseek", "ConfigMap/model-deepseek"]
       and (model_cm(docs, "deepseek") or {}).get("data") == remote
       else f"got {objects(docs)} {[d.get('data') for d in docs if d['kind'] == 'ConfigMap']}")
@@ -334,28 +334,28 @@ def toolset_cm(docs):
     if (labels.get("sycophant.md/type"), labels.get("app.kubernetes.io/name")) != ("toolset", "git"):
         return f"labels {labels}"
     return None if d.get("data") == toolset else f"data {d.get('data')}"
-check("toolset marker renders only its toolset ConfigMap carrying the marker data", "toolset", toolset_cm)
+check("toolset command renders only its toolset ConfigMap carrying the command data", "toolset", toolset_cm)
 
 def harness_env(docs):
     return {e["name"]: e.get("value") for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "one"
             for c in pod(d)["spec"]["containers"] if c["name"] == "harness" for e in c.get("env") or []}
 
-def marker_env(docs):
+def command_env(docs):
     env = harness_env(docs)
     grants = json.loads(env.get("GRANTS") or "null")
     want = {k: v for k, v in workspace.items() if k.startswith("grant.")}
     got = (env.get("TOOLSETS"), env.get("MODELS"), grants)
     return None if got == ("git,ssh", "a,b", want) else f"TOOLSETS, MODELS, GRANTS {got}"
-check("workspace marker toolsets, models and grants reach its harness env", "workspace", marker_env)
+check("workspace command toolsets, models and grants reach its harness env", "workspace", command_env)
 
 def no_stdlib_default(docs):
     env = harness_env(docs)
     cm = get(docs, "ConfigMap", "capability-grants-one")
     if not get(docs, "Deployment", "one") or env.get("TOOLSETS", "") != "" or cm is None or cm.get("data"):
         return f"TOOLSETS {env.get('TOOLSETS')!r}, capability-grants-one {cm and cm.get('data')}"
-check("a workspace marker naming no toolsets lists none and approves no Secret", "wsbase", no_stdlib_default)
+check("a workspace command naming no toolsets lists none and approves no Secret", "wsbase", no_stdlib_default)
 
-def marker_grant_objects(docs):
+def command_grant_objects(docs):
     cm = get(docs, "ConfigMap", "capability-grants-one") or {"metadata": {}}
     if (cm.get("data"), (cm["metadata"].get("labels") or {}).get("sycophant.md/type")) != ({"demo-key": "ssh"}, "capability-grants"):
         return f"capability-grants-one {cm}"
@@ -369,9 +369,9 @@ def marker_grant_objects(docs):
     names = yaml.safe_load(((relay or {}).get("data") or {}).get("grants.yaml") or "null")
     want = {"one": ["git", {"name": "ssh", "grants": {"demo": {}}}]}
     return None if names == want else f"relay-toolset-grants-one {names}"
-check("a workspace marker grant renders its Secret approval, its egress and its relay grant name", "workspace", marker_grant_objects)
+check("a workspace command grant renders its Secret approval, its egress and its relay grant name", "workspace", command_grant_objects)
 
-def marker_harness_storage(docs):
+def command_harness_storage(docs):
     d = get(docs, "Deployment", "one")
     if d is None:
         return "Deployment/one missing"
@@ -381,7 +381,7 @@ def marker_harness_storage(docs):
     size = (pvc or {}).get("spec", {}).get("resources", {}).get("requests", {}).get("storage")
     if "/tenant-acme/one\"" not in sync or size != "5Gi":
         return f"sync {sync!r}, workspace-data-one {size}"
-check("a workspace marker syncs instructions from <namespace>/<workspace> and sizes its storage", "workspace", marker_harness_storage)
+check("a workspace command syncs instructions from <namespace>/<workspace> and sizes its storage", "workspace", command_harness_storage)
 
 def engine_caps(docs):
     d = get(docs, "Deployment", "inference-local")
@@ -391,7 +391,7 @@ def engine_caps(docs):
     limits = next(c for c in pod(d)["spec"]["containers"] if c["name"] == "server")["resources"]["limits"]
     if got != want or (limits.get("memory"), str(limits.get("cpu"))) != ("4Gi", "2") or "--no-context-shift" not in av:
         return f"argv {av} limits {limits}"
-check("engine caps follow the marker, context shift off and SSE ping pinned", "local-override", engine_caps)
+check("engine caps follow the command, context shift off and SSE ping pinned", "local-override", engine_caps)
 
 FETCH = {"curl", "wget", "oras", "crane", "skopeo", "docker", "git",
          "-hf", "--hf-repo", "-mu", "--model-url", "-dr", "--docker-repo"}

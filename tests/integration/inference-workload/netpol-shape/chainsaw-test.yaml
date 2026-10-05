@@ -30,12 +30,12 @@ spec:
               set -e
               kubectl create namespace "$TENANT_NS"
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              MARKER=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
+              COMMAND=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
                 --show-only templates/inference-cnp.yaml \
                 -n "$TENANT_NS" \
                 --set render=inference --set name=local \
-                --set-json "marker=$MARKER")
+                --set-json "command=$COMMAND")
 
               # Every kube-dns rule carries its own L7 allowlist. Counting the
               # two against each other catches an L4-only rule added beside a

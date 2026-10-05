@@ -1,0 +1,4 @@
+# Binds an issuer-prefixed subject, <issuer>#<sub>, in the tenant.
+user:
+  tenant: e2e-test
+  subject: "https://127.0.0.1:30443/dex#alice"

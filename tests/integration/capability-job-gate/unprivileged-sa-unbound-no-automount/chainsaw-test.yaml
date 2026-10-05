@@ -10,7 +10,7 @@ spec:
     verbs and no bearer token in the pod.
 
     Pure chart-render property. `helm template` alone renders the SA from a
-    workspace marker; no cluster is involved. Asserts the SA sets
+    workspace provision command; no cluster is involved. Asserts the SA sets
     `automountServiceAccountToken: false` and that no RoleBinding names it as a
     subject (absence of any binding is the zero-RBAC proof; the SA holds power
     only through a binding).
@@ -28,7 +28,7 @@ spec:
               tmp=$(mktemp)
               helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                 --set render=workspace --set name=probe \
-                --set-json 'marker={"toolsets":"tool","grant.tool.reader.secret":"approved-secret"}' \
+                --set-json 'command={"toolsets":"tool","grant.tool.reader.secret":"approved-secret"}' \
                 > "$tmp"
               python3 - "$tmp" <<'PY'
               import sys, yaml

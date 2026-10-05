@@ -50,16 +50,16 @@ The Harness spawns the matching capability Job and dials it over a headless per-
 
 ## Toolset Configuration
 
-Each toolset is one marker, `provision-toolset-<name>`, applied with
-`syco toolset up -f <file>` and removed with
+Each toolset is one provision command, `provision-toolset-<name>`, applied with
+`syco toolset up -f <values.yaml>` and removed with
 `syco toolset down <name> --tenant <t>`. Its installer renders one
-`toolset-<name>` ConfigMap whose data is the marker's data. The Harness watches
+`toolset-<name>` ConfigMap whose data is the provision command's data. The Harness watches
 those ConfigMaps and lists the tools of each toolset named in its workspace's
 `toolsets`, with no restart. A toolset whose tool shadows a built-in Harness
 tool, or whose arg maps to `HOME` or a `TOOLSET_` env, is left out with a
 warning naming it.
 
-Marker data is flat strings:
+Provision command data is flat strings:
 
 - `image`, pinned by digest (`<ref>@sha256:<64 hex>`);
 - `keepalive`, `"true"` or `"false"`: sets the Job restart policy and idle-reap;
@@ -68,13 +68,13 @@ Marker data is flat strings:
 - `tool.<name>.description`;
 - `tool.<name>.arg.<arg>.<type|required|env|description>`.
 
-A marker owns no credential and no network hole. Both come from the binding
+A toolset provision command owns no credential and no network hole. Both come from the binding
 workspace's grants, so one toolset serves every workspace.
 
 ### A tool toolset
 
 An image holding one or more tools. Each image directory holds a flat
-`tools.yaml` whose keys are the marker's `tool.*` keys. Every value is a quoted
+`tools.yaml` whose keys are the provision command's `tool.*` keys. Every value is a quoted
 string, including `"true"` and `"false"`. The builder converts it to one-line
 JSON, fails on any non-string value, and stamps it on the image as the
 `md.sycophant.tools` label:
@@ -85,22 +85,11 @@ label=$(yq -o=json -I=0 tools.yaml \
 docker build --label md.sycophant.tools="$label" ...
 ```
 
-The operator copies the label into the marker:
-
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: provision-toolset-git-ops
-  namespace: tenant-acme
-  labels:
-    sycophant.md/lifecycle-marker: "true"
-    app.kubernetes.io/part-of: sycophant
-data:
-  image: ghcr.io/calebfaruki/toolset-git@sha256:...
-  keepalive: "false"
-  tool.git-status.description: Show the working tree status in the workspace.
-```
+Each toolset's values sit beside its image, for example
+[`examples/toolsets/ssh-credentials/values.yaml`](../examples/toolsets/ssh-credentials/values.yaml).
+The operator passes the image digest and the label, as `toolset.image` and
+`toolset.tools`, in a second values file to `syco toolset up -f` (see
+[`examples/README.md`](../examples/README.md)).
 
 The Harness generates each tool's JSON Schema `parameters` from its args and
 validates the model's input against them before dispatch.
@@ -109,20 +98,15 @@ The workspace PVC is always mounted RW at `/workspace`.
 
 ### Grants
 
-A workspace marker lists the toolsets it binds in `toolsets` and carries its
-grants as `grant.<toolset>.<grant>.<field>` keys. A grant is one
+A workspace provision command lists the toolsets it binds in `toolsets` and carries its
+grants as `grant.<toolset>.<grant>.<field>` keys, rendered from the workspace
+values' nested `grants`. A grant is one
 operator-approved credential scoped to that (workspace, toolset) pair: it names
 a Kubernetes Secret, and optionally a `path` where the credential file lands and
 one `egress` domain. A grant may name only a toolset in `toolsets`.
 
-```yaml
-data:
-  toolsets: stdlib,git-ops
-  grant.git-ops.deploy-key.secret: research-git-ssh-key
-  grant.git-ops.deploy-key.path: /home/agent/.ssh/id_ed25519
-  grant.git-ops.github.secret: research-github-token
-  grant.git-ops.github.egress: github.com
-```
+[`examples/workspaces/hello-world.yaml`](../examples/workspaces/hello-world.yaml)
+carries one secret-only grant.
 
 A tool call selects one grant by name from those grants; a name outside it is
 refused and no Job is created.
@@ -155,37 +139,24 @@ namespace default-deny egress floor.
 ### The model configuration
 
 The turn destinations are not toolsets. Each model is its own inference
-marker, `provision-inference-<key>`, which renders one `model-<key>` ConfigMap
+provision command, `provision-inference-<key>`, which renders one `model-<key>` ConfigMap
 the harness watches. A key is the turn's `model` value; a key absent from the
 table or from the workspace's `models` list is rejected, never defaulted. Each
-marker pins one provider endpoint and its credential.
-
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: provision-inference-deepseek-v4-flash
-  namespace: tenant-foo
-  labels:
-    sycophant.md/lifecycle-marker: "true"
-    app.kubernetes.io/part-of: sycophant
-data:
-  format: openai
-  model: deepseek/deepseek-v4-flash
-  baseUrl: https://openrouter.ai/api/v1
-  image: ghcr.io/calebfaruki/inference-runtime:latest
-  secret: sycophant-llm-openrouter
-```
+provision command pins one provider endpoint and its credential;
+[`docs/secrets.md`](secrets.md#recipe-1-kubectl-create-secret) shows a remote
+one.
 
 The Secret holds one value: the API key. Kubelet projects it into the inference
 job at the declared path; the Harness never reads it. See
 [`docs/secrets.md`](secrets.md) for backend recipes.
 
 `secret` is optional. A remote model whose `baseUrl` points inside the cluster
-authenticates nobody, so its marker omits `secret` and the inference job spawns with no
-credential volume and nothing registered to scrub. A local model (a marker with
-`server.image`) carries no `baseUrl` and takes no job at all: the harness dials
-its warm `inference-<key>` Service directly on the fixed port 8080.
+authenticates nobody, so its provision command omits `secret` and the inference job spawns with no
+credential volume and nothing registered to scrub. A local model (inference
+values with a `server` block,
+[`examples/inference/local.yaml`](../examples/inference/local.yaml))
+carries no `baseUrl` and takes no job at all: the harness dials its warm
+`inference-<key>` Service directly on the fixed port 8080.
 
 ## The Model Call
 

@@ -6,7 +6,7 @@ description: |
   ClusterRoles, and the Kyverno generators that wire each tenant
   namespace into the framework's security model.
 
-  After this is installed, an admitted provision marker triggers a
+  After this is installed, an admitted provision command triggers a
   scoped, ephemeral Job that runs the separate `sycophant-tenant` chart
   into the new tenant namespace.
 version: 0.1.0

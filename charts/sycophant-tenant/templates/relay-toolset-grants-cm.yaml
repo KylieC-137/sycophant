@@ -12,10 +12,10 @@ every value). Carrying the full grants would put every workspace's Secret
 names, mount paths, and egress domains inside the least protected pod in the
 namespace for no gain.
 
-Rendered from the same workspace marker grant keys the harness `GRANTS` env
-carries, so this ConfigMap cannot name a grant the workspace does not bind. A
-toolset item is a bare name, or `name` plus its grants, each collapsed to
-`<grant>: {}`.
+Rendered from the same workspace provision command grant keys the harness
+`GRANTS` env carries, so this ConfigMap cannot name a grant the workspace does
+not bind. A toolset item is a bare name, or `name` plus its grants, each
+collapsed to `<grant>: {}`.
 
 Carries `sycophant.md/type: relay-toolset-grants`, which the
 `cluster-protect-security` policy selects on: in-namespace workloads, the relay
@@ -23,8 +23,8 @@ included, cannot rewrite the grant names the gateway serves.
 */}}
 {{- if eq .Values.render "workspace" }}
 {{- $name := .Values.name }}
-{{- $m := .Values.marker }}
-{{- $grants := include "sycophant.markerGrants" $m | fromYaml }}
+{{- $m := .Values.command }}
+{{- $grants := include "sycophant.commandGrants" $m | fromYaml }}
 ---
 apiVersion: v1
 kind: ConfigMap

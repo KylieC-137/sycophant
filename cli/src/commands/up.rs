@@ -1,44 +1,55 @@
-use std::fs;
-
-use serde_json::{Map, Value as Json};
 use serde_yaml::Value;
 
+use crate::cli::Values;
+
+use crate::commands::command::{self, tenant_ns, tenant_token, COMMAND_WRITER_VERBS};
 use crate::commands::common::{step, warn};
-use crate::commands::marker::{self, tenant_ns, MARKER_WRITER_VERBS, SYSTEM_NS, TENANT_NS_PREFIX};
 use crate::commands::operator::{self, Operator};
 use crate::runner::{run_output, run_silent};
 use crate::scope::Scope;
 
-/// `syco tenant up -f <file>`: apply the tenant marker file. Its installer runs
-/// `helm upgrade --install`, so re-running it upgrades the tenant in place.
-pub(crate) fn run(file: &str) -> Result<(), String> {
-    let manifest = fs::read_to_string(file).map_err(|e| format!("failed to read {file}: {e}"))?;
+/// `syco tenant up -f <values.yaml>`: render the tenant provision command from
+/// the values and apply it. Its installer runs `helm upgrade --install`, so
+/// re-running it upgrades the tenant in place.
+pub(crate) fn run(values: &Values) -> Result<(), String> {
+    let args = values.helm_args();
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let manifest = command::render("tenant-provision", &args)?;
     let (token, capacity) = tenant_fields(&manifest)?;
     let scope = Scope::for_tenant(&tenant_ns(&token))?;
     let op = Operator::login(&scope.oidc_dir())?;
     provision(&scope, &op, &manifest, &capacity)
 }
 
-/// The `tenant` and `capacity` a tenant marker file carries.
+/// The `tenant` and `capacity` a rendered tenant provision command carries.
 fn tenant_fields(manifest: &str) -> Result<(String, String), String> {
     let m: Value =
-        serde_yaml::from_str(manifest).map_err(|e| format!("marker file is not YAML: {e}"))?;
+        serde_yaml::from_str(manifest).map_err(|e| format!("rendered command is not YAML: {e}"))?;
     let field = |k: &str| m["data"][k].as_str().unwrap_or_default().to_string();
     let token = field("tenant");
     if token.is_empty() {
-        return Err("the tenant marker file carries no data.tenant".into());
+        return Err("the tenant provision command carries no tenant; set tenant.name".into());
     }
     Ok((token, field("capacity")))
 }
 
-/// The tenant marker for the tenant in scope.
+/// The tenant provision command for the tenant in scope, rendered from its name
+/// and capacity.
 pub(crate) fn tenant_manifest(scope: &Scope, capacity: &str) -> Result<String, String> {
     let ns = scope.release_name()?;
-    Ok(tenant_marker(tenant_token(&ns)?, capacity).to_string())
+    command::render(
+        "tenant-provision",
+        &[
+            "--set-string",
+            &format!("tenant.name={}", tenant_token(&ns)?),
+            "--set-string",
+            &format!("tenant.capacity={capacity}"),
+        ],
+    )
 }
 
-/// Apply the tenant marker for the tenant in scope, then let the operator write
-/// markers in its namespace.
+/// Apply the tenant provision command for the tenant in scope, then let the
+/// operator write commands in its namespace.
 pub(crate) fn provision(
     scope: &Scope,
     op: &Operator,
@@ -52,9 +63,9 @@ pub(crate) fn provision(
     }
 
     step(&format!("Provisioning tenant {ns}"));
-    marker::apply(op, "tenant", manifest)?;
+    command::apply(op, "tenant", manifest)?;
 
-    operator::grant_marker_writer(&ns, MARKER_WRITER_VERBS, &op.kubeconfig()?.identity)
+    operator::grant_command_writer(&ns, COMMAND_WRITER_VERBS, &op.kubeconfig()?.identity)
 }
 
 /// The capacity ResourceQuota is generated once with the namespace; a
@@ -80,34 +91,12 @@ fn warn_capacity_unchanged(ns: &str, capacity: &str) {
     }
 }
 
-/// The bare tenant token: the namespace minus the `tenant-` prefix the
-/// provision reactor composes.
-fn tenant_token(ns: &str) -> Result<&str, String> {
-    ns.strip_prefix(TENANT_NS_PREFIX)
-        .filter(|t| !t.is_empty())
-        .ok_or_else(|| format!("tenant namespace must be {TENANT_NS_PREFIX}<name>, got {ns}"))
-}
-
-fn tenant_marker(token: &str, capacity: &str) -> Json {
-    let mut data = Map::new();
-    data.insert("tenant".into(), token.into());
-    data.insert("capacity".into(), capacity.into());
-    marker::marker("provision-tenant", SYSTEM_NS, data)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn tenant_token_strips_prefix() {
-        assert_eq!(tenant_token("tenant-acme").unwrap(), "acme");
-        assert!(tenant_token("acme").is_err());
-        assert!(tenant_token("tenant-").is_err());
-    }
-
-    #[test]
-    fn tenant_fields_read_from_the_marker_file() {
+    fn tenant_fields_read_from_the_rendered_command() {
         let f = "kind: ConfigMap\ndata: {tenant: acme, capacity: 2Gi}\n";
         assert_eq!(
             tenant_fields(f).unwrap(),

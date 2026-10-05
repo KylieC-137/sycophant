@@ -17,17 +17,17 @@ true
 {{- end -}}
 
 {{/*
-Lifecycle marker contract: a ConfigMap carrying the label below, whose reserved
-name selects the reactor. The tenant prefix keeps every provisioned namespace
-out of the reserved ones.
+Command contract: a provision, reap or suspend command is a ConfigMap carrying
+the label below, whose reserved name selects the reactor. The tenant prefix
+keeps every provisioned namespace out of the reserved ones.
 */}}
-{{- define "sycophant.lifecycleMarkerLabel" -}}sycophant.md/lifecycle-marker{{- end -}}
-{{- define "sycophant.provisionMarkerName" -}}provision-tenant{{- end -}}
-{{- define "sycophant.workspaceProvisionMarkerName" -}}provision-workspace{{- end -}}
-{{- define "sycophant.userProvisionMarkerName" -}}provision-user{{- end -}}
-{{- define "sycophant.toolsetProvisionMarkerName" -}}provision-toolset{{- end -}}
-{{- define "sycophant.inferenceProvisionMarkerName" -}}provision-inference{{- end -}}
-{{- define "sycophant.suspendMarkerName" -}}suspend-tenant{{- end -}}
+{{- define "sycophant.commandLabel" -}}sycophant.md/command{{- end -}}
+{{- define "sycophant.provisionCommandName" -}}provision-tenant{{- end -}}
+{{- define "sycophant.workspaceProvisionCommandName" -}}provision-workspace{{- end -}}
+{{- define "sycophant.userProvisionCommandName" -}}provision-user{{- end -}}
+{{- define "sycophant.toolsetProvisionCommandName" -}}provision-toolset{{- end -}}
+{{- define "sycophant.inferenceProvisionCommandName" -}}provision-inference{{- end -}}
+{{- define "sycophant.suspendCommandName" -}}suspend-tenant{{- end -}}
 {{- define "sycophant.reapAfterAnnotation" -}}sycophant.md/reap-after{{- end -}}
 {{- define "sycophant.tenantNsPrefix" -}}tenant-{{- end -}}
 
@@ -62,21 +62,21 @@ variables:
     expression: "variables.containers + variables.initContainers"
 {{- end -}}
 
-{{/* Match for the reactors on the tenant marker in sycophant-system. */}}
-{{- define "sycophant.provisionMarkerSystemMatchConstraints" -}}
+{{/* Match for the reactors on the tenant provision command in sycophant-system. */}}
+{{- define "sycophant.provisionCommandSystemMatchConstraints" -}}
 matchConstraints:
   namespaceSelector:
     matchLabels:
       kubernetes.io/metadata.name: sycophant-system
   objectSelector:
     matchLabels:
-      {{ include "sycophant.lifecycleMarkerLabel" . }}: "true"
+      {{ include "sycophant.commandLabel" . }}: "true"
   resourceRules:
     - apiGroups: [""]
       apiVersions: ["v1"]
       operations: ["CREATE", "UPDATE"]
       resources: ["configmaps"]
-      resourceNames: ["{{ include "sycophant.provisionMarkerName" . }}"]
+      resourceNames: ["{{ include "sycophant.provisionCommandName" . }}"]
 {{- end -}}
 
 {{- define "sycophant.labels" -}}
@@ -100,7 +100,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "sycophant.idpUserPrefix" -}}{{ .Values.idp.issuer }}#{{- end -}}
 
 {{- /*
-One single-shot install per lifecycle marker. The stack policy stamps a
+One single-shot install per provision command. The stack policy stamps a
 ServiceAccount and a Job in sycophant-system; the Job runs `helm upgrade
 --install` against the tenant chart baked into the installer image, presenting
 the ServiceAccount's projected token. The ServiceAccount lives outside the
@@ -110,49 +110,50 @@ protections and needs no exemption from them.
 The grant policy binds that ServiceAccount to ClusterRole/provision-write in the
 tenant namespace, so RBAC bounds its reach to that one namespace. It is a
 separate policy because its target namespace may not exist yet (the tenant
-marker's sibling reactor creates it), and its retry must never re-apply the Job,
-whose spec.selector is immutable. Both the ServiceAccount and the RoleBinding
-carry a reap-after annotation the scheduled reap sweeps.
+provision command's sibling reactor creates it), and its retry must never
+re-apply the Job, whose spec.selector is immutable. Both the ServiceAccount and
+the RoleBinding carry a reap-after annotation the scheduled reap sweeps.
 
-Every generated object is named `provision-<kind>-<uid10>`, from the marker's
-uid, so a re-created marker never collides with an earlier run's Job, even
-within its TTL.
+Every generated object is named `provision-<kind>-<uid10>`, from the provision
+command's uid, so a re-created command never collides with an earlier run's
+Job, even within its TTL.
 
-The tenant marker lives in sycophant-system and installs the base release from
-chart defaults. Every other marker is `provision-<kind>-<name>` in the tenant
-namespace it targets, so the tenant is the marker's own namespace, and installs
-one `<kind>-<name>` release with render=<kind>. render and
-namespace.create=false are forced on the command line so a marker cannot change
-the slice it renders or manage the namespace. Only the tenant install takes
-ownership of existing objects; a capability install refuses a name another
-release holds.
+The tenant provision command lives in sycophant-system and installs the base
+release from chart defaults. Every other provision command is
+`provision-<kind>-<name>` in the tenant namespace it targets, so the tenant is
+the command's own namespace, and installs one `<kind>-<name>` release with
+render=<kind>. render and namespace.create=false are forced on the command line
+so a provision command cannot change the slice it renders or manage the
+namespace. Only the tenant install takes ownership of existing objects; a
+capability install refuses a name another release holds.
 
-Markers are one-shot: once helm succeeds the Job deletes its marker. A failed
-install exits first and leaves the marker in place. The tenant install deletes
-its marker through Role/provision-tenant-marker in sycophant-system.
+Provision commands are one-shot: once helm succeeds the Job deletes its
+command. A failed install exits first and leaves the command in place. The
+tenant install deletes its command through Role/provision-tenant-command in
+sycophant-system.
 */ -}}
 {{- define "sycophant.provisionInstallerMatch" -}}
 {{- $ctx := .ctx -}}
 {{- if eq .kind "tenant" -}}
-{{ include "sycophant.provisionMarkerSystemMatchConstraints" $ctx }}
+{{ include "sycophant.provisionCommandSystemMatchConstraints" $ctx }}
 {{- else -}}
-{{- $prefix := .prefix | default (include (printf "sycophant.%sProvisionMarkerName" .kind) $ctx) -}}
+{{- $prefix := .prefix | default (include (printf "sycophant.%sProvisionCommandName" .kind) $ctx) -}}
 matchConstraints:
   namespaceSelector:
     matchLabels:
       app.kubernetes.io/part-of: sycophant-tenant
   objectSelector:
     matchLabels:
-      {{ include "sycophant.lifecycleMarkerLabel" $ctx }}: "true"
+      {{ include "sycophant.commandLabel" $ctx }}: "true"
   resourceRules:
     - apiGroups: [""]
       apiVersions: ["v1"]
       operations: {{ .operations | default (list "CREATE" "UPDATE") | toJson }}
       resources: ["configmaps"]
-# resourceNames cannot hold a prefix, so the apiserver drops a foreign marker
-# here before Kyverno is called.
+# resourceNames cannot hold a prefix, so the apiserver drops a foreign provision
+# command here before Kyverno is called.
 matchConditions:
-  - name: marker-name-is-a-{{ .prefix | default .kind }}-marker
+  - name: command-name-is-a-{{ .prefix | default .kind }}-command
     expression: >-
       object.metadata.name.startsWith('{{ $prefix }}-')
 {{- end }}
@@ -237,7 +238,7 @@ spec:
               value: configmap
             - name: TENANT
               value: (( variables.tenant ))
-            - name: MARKER
+            - name: COMMAND
               value: (( object.metadata.name ))
           volumeMounts:
             - name: tmp
@@ -277,7 +278,7 @@ spec:
 {{- $kind := .kind -}}
 set -eu
 {{- if eq $kind "tenant" }}
-# The sibling reactor creates the Namespace from the same marker.
+# The sibling reactor creates the Namespace from the same provision command.
 for i in $(seq 1 60); do
   kubectl get namespace "$TENANT" >/dev/null 2>&1 && break
   sleep 2
@@ -288,17 +289,18 @@ helm upgrade --install "$TENANT" {{ $ctx.Values.provisioner.chartPath }} \
   --set namespace.create=false \
   --take-ownership \
   --timeout 10m
-kubectl delete configmap "$MARKER" -n sycophant-system
+kubectl delete configmap "$COMMAND" -n sycophant-system
 {{- else }}
-NAME="${MARKER#provision-{{ $kind }}-}"
+NAME="${COMMAND#provision-{{ $kind }}-}"
 {{- if eq $kind "user" }}
 # Quoted so the subject's `:` and `#` stay one scalar.
-SUBJECT="$(kubectl get configmap "$MARKER" \
+SUBJECT="$(kubectl get configmap "$COMMAND" \
   -n "$TENANT" -o "jsonpath={.data.user}")"
 printf 'users:\n  - "%s"\n' "$SUBJECT" > /tmp/values.yaml
 {{- else }}
-# The marker's flat data rides into the chart verbatim as .Values.marker.
-printf '{"marker":%s}' "$(kubectl get configmap "$MARKER" \
+# The provision command's flat data rides into the chart verbatim as
+# .Values.command.
+printf '{"command":%s}' "$(kubectl get configmap "$COMMAND" \
   -n "$TENANT" -o 'jsonpath={.data}')" > /tmp/values.yaml
 {{- end }}
 helm upgrade --install "{{ $kind }}-$NAME" {{ $ctx.Values.provisioner.chartPath }} \
@@ -308,7 +310,7 @@ helm upgrade --install "{{ $kind }}-$NAME" {{ $ctx.Values.provisioner.chartPath 
   --set namespace.create=false \
   -f /tmp/values.yaml \
   --timeout 10m
-kubectl delete configmap "$MARKER" -n "$TENANT"
+kubectl delete configmap "$COMMAND" -n "$TENANT"
 {{- end }}
 {{- end -}}
 
@@ -355,7 +357,7 @@ spec:
           {{- include "sycophant.provisionerBinding" (dict "ctx" $ctx "name" $component "namespace" "(( variables.tenant ))" "kind" "ClusterRole" "role" "provision-write") | nindent 10 }}
           {{- if eq $kind "tenant" }}
           ---
-          {{- include "sycophant.provisionerBinding" (dict "ctx" $ctx "name" $component "namespace" "sycophant-system" "kind" "Role" "role" "provision-tenant-marker") | nindent 10 }}
+          {{- include "sycophant.provisionerBinding" (dict "ctx" $ctx "name" $component "namespace" "sycophant-system" "kind" "Role" "role" "provision-tenant-command") | nindent 10 }}
           {{- end }}
 {{- end -}}
 
@@ -384,18 +386,18 @@ roleRef:
 {{- /* The uninstall script for one kind; see sycophant.provisionUninstaller. */ -}}
 {{- define "sycophant.provisionUninstallScript" -}}
 set -eu
-NAME="${MARKER#reap-{{ .kind }}-}"
+NAME="${COMMAND#reap-{{ .kind }}-}"
 helm uninstall "{{ .kind }}-$NAME" -n "$TENANT" --timeout 10m
-kubectl delete configmap "$MARKER" -n "$TENANT"
+kubectl delete configmap "$COMMAND" -n "$TENANT"
 {{- end -}}
 
 {{- /*
-One single-shot uninstall per reap marker `reap-<kind>-<name>` in a tenant
+One single-shot uninstall per reap command `reap-<kind>-<name>` in a tenant
 namespace. The ServiceAccount and Job `uninstall-<kind>-<uid10>` live in
 sycophant-system; the RoleBinding of the same name binds them to
-ClusterRole/provision-write in the marker's namespace, which exists already.
-The Job runs `helm uninstall <kind>-<name>` and then deletes the reap marker; a
-failed uninstall exits first and leaves the marker in place. The ServiceAccount
+ClusterRole/provision-write in the reap command's namespace, which exists already.
+The Job runs `helm uninstall <kind>-<name>` and then deletes the reap command; a
+failed uninstall exits first and leaves the command in place. The ServiceAccount
 and RoleBinding carry component `uninstall-<kind>` and the reap-after
 annotation, so `reap-<kind>` sweeps them.
 */ -}}

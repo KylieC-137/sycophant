@@ -30,7 +30,7 @@ Trust contract:
 
 ### How it's wired
 
-Instructions content is workspace-marker driven, not a custom resource. The chart renders, per workspace from its workspace marker (no `lookup`), an `emptyDir` mounted read-only onto that workspace's harness at `/etc/instructions/<workspace>` plus an init container that fills it.
+Instructions content is driven by the workspace provision command, not a custom resource. The chart renders, per workspace from its workspace provision command (no `lookup`), an `emptyDir` mounted read-only onto that workspace's harness at `/etc/instructions/<workspace>` plus an init container that fills it.
 
 For each workspace the harness pod runs an `instructions-sync` init container that pulls `<harness.instructions.bucket>/<namespace>/<workspace>` from `<harness.instructions.endpoint>` into the `emptyDir`, using the read-only credential named by `harness.instructions.credentialName` (a Secret the operator provides). The init container mounts the credential; the serving container does not. `emptyDir` (not `hostPath`, not a PV) keeps the tenant namespace PSA `restricted` and re-syncs a fresh tree on every pod start.
 
@@ -38,7 +38,7 @@ For each workspace the harness pod runs an `instructions-sync` init container th
 <bucket>/<namespace>/<workspace>  →  init sync  →  emptyDir /etc/instructions/<ws>  →  agent
 ```
 
-Because delivery renders per-workspace from the marker with no `lookup`, the chart renders identically under `helm install` and a GitOps `helm template | kubectl apply` pipeline — neither strips a instructions.
+Because delivery renders per-workspace from the provision command with no `lookup`, the chart renders identically under `helm install` and a GitOps `helm template | kubectl apply` pipeline — neither strips a instructions.
 
 **SeaweedFS ingress lock.** The object store is a shared cluster component (`charts/sycophant-objectstore`, installed once in `sycophant-system`), so it owns its own network posture. Its `objectstore` CiliumNetworkPolicy admits only harness pods (`app.kubernetes.io/component: harness`), in any tenant namespace via a `k8s:io.kubernetes.pod.namespace` Exists match, to the store's S3 API port (8333), and denies every other pod. It selects the store pod by `app.kubernetes.io/component: objectstorage` + `app.kubernetes.io/part-of: sycophant`. Its egress is default-deny with cluster DNS always open; with no `oidc.issuer` the store dials nothing external, and with an issuer set it gains exactly one external peer, the configured issuer, for discovery and JWKS. The tenant chart's harness egress policy is the tenant-side half: it lets the init container reach the store cross-namespace by component label plus the store namespace read from `harness.instructions.endpoint`, and adds that host to the DNS L7 allowlist.
 
@@ -77,54 +77,20 @@ harness:
 An agent file (or `AGENTS.md` itself) MAY declare a `model:` field in YAML frontmatter at the top of the file. The **harness** owns the whole path:
 
 1. It parses the frontmatter (delimited by `---` lines, max 4 KiB), selects the `model:` name (or resolves `inherit` from the conversation log), and strips the frontmatter from the system prompt before dispatch — the LLM never sees the YAML.
-2. It resolves the name against its live model table — one `model-<key>` ConfigMap per inference marker, limited to the workspace's `models` list — and dials that destination directly: a warm in-cluster inference Service in-process, or a per-call `inference-runtime` Job the harness creates and dials. A name with no matching entry is refused, never defaulted.
+2. It resolves the name against its live model table — one `model-<key>` ConfigMap per inference provision command, limited to the workspace's `models` list — and dials that destination directly: a warm in-cluster inference Service in-process, or a per-call `inference-runtime` Job the harness creates and dials. A name with no matching entry is refused, never defaulted.
 
-Example. With two models (`fast` and `smart`), each applied with `syco inference up -f`:
-
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: provision-inference-fast
-  namespace: tenant-foo
-  labels:
-    sycophant.md/lifecycle-marker: "true"
-    app.kubernetes.io/part-of: sycophant
-data:
-  format: openai
-  model: deepseek/deepseek-v4-flash
-  baseUrl: https://openrouter.ai/api/v1
-  image: ghcr.io/calebfaruki/inference-runtime:latest
-  secret: sycophant-llm-openrouter
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: provision-inference-smart
-  namespace: tenant-foo
-  labels:
-    sycophant.md/lifecycle-marker: "true"
-    app.kubernetes.io/part-of: sycophant
-data:
-  format: openai
-  model: deepseek/deepseek-r1
-  baseUrl: https://openrouter.ai/api/v1
-  image: ghcr.io/calebfaruki/inference-runtime:latest
-  secret: sycophant-llm-openrouter
-```
-
-Agent files declare which to use:
+Example. With the two models in [`examples/inference/`](../examples/inference/) installed, `local` and `deepseek-v4-flash`, each with `syco inference up -f <file>`, agent files declare which to use:
 
 ```markdown
 ---
-model: smart
+model: local
 ---
 You are Alice. You are warm and creative...
 ```
 
 ```markdown
 ---
-model: fast
+model: deepseek-v4-flash
 ---
 You are Bob. You are dry and technical...
 ```
@@ -141,7 +107,7 @@ An agent file MAY declare a `tools:` list in the same YAML frontmatter as `model
 
 ```markdown
 ---
-model: fast
+model: deepseek-v4-flash
 tools: [Shell, Read, Write]
 ---
 You are Bob...

@@ -1,6 +1,6 @@
 {{- if eq .Values.render "inference" }}
 {{- /*
-One model's ConfigMap, `model-<name>`: the inference marker's flat data
+One model's ConfigMap, `model-<name>`: the inference provision command's flat data
 verbatim. The harness watches the `sycophant.md/type: model` label set and keys
 each model by its `app.kubernetes.io/name`, so a change takes effect on the next
 turn without a restart.
@@ -15,7 +15,7 @@ metadata:
     sycophant.md/type: model
     app.kubernetes.io/name: {{ .Values.name | quote }}
 data:
-  {{- range $k, $v := .Values.marker }}
+  {{- range $k, $v := .Values.command }}
   {{ $k | quote }}: {{ $v | quote }}
   {{- end }}
 {{- end }}

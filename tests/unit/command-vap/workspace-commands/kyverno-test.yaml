@@ -1,0 +1,47 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: command-vap-workspace-commands
+policies:
+- ../policy.yaml
+resources:
+- commands.yaml
+userinfo: ../operator.yaml
+variables: ../values.yaml
+results:
+- policy: command-provision-workspace
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-workspace-unlisted
+- policy: command-provision-workspace
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-workspace-nosecret
+- policy: command-provision-workspace
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-workspace-harnesscpu
+- policy: command-provision-workspace
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-workspace-undottedegress
+- policy: command-provision-workspace
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-workspace-relativepath
+- policy: command-provision-workspace
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-workspace-badsecret

@@ -1,0 +1,12 @@
+# A workspace may name only models and toolsets already installed. demo-key is
+# secret-only: the key lands where ssh expects it and no network hole opens.
+workspace:
+  name: hello-world
+  tenant: e2e-test
+  toolsets: [stdlib, workspace-ro, ssh-credentials]
+  models: [deepseek-v4-flash, local]
+  grants:
+    ssh-credentials:
+      demo-key:
+        secret: demo-ssh-key
+        path: /home/agent/.ssh/id_ed25519

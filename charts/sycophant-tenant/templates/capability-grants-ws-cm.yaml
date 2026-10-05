@@ -17,9 +17,9 @@ approvals" state; absence is an outage.
 */}}
 {{- if eq .Values.render "workspace" }}
 {{- $name := .Values.name }}
-{{- $m := .Values.marker }}
+{{- $m := .Values.command }}
 {{- $seen := dict }}
-{{- range $toolset, $byGrant := include "sycophant.markerGrants" $m | fromYaml }}
+{{- range $toolset, $byGrant := include "sycophant.commandGrants" $m | fromYaml }}
 {{- range $grant, $spec := $byGrant }}
 {{- $_ := set $seen $spec.secret $toolset }}
 {{- end }}

@@ -4,7 +4,7 @@ metadata:
   name: model-egress-derived-destination
 spec:
   description: |
-    A remote model marker declares its destination once, as `baseUrl`. The chart
+    A remote model provision command declares its destination once, as `baseUrl`. The chart
     derives the inference job's single egress hole from that URL and from
     nothing else, so the hole can never be unmatchable and can never widen past
     what the URL names. This suite pins both derived shapes and the fail-closed
@@ -56,7 +56,7 @@ spec:
                 --show-only templates/inference-egress-cnp.yaml \
                 -n "$TENANT_NS" \
                 --set render=inference --set name=deepseek-v4-flash \
-                --set-json 'marker={"image":"inference-runtime:local","format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","secret":"sycophant-llm-openrouter"}')
+                --set-json 'command={"image":"inference-runtime:local","format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","secret":"sycophant-llm-openrouter"}')
               printf '%s' "$rendered" | kubectl apply -f -
         - assert:
             resource:
@@ -114,7 +114,7 @@ spec:
                 --show-only templates/inference-egress-cnp.yaml \
                 -n "$TENANT_NS" \
                 --set render=inference --set name=ipdirect \
-                --set-json 'marker={"image":"inference-runtime:local","format":"openai","model":"m","baseUrl":"http://10.42.0.9:8080/v1"}')
+                --set-json 'command={"image":"inference-runtime:local","format":"openai","model":"m","baseUrl":"http://10.42.0.9:8080/v1"}')
               printf '%s' "$rendered" | kubectl apply -f -
         - assert:
             resource:
@@ -164,7 +164,7 @@ spec:
               egress=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                 --show-only templates/inference-egress-cnp.yaml \
                 --set render=inference --set name=deepseek-v4-flash \
-                --set-json 'marker={"image":"inference-runtime:local","format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","secret":"s"}')
+                --set-json 'command={"image":"inference-runtime:local","format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","secret":"s"}')
               selectors=$(printf '%s\n' "$egress" | grep -c 'sycophant.md/model:')
               endpoint_selectors=$(printf '%s\n' "$egress" | grep -cE '^\s+endpointSelector:')
               [ "$endpoint_selectors" -ge 1 ] \

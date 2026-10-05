@@ -1,0 +1,10 @@
+# A remote model, reached through a per-call inference job that holds the
+# vendor key from Secret sycophant-llm-openrouter.
+inference:
+  name: deepseek-v4-flash
+  tenant: e2e-test
+  format: openai
+  model: deepseek/deepseek-v4-flash
+  baseUrl: https://openrouter.ai/api/v1
+  image: inference-runtime:local
+  secret: sycophant-llm-openrouter

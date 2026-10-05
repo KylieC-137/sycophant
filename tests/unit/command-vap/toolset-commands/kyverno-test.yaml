@@ -1,0 +1,71 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: command-vap-toolset-commands
+policies:
+- ../policy.yaml
+resources:
+- commands.yaml
+userinfo: ../operator.yaml
+variables: ../values.yaml
+results:
+- policy: command-provision-toolset
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-toolset-tagimage
+- policy: command-provision-toolset
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-toolset-bogus
+- policy: command-provision-toolset
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-toolset-badtype
+- policy: command-provision-toolset
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-toolset-deadline
+- policy: command-provision-toolset
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-toolset-noenv
+- policy: command-provision-toolset
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-toolset-dotted
+- policy: command-provision-toolset
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-toolset-required
+- policy: command-reap-toolset
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/reap-toolset-data
+- policy: command-provision-toolset
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-toolset-notype
+- policy: command-provision-toolset
+  isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  result: fail
+  resources:
+  - tenant-acme/provision-toolset-dottedarg

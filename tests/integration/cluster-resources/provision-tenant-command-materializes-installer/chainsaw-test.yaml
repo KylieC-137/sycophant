@@ -1,0 +1,123 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: provision-tenant-command-materializes-installer
+spec:
+  # provision-tenant is one fixed name in sycophant-system, shared by every
+  # tenant-command test, so these run alone.
+  concurrent: false
+  timeouts:
+    assert: 120s
+  description: An admitted tenant provision command materializes the installer ServiceAccount, Job, and RoleBindings named from the command uid, the generated namespace chains into the relay TokenReview and pod VAP bindings, and the Job deletes the command once the install succeeds.
+  bindings:
+    - name: token
+      value: (random('[a-z0-9]{8}'))
+  steps:
+    - name: preflight-kyverno-ready
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: kyverno-background-controller
+                namespace: kyverno
+              status:
+                (readyReplicas > `0`): true
+        - assert:
+            resource:
+              apiVersion: policies.kyverno.io/v1
+              kind: GeneratingPolicy
+              metadata:
+                name: provision-tenant-stack
+              status:
+                conditionStatus:
+                  ready: true
+        - assert:
+            resource:
+              apiVersion: policies.kyverno.io/v1
+              kind: GeneratingPolicy
+              metadata:
+                name: provision-tenant-grant
+              status:
+                conditionStatus:
+                  ready: true
+    - name: grant-command-write
+      use:
+        template: ../../step-templates/command-writer.yaml
+        with:
+          bindings:
+            - name: command_ns
+              value: sycophant-system
+    - name: write-provision-command-and-assert-installer-set
+      try:
+        - script:
+            timeout: 300s
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              set -eu
+              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+              UID_=$(kubectl create configmap provision-tenant -n sycophant-system \
+                --from-literal=tenant="$TOKEN" --from-literal=capacity=2Gi \
+                --dry-run=client -o yaml \
+                | kubectl label --local -f - -o yaml \
+                    app.kubernetes.io/part-of=sycophant sycophant.md/command=true \
+                | kubectl create --as="${ISSUER}#operator" -f - -o jsonpath='{.metadata.uid}')
+              NAME="provision-tenant-$(printf '%s' "$UID_" | tr -d - | cut -c1-10)"
+              TENANT="tenant-${TOKEN}"
+              for i in $(seq 1 60); do
+                kubectl get serviceaccount,job "$NAME" -n sycophant-system >/dev/null 2>&1 \
+                  && kubectl get rolebinding "$NAME" -n "$TENANT" >/dev/null 2>&1 \
+                  && kubectl get rolebinding "$NAME" -n sycophant-system >/dev/null 2>&1 && break
+                sleep 2
+              done
+              for obj in "serviceaccount $NAME -n sycophant-system" "job $NAME -n sycophant-system" \
+                  "rolebinding $NAME -n $TENANT" "rolebinding $NAME -n sycophant-system"; do
+                kubectl get $obj >/dev/null || { echo "$obj missing"; exit 1; }
+              done
+              for i in $(seq 1 140); do
+                [ "$(kubectl get job "$NAME" -n sycophant-system -o jsonpath='{.status.succeeded}')" = 1 ] && break
+                sleep 2
+              done
+              [ "$(kubectl get job "$NAME" -n sycophant-system -o jsonpath='{.status.succeeded}')" = 1 ] \
+                || { echo "installer Job $NAME did not succeed"; exit 1; }
+              kubectl get configmap provision-tenant -n sycophant-system >/dev/null 2>&1 \
+                && { echo "the provision command survived a successful install"; exit 1; }
+              true
+        - assert:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRoleBinding
+              metadata:
+                name: (join('-', ['tenant', $token, 'relay-tokenreview']))
+                ownerReferences:
+                  - kind: Namespace
+                    name: (join('-', ['tenant', $token]))
+              roleRef:
+                name: cluster-relay-tokenreview
+        - assert:
+            resource:
+              apiVersion: admissionregistration.k8s.io/v1
+              kind: ValidatingAdmissionPolicyBinding
+              metadata:
+                name: (join('-', ['tenant', $token, 'sycophant-pod-binding']))
+                ownerReferences:
+                  - kind: Namespace
+                    name: (join('-', ['tenant', $token]))
+              spec:
+                policyName: cluster-gvisor-pod-policy
+      cleanup:
+        - script:
+            env:
+              - name: TOKEN
+                value: ($token)
+            content: |
+              NAME=$(kubectl get rolebinding -n "tenant-${TOKEN}" -l app.kubernetes.io/component=provision-tenant \
+                -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+              kubectl delete configmap provision-tenant -n sycophant-system --ignore-not-found
+              if [ -n "$NAME" ]; then
+                kubectl delete serviceaccount,job,rolebinding "$NAME" -n sycophant-system --ignore-not-found
+              fi
+              kubectl delete namespace "tenant-${TOKEN}" --ignore-not-found --wait=false

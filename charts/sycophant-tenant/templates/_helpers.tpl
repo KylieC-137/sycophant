@@ -11,10 +11,11 @@ app.kubernetes.io/name: {{ .name }}
 {{- end -}}
 
 {{- /*
-A workspace marker's `grant.<toolset>.<grant>.<secret|path|egress>` keys,
-grouped as YAML: toolset, then grant, then field. Takes the marker.
+A workspace provision command's `grant.<toolset>.<grant>.<secret|path|egress>`
+keys, grouped as YAML: toolset, then grant, then field. Takes the provision
+command data.
 */}}
-{{- define "sycophant.markerGrants" -}}
+{{- define "sycophant.commandGrants" -}}
 {{- $grants := dict -}}
 {{- range $k, $v := . -}}
 {{- if hasPrefix "grant." $k -}}
@@ -31,9 +32,9 @@ grouped as YAML: toolset, then grant, then field. Takes the marker.
 {{- end -}}
 
 {{- /*
-The one port every local model serves on. A local marker carries no baseUrl:
-the server, its Service, and its ingress fence all bind this port, and the
-harness dials `inference-<key>` on the same number.
+The one port every local model serves on. A local provision command carries no
+baseUrl: the server, its Service, and its ingress fence all bind this port, and
+the harness dials `inference-<key>` on the same number.
 */}}
 {{- define "sycophant.inferenceLocalPort" -}}
 8080

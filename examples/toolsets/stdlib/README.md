@@ -17,7 +17,7 @@ Tool names are PascalCase (the canonical LLM-facing identifier). The
 K8s Job name the toolset builds for each call is kebab-cased
 (`tool-read-<call_id_prefix>`) to satisfy RFC 1123.
 
-A marker `keepalive: "true"` keeps one toolset pod alive per workspace for the
+A toolset provision command's `keepalive: "true"` keeps one toolset pod alive per workspace for the
 workspace's lifetime — there is no per-call cold start.
 
 ## Extending the base image

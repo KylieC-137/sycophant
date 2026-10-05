@@ -25,9 +25,9 @@ fn main() {
         Command::Tenant(cmd) => commands::tenant::run(cmd),
         Command::Toolset(cmd) => component("toolset", cmd),
         Command::Workspace(cmd) => component("workspace", cmd),
-        Command::User(cli::MarkerCmd {
-            sub: cli::MarkerSub::Up(c),
-        }) => commands::marker::up("user", &c.file),
+        Command::User(cli::UserCmd {
+            sub: cli::UserSub::Up(c),
+        }) => commands::command::up("user", &c.values),
         Command::Inference(cmd) => component("inference", cmd),
     };
 
@@ -39,8 +39,8 @@ fn main() {
 
 fn component(kind: &str, cmd: cli::ComponentCmd) -> Result<(), String> {
     match cmd.sub {
-        cli::ComponentSub::Up(c) => commands::marker::up(kind, &c.file),
-        cli::ComponentSub::Down(c) => commands::marker::down(kind, &c.name, &c.tenant),
+        cli::ComponentSub::Up(c) => commands::command::up(kind, &c.values),
+        cli::ComponentSub::Down(c) => commands::command::down(kind, &c.name, &c.tenant),
     }
 }
 

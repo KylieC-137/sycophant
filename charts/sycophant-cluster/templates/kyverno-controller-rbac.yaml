@@ -84,16 +84,16 @@ rules:
   # Kyverno watches tenant namespaces (part-of=sycophant-tenant) to drive
   # the generate rules. `create` lets the
   # background-controller materialize the tenant Namespace from the
-  # provision marker; `update`/`patch` let the suspend reactor stamp the
+  # provision command; `update`/`patch` let the suspend reactor stamp the
   # reap-after annotation on that namespace. No tenant-reachable
   # ServiceAccount holds these.
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
 
-  # ResourceQuota the provision generate policy sizes from the marker's
-  # capacity and nests in the new tenant Namespace, with the LimitRange that
-  # defaults container memory under it.
+  # ResourceQuota the provision generate policy sizes from the provision
+  # command's capacity and nests in the new tenant Namespace, with the
+  # LimitRange that defaults container memory under it.
   - apiGroups: [""]
     resources: ["resourcequotas", "limitranges"]
     verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]

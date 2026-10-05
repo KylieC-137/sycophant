@@ -1,0 +1,3 @@
+{{- with .Values.workspace }}
+{{ include "commands.reap" (dict "kind" "workspace" "v" .) }}
+{{- end }}

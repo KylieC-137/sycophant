@@ -5,9 +5,9 @@ hobbyists installing sycophant run `syco setup` (from the `cli/` crate).
 These scripts are for maintainers running tests, debugging, and managing
 local dev clusters.
 
-The end-to-end test is now the `syco` CLI plus a scenario runbook — `syco setup`
+The end-to-end test is now the `syco` CLI plus the example values — `syco setup`
 → `syco tenant up`/`chat` → `syco tenant audit` (see
-`examples/scenarios/*/README.md` and `docs/e2e-test.md`). The scripts below are
+`examples/README.md` and `docs/e2e-test.md`). The scripts below are
 the legacy maintainer harness, retained until the CLI bring-up is verified live.
 
 | Script | What it does |

@@ -23,7 +23,7 @@ pod, so this DNS rule cannot shadow the capability-job floor.
 
 The port is `sycophant.inferenceLocalPort` and appears nowhere as a literal.
 */}}
-{{- if hasKey .Values.marker "server.image" }}
+{{- if hasKey .Values.command "server.image" }}
 {{- $key := .Values.name }}
 {{- $port := include "sycophant.inferenceLocalPort" . }}
 ---

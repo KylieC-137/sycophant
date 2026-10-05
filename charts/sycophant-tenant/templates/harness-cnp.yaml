@@ -110,7 +110,8 @@ spec:
     # (inference-cnp.yaml) is the sole control on which port and which two chat
     # routes it accepts; this rule only grants the harness reachability to that
     # same-tenant peer. Warm pods carry no workspace label (one Deployment per
-    # local model marker, tenant-wide), so this peer is not workspace-scoped.
+    # local model provision command, tenant-wide), so this peer is not
+    # workspace-scoped.
     - toEndpoints:
         - matchLabels:
             app.kubernetes.io/component: inference

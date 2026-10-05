@@ -8,37 +8,40 @@
 
 # Which slice of the chart this release renders.
 #   base      (default) the tenant's shared control plane (relay, scheduling,
-#             relay-access-grants). What the tenant marker renders, from chart
-#             defaults.
-#   workspace one workspace from the marker under `marker`, keyed by `name`:
-#             its harness, PVCs, grants and policies. The marker carries
-#             `toolsets` and `models` (comma lists), `storage`, and
-#             `grant.<toolset>.<grant>.<secret|path|egress>`. A per-workspace
-#             marker installs it into an existing tenant namespace as its own
-#             release (release name workspace-<name>), leaving the base release
-#             and sibling workspaces untouched. The shared objects it references
+#             relay-access-grants). What the tenant provision command renders,
+#             from chart defaults.
+#   workspace one workspace from the provision command under `command`, keyed
+#             by `name`: its harness, PVCs, grants and policies. The provision
+#             command carries `toolsets` and `models` (comma lists), `storage`,
+#             and `grant.<toolset>.<grant>.<secret|path|egress>`. A
+#             per-workspace provision command installs it into an existing
+#             tenant namespace as its own release (release name
+#             workspace-<name>), leaving the base release and sibling
+#             workspaces untouched. The shared objects it references
 #             (scheduling, relay-controller) are owned by the base release and
 #             read by name at runtime.
 #   user      the per-user provision-identity RoleBinding for the identities
-#             under `users`. A per-user marker binds one identity into an existing
-#             tenant namespace as its own release (release name user-<handle>).
-#   toolset   one toolset from the marker under `marker`, keyed by `name`: its
-#             `toolset-<name>` ConfigMap. A per-toolset marker installs it as its
-#             own release (release name toolset-<name>).
+#             under `users`. A per-user provision command binds one identity
+#             into an existing tenant namespace as its own release (release
+#             name user-<handle>).
+#   toolset   one toolset from the provision command under `command`, keyed by
+#             `name`: its `toolset-<name>` ConfigMap. A per-toolset provision
+#             command installs it as its own release (release name
+#             toolset-<name>).
 #   channel   the app channel adapter and headscale under `channels` and
 #             `headscale`, installed host-side as its own release.
-#   inference one model from the marker under `marker`, keyed by `name`: its
-#             `model-<name>` ConfigMap, plus the `inference-<name>` server,
-#             Service and fence when `server.image` is set, or the
+#   inference one model from the provision command under `command`, keyed by
+#             `name`: its `model-<name>` ConfigMap, plus the `inference-<name>`
+#             server, Service and fence when `server.image` is set, or the
 #             `inference-egress-<name>` policy for its job pods when not. A
-#             per-model marker installs it as its own release (release name
-#             inference-<name>).
+#             per-model provision command installs it as its own release
+#             (release name inference-<name>).
 render: base
 
-# A capability marker's name suffix and flat data, set by the installer. Read
-# only by the slice the marker installs.
+# A capability provision command's name suffix and flat data, set by the
+# installer. Read only by the slice the provision command installs.
 name: ""
-marker: {}
+command: {}
 
 # Bound user identities. The full issuer-prefixed identity subjects exactly
 # as the apiserver presents them, <issuer>#<sub>, one per identity the
@@ -55,7 +58,7 @@ users: []
 # Tenant namespace ownership. When true (self-host), the chart creates the
 # tenant namespace and stamps the perimeter + Pod Security labels on it. Set
 # false when the namespace is pre-created and labelled by the provisioner (the
-# marker-driven install path), so the chart installs into the existing ns.
+# provision-command install path), so the chart installs into the existing ns.
 namespace:
   create: true
 

@@ -177,7 +177,7 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
         ],
     )?;
 
-    // The marker installer bakes the tenant chart, so its context is the repo root.
+    // The provision command installer bakes the tenant chart, so its context is the repo root.
     docker_build(
         repo,
         &[

@@ -51,12 +51,12 @@ spec:
               set -e
               kubectl create namespace "$TENANT_NS"
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              MARKER=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
+              COMMAND=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
                 --show-only templates/inference.yaml \
                 -n "$TENANT_NS" \
                 --set render=inference --set name=local \
-                --set-json "marker=$MARKER" \
+                --set-json "command=$COMMAND" \
                 | kubectl apply -f -
     - name: assert-inference-pod-shape
       try:
@@ -106,12 +106,12 @@ spec:
             content: |
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              MARKER=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
+              COMMAND=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
               out=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
                 --show-only templates/inference.yaml \
                 -n "$TENANT_NS" \
                 --set render=inference --set name=local \
-                --set-json "marker=$MARKER")
+                --set-json "command=$COMMAND")
 
               pod=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
                 -o jsonpath='{range .items[?(@.kind=="Deployment")]}{.spec.template.spec.runtimeClassName}|{.spec.template.spec.hostNetwork}|{.spec.template.spec.hostPID}|{.spec.template.spec.hostIPC}|{.spec.template.spec.serviceAccountName}{"\n"}{end}')

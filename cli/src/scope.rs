@@ -47,6 +47,9 @@ impl Scope {
     pub(crate) fn tenant_chart_dir(&self) -> PathBuf {
         self.root.join("charts").join("sycophant-tenant")
     }
+    pub(crate) fn commands_chart_dir(&self) -> PathBuf {
+        self.root.join("charts").join("sycophant-commands")
+    }
     pub(crate) fn cluster_chart_dir(&self) -> PathBuf {
         self.root.join("charts").join("sycophant-cluster")
     }

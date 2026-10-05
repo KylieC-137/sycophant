@@ -1,6 +1,6 @@
 //! `syco upgrade [--check]` — operator command: validate the cluster, upgrade
-//! the cluster chart, then re-provision every tenant through its lifecycle
-//! markers. No helm runs on the host against a tenant.
+//! the cluster chart, then re-provision every tenant through its provision
+//! command. No helm runs on the host against a tenant.
 //!
 //! Any failed cluster or tenant check exits non-zero with nothing applied, and
 //! the first failure while applying stops the run. `--check` reports and
@@ -245,7 +245,7 @@ fn skipped_result(skipped: &[(String, Vec<String>)]) -> Result<(), String> {
     ))
 }
 
-/// The memory quota a provision marker generated for the tenant.
+/// The memory quota a provision command generated for the tenant.
 fn tenant_capacity(ns: &str) -> Option<String> {
     run_output(
         "kubectl",

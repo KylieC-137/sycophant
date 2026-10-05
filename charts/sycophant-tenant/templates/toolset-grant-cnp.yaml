@@ -1,9 +1,10 @@
 {{/*
 Per-grant egress policy for tool-job pods, authored from the same workspace
-marker keys that carry the grant. One CiliumNetworkPolicy per (workspace, toolset,
-grant) triple whose grant declares `egress`. A grant that declares only a secret
-opens nothing and renders no policy: the credential and the network hole are
-separable, and a local-use credential such as an ssh key needs no destination.
+provision command keys that carry the grant. One CiliumNetworkPolicy per
+(workspace, toolset, grant) triple whose grant declares `egress`. A grant that
+declares only a secret opens nothing and renders no policy: the credential and
+the network hole are separable, and a local-use credential such as an ssh key
+needs no destination.
 
 The endpointSelector is COMPOUND over the workspace, toolset, and grant labels
 together, so a grant name reused under a different (workspace, toolset) pair
@@ -15,12 +16,12 @@ The policy pins the grant's one domain, both as an L7 `rules.dns` matchName on
 to avoid the L4-shadows-L7 hazard documented in harness-cnp.yaml. Wildcards do
 not carry forward: one domain, `matchName` only, no `matchPattern` sibling.
 
-Egress is authored by the operator through the workspace marker. Nothing creates,
-patches, or deletes network policy at runtime.
+Egress is authored by the operator through the workspace provision command.
+Nothing creates, patches, or deletes network policy at runtime.
 */}}
 {{- if eq .Values.render "workspace" }}
 {{- $workspace := .Values.name }}
-{{- range $toolset, $byGrant := include "sycophant.markerGrants" .Values.marker | fromYaml }}
+{{- range $toolset, $byGrant := include "sycophant.commandGrants" .Values.command | fromYaml }}
 {{- range $grant, $spec := $byGrant }}
 {{- if $spec.egress }}
 ---

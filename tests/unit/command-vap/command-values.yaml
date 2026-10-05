@@ -1,0 +1,56 @@
+tenant:
+  name: acme
+  capacity: 2Gi
+  keepalive: 30
+
+inference:
+  name: local
+  tenant: acme
+  format: openai
+  model: liquid/lfm2.5-8b-a1b
+  server:
+    image: llama-server:local
+    weights: ghcr.io/example/weights:1
+    weightsPath: /weights/model.gguf
+    weightsDelivery: copy
+    contextBudget: 65536
+    slots: 2
+    outputCap: 4096
+    threads: 4
+    temp: 0.6
+    memory: 8Gi
+    cpu: 4
+    singleNodeException: false
+
+toolset:
+  name: git
+  tenant: acme
+  image: ghcr.io/sycophant-md/git@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  keepalive: true
+  deadlineSeconds: 300
+  env:
+    GIT_TERMINAL_PROMPT: "0"
+  tools:
+    tool.git-status.description: Show the working tree status in the workspace.
+    tool.git-clone.description: Clone a git repository.
+    tool.git-clone.arg.url.type: string
+    tool.git-clone.arg.url.required: "true"
+    tool.git-clone.arg.url.env: URL
+    tool.git-clone.arg.url.description: Repository URL.
+
+workspace:
+  name: hello-world
+  tenant: acme
+  toolsets: [stdlib, ssh-credentials]
+  models: [deepseek, local]
+  storage: 5Gi
+  grants:
+    ssh-credentials:
+      demo-key:
+        secret: demo-ssh-key
+        path: /home/agent/.ssh/id_ed25519
+        egress: git.example.com
+
+user:
+  tenant: acme
+  subject: "https://dex.example.com/dex#alice"

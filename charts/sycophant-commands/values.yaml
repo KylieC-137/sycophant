@@ -1,0 +1,39 @@
+# Set one kind's block. Each template renders only when its block is set.
+
+# tenant:
+#   name: acme              # namespace tenant-acme
+#   capacity: 2Gi           # provision: the tenant's memory quota
+#   keepalive: 30           # suspend: days kept before reap (0, 30, 60, 90); unset keeps it
+
+# inference:
+#   name: deepseek
+#   tenant: acme
+#   format: openai          # anthropic, openai, gemini
+#   model: deepseek-v4-flash
+#   baseUrl: https://api.deepseek.com   # remote only
+#   image: ghcr.io/sycophant-md/openai-job@sha256:...   # remote only
+#   secret: deepseek-key                # remote only
+#   server: {}              # local only: image, weights, weightsPath, weightsDelivery,
+#                           # contextBudget, slots, outputCap, threads, temp, memory,
+#                           # cpu, singleNodeException, chatTemplate
+
+# toolset:
+#   name: git
+#   tenant: acme
+#   image: ghcr.io/sycophant-md/git@sha256:...
+#   keepalive: false
+#   deadlineSeconds: 300
+#   env: {}                 # NAME: value
+#   tools: {}               # the image's md.sycophant.tools label, tool.* keys as is
+
+# workspace:
+#   name: hello-world
+#   tenant: acme
+#   toolsets: []
+#   models: []
+#   storage: 5Gi
+#   grants: {}              # <toolset>: {<grant>: {secret, path, egress}}
+
+# user:
+#   tenant: acme
+#   subject: "https://dex.example.com/dex#alice"

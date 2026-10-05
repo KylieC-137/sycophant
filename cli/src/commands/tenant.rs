@@ -1,5 +1,5 @@
 use crate::cli::{TenantCmd, TenantSub};
-use crate::commands::marker::tenant_ns;
+use crate::commands::command::tenant_ns;
 use crate::commands::{audit, down, remove, secret, up};
 use crate::scope::Scope;
 
@@ -11,7 +11,7 @@ pub(crate) fn run(cmd: TenantCmd) -> Result<(), String> {
     let TenantCmd { ns, sub } = cmd;
     let scope = || -> Result<Scope, String> { Scope::for_tenant(require_ns(&ns)?) };
     match sub {
-        TenantSub::Up(c) => up::run(&c.file),
+        TenantSub::Up(c) => up::run(&c.values),
         TenantSub::Down(c) => down::run(
             &Scope::for_tenant(&tenant_ns(&c.name))?,
             c.keepalive.as_deref(),

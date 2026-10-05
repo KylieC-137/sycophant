@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Zero-match gate: the framework carries chat-template plumbing but no template
 # content. An operator supplies a corrected template through the inference
-# marker's `server.chatTemplate`; the chart renders only the ConfigMap, volume,
-# mount, and arg that carry it. That split is the whole control -- no
-# model-specific text ships and the framework never inspects a template. This
-# gate holds the absence closed: it fails the moment a `.jinja` file, a Jinja
-# control marker, or a ChatML template token lands under `charts/` or
-# `examples/`.
+# provision command's `server.chatTemplate`; the chart renders only the
+# ConfigMap, volume, mount, and arg that carry it. That split is the whole
+# control -- no model-specific text ships and the framework never inspects a
+# template. This gate holds the absence closed: it fails the moment a `.jinja`
+# file, a Jinja control marker, or a ChatML template token lands under `charts/`
+# or `examples/`.
 #
 # Each gate is a zero-match assertion. A manual read is not a test: the failure
 # mode is one file committed under the chart, and the diff that opens the gap is
@@ -21,8 +21,8 @@
 # `git grep`, and this sweep exists to catch exactly the file nobody remembered.
 #
 # Scope is charts/ and examples/ -- the framework surfaces that ship in the
-# repo. Template content lives only in an operator-written inference marker,
-# which is uncommitted and therefore out of scope.
+# repo. Template content lives only in an operator-written inference provision
+# command, which is uncommitted and therefore out of scope.
 #
 # Extension checks key on `\.jinja` WITH the dot: the engine's `--jinja` flag in
 # templates/inference.yaml renders the model's own embedded template and is not a

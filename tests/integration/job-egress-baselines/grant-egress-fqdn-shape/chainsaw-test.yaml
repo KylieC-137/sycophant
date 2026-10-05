@@ -11,7 +11,7 @@ spec:
     needs no destination and reaches nothing beyond the namespace default-deny
     egress floor.
 
-    The marker below declares two grants under the same (workspace, toolset)
+    The provision command below declares two grants under the same (workspace, toolset)
     pair: `reader`, which declares `notion.com`, and `sshkey`, which declares a
     `path` and no `egress`. Exactly one policy must render.
 
@@ -35,7 +35,7 @@ spec:
   bindings:
     - name: tenant_ns
       value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
-    - name: grant_marker
+    - name: grant_command
       value: '{"toolsets":"notion","grant.notion.reader.secret":"demo-notion-reader","grant.notion.reader.egress":"notion.com","grant.notion.sshkey.secret":"demo-ssh-key","grant.notion.sshkey.path":"/home/agent/.ssh/id_ed25519"}'
   steps:
     - name: render-and-apply-the-per-grant-policy
@@ -44,8 +44,8 @@ spec:
             env:
               - name: TENANT_NS
                 value: ($tenant_ns)
-              - name: GRANT_MARKER
-                value: ($grant_marker)
+              - name: GRANT_COMMAND
+                value: ($grant_command)
             content: |
               set -e
               kubectl create namespace "$TENANT_NS"
@@ -53,7 +53,7 @@ spec:
               rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
                 --show-only templates/toolset-grant-cnp.yaml \
                 -n "$TENANT_NS" \
-                --set render=workspace --set name=demo --set-json "marker=$GRANT_MARKER")
+                --set render=workspace --set name=demo --set-json "command=$GRANT_COMMAND")
 
               # A grant that declares only a secret opens no network hole, so it
               # renders no policy at all.

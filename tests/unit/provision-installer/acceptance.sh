@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Offline: renders the install policies from the cluster chart, generates each
-# kind's install objects from a marker with `kyverno apply`, then runs the
+# kind's install objects from a command with `kyverno apply`, then runs the
 # generated Job script against stub helm and kubectl. No cluster.
 #
 #   bash tests/unit/provision-installer/acceptance.sh
@@ -50,11 +50,11 @@ import json, os, re, subprocess, sys, yaml
 work = sys.argv[1]
 uid10 = "0a1b2c3d4e"
 cases = {
-    "tenant": {"marker": "provision-tenant", "marker_ns": "sycophant-system", "release": None},
-    "workspace": {"marker": "provision-workspace-one", "marker_ns": "tenant-acme", "release": "workspace-one"},
-    "user": {"marker": "provision-user-0123456789", "marker_ns": "tenant-acme", "release": "user-0123456789"},
-    "toolset": {"marker": "provision-toolset-one", "marker_ns": "tenant-acme", "release": "toolset-one"},
-    "inference": {"marker": "provision-inference-local", "marker_ns": "tenant-acme", "release": "inference-local"},
+    "tenant": {"command": "provision-tenant", "command_ns": "sycophant-system", "release": None},
+    "workspace": {"command": "provision-workspace-one", "command_ns": "tenant-acme", "release": "workspace-one"},
+    "user": {"command": "provision-user-0123456789", "command_ns": "tenant-acme", "release": "user-0123456789"},
+    "toolset": {"command": "provision-toolset-one", "command_ns": "tenant-acme", "release": "toolset-one"},
+    "inference": {"command": "provision-inference-local", "command_ns": "tenant-acme", "release": "inference-local"},
 }
 passed = failed = 0
 
@@ -113,8 +113,8 @@ def reaps(policy, docs):
             if not selects(selector, d["metadata"].get("labels") or {})
             or not (d["metadata"].get("annotations") or {}).get(annotation)]
 
-def deletes_marker(argv, marker, ns):
-    if argv[0] != "kubectl" or "delete" not in argv or marker not in argv:
+def deletes_command(argv, command, ns):
+    if argv[0] != "kubectl" or "delete" not in argv or command not in argv:
         return False
     if not any(a in ("configmap", "configmaps", "cm") for a in argv):
         return False
@@ -129,10 +129,10 @@ for kind, c in cases.items():
     rb = find(docs, "RoleBinding", name, "tenant-acme")
     if not (sa and job and rb and job["spec"]["template"]["spec"].get("serviceAccountName") == name
             and [s.get("name") for s in rb.get("subjects", [])] == [name]):
-        bad(f"{kind}: install identity named from the marker uid",
+        bad(f"{kind}: install identity named from the command uid",
             f"want ServiceAccount and Job {name} in sycophant-system and RoleBinding {name} in tenant-acme using it; generated {[(d['kind'], d['metadata'].get('name')) for d in docs]}")
         continue
-    ok(f"{kind}: install identity named from the marker uid")
+    ok(f"{kind}: install identity named from the command uid")
 
     if rb["roleRef"] == {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "provision-write"}:
         ok(f"{kind}: install RoleBinding binds ClusterRole provision-write")
@@ -149,34 +149,34 @@ for kind, c in cases.items():
 
     rc, calls = run_job(job, 0)
     helm_at = [i for i, a in enumerate(calls) if a[0] == "helm" and "upgrade" in a]
-    del_at = [i for i, a in enumerate(calls) if deletes_marker(a, c["marker"], c["marker_ns"])]
+    del_at = [i for i, a in enumerate(calls) if deletes_command(a, c["command"], c["command_ns"])]
     if rc == 0 and helm_at and del_at and min(del_at) > max(helm_at):
-        ok(f"{kind}: successful install deletes its marker after helm")
+        ok(f"{kind}: successful install deletes its command after helm")
     else:
-        bad(f"{kind}: successful install deletes its marker after helm",
+        bad(f"{kind}: successful install deletes its command after helm",
             f"rc={rc}, calls={[' '.join(a) for a in calls]}")
 
     if c["release"]:
         if helm_at and c["release"] in calls[helm_at[0]]:
-            ok(f"{kind}: release named from the marker name suffix")
+            ok(f"{kind}: release named from the command name suffix")
         else:
-            bad(f"{kind}: release named from the marker name suffix",
+            bad(f"{kind}: release named from the command name suffix",
                 f"want {c['release']} in {[' '.join(calls[i]) for i in helm_at]}")
 
     rc, calls = run_job(job, 1)
-    if rc != 0 and not any(deletes_marker(a, c["marker"], c["marker_ns"]) for a in calls):
-        ok(f"{kind}: failed install leaves its marker")
+    if rc != 0 and not any(deletes_command(a, c["command"], c["command_ns"]) for a in calls):
+        ok(f"{kind}: failed install leaves its command")
     else:
-        bad(f"{kind}: failed install leaves its marker", f"rc={rc}, calls={[' '.join(a) for a in calls]}")
+        bad(f"{kind}: failed install leaves its command", f"rc={rc}, calls={[' '.join(a) for a in calls]}")
 
 docs = generated("tenant")
 name = f"provision-tenant-{uid10}"
 rb = find(docs, "RoleBinding", name, "sycophant-system")
-if rb and rb["roleRef"] == {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "provision-tenant-marker"} \
+if rb and rb["roleRef"] == {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "provision-tenant-command"} \
         and [(s.get("kind"), s.get("name"), s.get("namespace")) for s in rb.get("subjects", [])] == [("ServiceAccount", name, "sycophant-system")]:
-    ok("tenant: install ServiceAccount bound to the marker-delete Role")
+    ok("tenant: install ServiceAccount bound to the command-delete Role")
 else:
-    bad("tenant: install ServiceAccount bound to the marker-delete Role", f"got {rb}")
+    bad("tenant: install ServiceAccount bound to the command-delete Role", f"got {rb}")
 
 reap_t = next((d for d in yaml.safe_load_all(open(os.path.join(work, "tenant-policy.yaml"))) or []
                if d and d.get("kind") == "DeletingPolicy" and d["metadata"]["name"] == "reap-tenant"), None)
@@ -217,23 +217,23 @@ else:
     ok("capability installs never take ownership of another release's objects")
 
 for kind, release in (("inference", "local"), ("toolset", "one"), ("workspace", "one")):
-    marker_data = yaml.safe_load(open(os.path.join(sys.argv[2], f"{kind}.yaml")))["data"]
-    argv = install_call(kind, json.dumps(marker_data))
-    name = f"{kind}: install hands the marker data and name to the chart"
+    command_data = yaml.safe_load(open(os.path.join(sys.argv[2], f"{kind}.yaml")))["data"]
+    argv = install_call(kind, json.dumps(command_data))
+    name = f"{kind}: install hands the command data and name to the chart"
     if not argv:
         bad(name, "no helm upgrade call")
         continue
     files = [argv[i + 1] for i in range(len(argv) - 1) if argv[i] in ("-f", "--values")]
     loaded = [yaml.safe_load(open(f)) for f in files if os.path.exists(f)]
     sets = [argv[i + 1] for i in range(len(argv) - 1) if argv[i] in ("--set", "--set-string")]
-    if any((v or {}).get("marker") == marker_data for v in loaded) and f"render={kind}" in sets and f"name={release}" in sets:
+    if any((v or {}).get("command") == command_data for v in loaded) and f"render={kind}" in sets and f"name={release}" in sets:
         ok(name)
     else:
         bad(name, f"argv={' '.join(argv)}, values={loaded}")
 
 for kind, release in (("inference", "deepseek"), ("toolset", "one"), ("workspace", "one")):
     docs = generated(f"reap-{kind}")
-    marker = f"reap-{kind}-{release}"
+    command = f"reap-{kind}-{release}"
     name = f"uninstall-{kind}-{uid10}"
     sa = find(docs, "ServiceAccount", name, "sycophant-system")
     job = find(docs, "Job", name, "sycophant-system")
@@ -241,28 +241,28 @@ for kind, release in (("inference", "deepseek"), ("toolset", "one"), ("workspace
     if sa and job and rb and job["spec"]["template"]["spec"].get("serviceAccountName") == name \
             and rb["roleRef"] == {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "provision-write"} \
             and [(s.get("kind"), s.get("name"), s.get("namespace")) for s in rb.get("subjects", [])] == [("ServiceAccount", name, "sycophant-system")]:
-        ok(f"{kind}: reap marker generates a uid-named uninstall identity bound to provision-write")
+        ok(f"{kind}: reap command generates a uid-named uninstall identity bound to provision-write")
     else:
-        bad(f"{kind}: reap marker generates a uid-named uninstall identity bound to provision-write",
+        bad(f"{kind}: reap command generates a uid-named uninstall identity bound to provision-write",
             f"generated {[(d['kind'], d['metadata'].get('name'), d['metadata'].get('namespace')) for d in docs]}")
 
     if job:
         rc, calls = run_job(job, 0)
         un_at = [i for i, a in enumerate(calls) if a[:2] == ["helm", "uninstall"] and f"{kind}-{release}" in a
                  and any(a[j] in ("-n", "--namespace") and a[j + 1] == "tenant-acme" for j in range(len(a) - 1))]
-        del_at = [i for i, a in enumerate(calls) if deletes_marker(a, marker, "tenant-acme")]
+        del_at = [i for i, a in enumerate(calls) if deletes_command(a, command, "tenant-acme")]
         if rc == 0 and un_at and del_at and min(del_at) > max(un_at) and not any(a[0] == "helm" and "upgrade" in a for a in calls):
-            ok(f"{kind}: uninstall removes the release, then deletes its reap marker")
+            ok(f"{kind}: uninstall removes the release, then deletes its reap command")
         else:
-            bad(f"{kind}: uninstall removes the release, then deletes its reap marker", f"rc={rc}, calls={[' '.join(a) for a in calls]}")
+            bad(f"{kind}: uninstall removes the release, then deletes its reap command", f"rc={rc}, calls={[' '.join(a) for a in calls]}")
         rc, calls = run_job(job, 1)
-        if rc != 0 and not any(deletes_marker(a, marker, "tenant-acme") for a in calls):
-            ok(f"{kind}: failed uninstall leaves its reap marker")
+        if rc != 0 and not any(deletes_command(a, command, "tenant-acme") for a in calls):
+            ok(f"{kind}: failed uninstall leaves its reap command")
         else:
-            bad(f"{kind}: failed uninstall leaves its reap marker", f"rc={rc}, calls={[' '.join(a) for a in calls]}")
+            bad(f"{kind}: failed uninstall leaves its reap command", f"rc={rc}, calls={[' '.join(a) for a in calls]}")
     else:
-        bad(f"{kind}: uninstall removes the release, then deletes its reap marker", "no uninstall Job")
-        bad(f"{kind}: failed uninstall leaves its reap marker", "no uninstall Job")
+        bad(f"{kind}: uninstall removes the release, then deletes its reap command", "no uninstall Job")
+        bad(f"{kind}: failed uninstall leaves its reap command", "no uninstall Job")
 
     reap = reap_policy(kind)
     name = f"{kind}: the scheduled sweep selects the uninstall identity"

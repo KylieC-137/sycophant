@@ -1,0 +1,28 @@
+# Grants `<issuer>#operator` configmap create in command_ns; pass command_ns via with.bindings, never a spec.bindings default.
+# The Role and RoleBinding are named for the test, since every test shares one namespace.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: command-writer
+spec:
+  try:
+    - script:
+        env:
+          - name: COMMAND_NS
+            value: ($command_ns)
+          - name: NAME
+            value: (concat('command-writer-', $test.metadata.name))
+        content: |
+          set -eu
+          ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+          kubectl create role "$NAME" -n "$COMMAND_NS" --verb=create --resource=configmaps
+          kubectl create rolebinding "$NAME" -n "$COMMAND_NS" --role="$NAME" --user="${ISSUER}#operator"
+  cleanup:
+    - script:
+        env:
+          - name: COMMAND_NS
+            value: ($command_ns)
+          - name: NAME
+            value: (concat('command-writer-', $test.metadata.name))
+        content: |
+          kubectl delete rolebinding,role "$NAME" -n "$COMMAND_NS" --ignore-not-found

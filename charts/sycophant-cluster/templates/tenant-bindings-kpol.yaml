@@ -21,8 +21,8 @@
 #
 # The reactor's background controller creates the namespace, and Kyverno skips
 # its own background requests unless `skipBackgroundRequests` is off, so it is
-# off here or a marker-provisioned tenant gets neither binding. The background
-# controller labels no namespace but the reactor's; the suspend reactor's
+# off here or a tenant from a provision command gets neither binding. The
+# background controller labels no namespace but the reactor's; the suspend reactor's
 # reap-after stamp re-fires this policy onto the same two bindings.
 #
 # Both generated bindings carry no `namespace`, which is how a template declares

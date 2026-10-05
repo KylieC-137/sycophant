@@ -1,6 +1,6 @@
 {{- /*
 The inference lifecycle: the provision-inference installer and its grant, the
-uninstall-inference reactor on a reap marker, and the reap of both identities'
+uninstall-inference reactor on a reap command, and the reap of both identities'
 ServiceAccounts and RoleBindings.
 */}}
 {{- if include "sycophant.renderKyverno" . }}

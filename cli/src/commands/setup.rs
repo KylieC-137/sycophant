@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use crate::cli::SetupCmd;
 use crate::commands::build;
+use crate::commands::command::{COMMAND_WRITER_VERBS, SYSTEM_NS};
 use crate::commands::common::{ok, step, warn};
-use crate::commands::marker::{MARKER_WRITER_VERBS, SYSTEM_NS};
 use crate::commands::operator;
 use crate::runner::{run_output, run_passthrough, run_silent, run_stdin};
 use crate::scope::Scope;
@@ -124,7 +124,7 @@ pub(crate) fn run(_cmd: SetupCmd) -> Result<(), String> {
     // Each operator step is gated on its own result, so a partial run resumes.
     // Asked up front so the run does not stall on a prompt after the build.
     let need_dex = !operator::dex_installed();
-    let need_grant = !operator::marker_writer_bound(SYSTEM_NS);
+    let need_grant = !operator::command_writer_bound(SYSTEM_NS);
     let login = if need_dex {
         Some(prompt_login()?)
     } else if need_grant {
@@ -151,7 +151,7 @@ pub(crate) fn run(_cmd: SetupCmd) -> Result<(), String> {
         install_operator(&scope, need_dex, email, password)?;
     }
     eprintln!(
-        "\n\x1b[1;32m==> Cluster ready.\x1b[0m Next: `syco tenant up -f <tenant marker file>`."
+        "\n\x1b[1;32m==> Cluster ready.\x1b[0m Next: `syco tenant up -f <tenant values.yaml>`."
     );
     Ok(())
 }
@@ -168,7 +168,7 @@ fn prompt_login() -> Result<(String, String), String> {
 
 /// Install Dex with the operator as its one password user when absent, log in
 /// once to learn the identity the apiserver maps the operator to, and let it
-/// write the tenant marker. Tenant-namespace grants are made by `tenant up`
+/// write the tenant provision command. Tenant-namespace grants are made by `tenant up`
 /// once the namespace exists.
 fn install_operator(
     scope: &Scope,
@@ -187,8 +187,11 @@ fn install_operator(
         operator::save_email(&scope.oidc_dir(), &email)?;
     }
     let kube = operator::Operator::with_password(email, password)?.kubeconfig()?;
-    operator::grant_marker_writer(SYSTEM_NS, MARKER_WRITER_VERBS, &kube.identity)?;
-    ok(&format!("{} may write the tenant marker", kube.identity));
+    operator::grant_command_writer(SYSTEM_NS, COMMAND_WRITER_VERBS, &kube.identity)?;
+    ok(&format!(
+        "{} may write the tenant provision command",
+        kube.identity
+    ));
     Ok(())
 }
 

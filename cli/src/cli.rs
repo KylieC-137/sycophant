@@ -17,12 +17,12 @@ pub(crate) enum Command {
     Destroy(DestroyCmd),
     Upgrade(UpgradeCmd),
     Tenant(TenantCmd),
-    /// Install or remove one toolset through its lifecycle markers
+    /// Install or remove one toolset through its provision and reap commands
     Toolset(ComponentCmd),
-    /// Install or remove one workspace through its lifecycle markers
+    /// Install or remove one workspace through its provision and reap commands
     Workspace(ComponentCmd),
-    User(MarkerCmd),
-    /// Install or remove one model through its lifecycle markers
+    User(UserCmd),
+    /// Install or remove one model through its provision and reap commands
     Inference(ComponentCmd),
 }
 
@@ -44,7 +44,7 @@ pub(crate) struct DestroyCmd {}
 // --- upgrade (validate the cluster, upgrade it, re-provision every tenant) ---
 
 /// Validate the cluster, upgrade the cluster chart, then re-provision every
-/// tenant through its lifecycle markers. Prompts for the operator password. Any
+/// tenant through its provision command. Prompts for the operator password. Any
 /// failed cluster or tenant check exits non-zero with nothing applied, and the
 /// first failure while applying stops the run. `--check` runs validation only,
 /// making no changes.
@@ -70,22 +70,16 @@ pub(crate) struct TenantCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum TenantSub {
-    Up(TenantUp),
+    /// Provision or re-provision a tenant through its provision command. Prompts
+    /// for the operator password. Renders the tenant provision command from
+    /// values (`tenant: {name, capacity}`), writes it, and waits for its
+    /// installer, which upgrades the release in place. The capacity quota is set
+    /// on first provision and not resized after
+    Up(Up),
     Down(TenantDown),
     Remove(TenantRemove),
     Secret(SecretCmd),
     Audit(AuditCmd),
-}
-
-/// Provision or re-provision a tenant through its lifecycle marker. Prompts for
-/// the operator password. Applies the tenant marker file and waits for its
-/// installer, which upgrades the release in place. The capacity quota is set on
-/// first provision and not resized after
-#[derive(Args)]
-pub(crate) struct TenantUp {
-    /// the provision-tenant marker file
-    #[arg(short = 'f', long = "file")]
-    pub file: String,
 }
 
 /// Suspend the tenant: scales it to zero, keeps all data. Prompts for the
@@ -157,28 +151,55 @@ pub(crate) struct AuditCmd {
     pub workspace: String,
 }
 
-// --- marker files (the marker names its own namespace) ---
+// --- provision commands rendered from a values file ---
 
-/// Apply a lifecycle marker file
+/// Install a framework user through its provision command
 #[derive(Args)]
-pub(crate) struct MarkerCmd {
+pub(crate) struct UserCmd {
     #[command(subcommand)]
-    pub sub: MarkerSub,
+    pub sub: UserSub,
 }
 
 #[derive(Subcommand)]
-pub(crate) enum MarkerSub {
-    Up(MarkerUp),
+pub(crate) enum UserSub {
+    /// Render the provision command from values, write it as the operator, and
+    /// wait for its installer. Prompts for the operator password. A leftover
+    /// command of the same name is replaced; a rejected command or a failed
+    /// install exits non-zero
+    Up(Up),
 }
 
-/// Apply a marker file as the operator and wait for its installer. Prompts for
-/// the operator password. A leftover marker of the same name is replaced; a
-/// rejected marker or a failed install exits non-zero
+/// The arguments of every `up`.
 #[derive(Args)]
-pub(crate) struct MarkerUp {
-    /// the provision marker file
-    #[arg(short = 'f', long = "file")]
-    pub file: String,
+pub(crate) struct Up {
+    #[command(flatten)]
+    pub values: Values,
+}
+
+/// The values a provision command renders from (see charts/sycophant-commands).
+#[derive(Args)]
+pub(crate) struct Values {
+    /// a values file keyed by kind; repeatable, later files override earlier
+    #[arg(short = 'f', long = "file", required = true)]
+    pub files: Vec<String>,
+    /// one string value, <kind>.<key>=<value>; repeatable, overrides the files
+    #[arg(long = "set")]
+    pub set: Vec<String>,
+}
+
+impl Values {
+    /// The `helm template` arguments, in the order given.
+    pub(crate) fn helm_args(&self) -> Vec<String> {
+        let files = self
+            .files
+            .iter()
+            .flat_map(|f| ["-f".to_string(), f.clone()]);
+        let sets = self
+            .set
+            .iter()
+            .flat_map(|s| ["--set-string".to_string(), s.clone()]);
+        files.chain(sets).collect()
+    }
 }
 
 // --- components (toolset, workspace, inference) ---
@@ -191,18 +212,60 @@ pub(crate) struct ComponentCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum ComponentSub {
-    Up(MarkerUp),
-    Down(MarkerDown),
+    /// Render the provision command from values, write it as the operator, and
+    /// wait for its installer. Prompts for the operator password. A leftover
+    /// command of the same name is replaced; a rejected command or a failed
+    /// install exits non-zero
+    Up(Up),
+    Down(ComponentDown),
 }
 
-/// Remove a component: write its reap marker as the operator and wait for the
+/// Remove a component: write its reap command as the operator and wait for the
 /// uninstall. Prompts for the operator password. A failed uninstall leaves the
-/// reap marker and exits non-zero
+/// reap command and exits non-zero
 #[derive(Args)]
-pub(crate) struct MarkerDown {
-    /// the component name (the marker name suffix)
+pub(crate) struct ComponentDown {
+    /// the component name (the command name suffix)
     pub name: String,
     /// tenant name (the namespace is tenant-<name>)
     #[arg(long)]
     pub tenant: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn values_keep_file_order_then_sets() {
+        let cli = Cli::try_parse_from([
+            "syco",
+            "toolset",
+            "up",
+            "-f",
+            "a.yaml",
+            "--set",
+            "toolset.tenant=t",
+            "-f",
+            "b.yaml",
+        ])
+        .unwrap();
+        let Command::Toolset(ComponentCmd {
+            sub: ComponentSub::Up(up),
+        }) = cli.command
+        else {
+            panic!("not toolset up");
+        };
+        assert_eq!(
+            up.values.helm_args(),
+            [
+                "-f",
+                "a.yaml",
+                "-f",
+                "b.yaml",
+                "--set-string",
+                "toolset.tenant=t"
+            ]
+        );
+    }
 }

@@ -1,0 +1,6 @@
+{{- /* Without a keepalive the tenant scales to zero and stays. */ -}}
+{{- with .Values.tenant }}
+{{- $data := dict }}
+{{- if hasKey . "keepalive" }}{{ $_ := set $data "keepalive" .keepalive }}{{ end }}
+{{ include "commands.command" (dict "name" "suspend-tenant" "namespace" (include "commands.tenantNs" .name) "data" $data) }}
+{{- end }}

@@ -1,8 +1,9 @@
 //! The operator's IdP identity. `setup` installs the bundled Dex as the issuer
 //! the apiserver trusts, with one static password user: the operator. Every
-//! lifecycle marker is written under a short-lived Dex ID token obtained with
-//! that password, so the cluster sees `<issuer>#<sub>`; a standing cluster
-//! credential is refused by the marker VAP. The host holds no key and no token.
+//! provision, reap and suspend command is written under a short-lived Dex ID
+//! token obtained with that password, so the cluster sees `<issuer>#<sub>`; a
+//! standing cluster credential is refused by the command VAP. The host holds no
+//! key and no token.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, IsTerminal, Read, Write};
@@ -26,7 +27,8 @@ pub(crate) const ISSUER: &str = "https://127.0.0.1:30443/dex";
 pub(crate) const AUDIENCE: &str = "sycophant-cluster";
 const DEX_RELEASE: &str = "sycophant-dex";
 const DEX_TLS_SECRET: &str = "sycophant-dex-tls";
-const MARKER_WRITER: &str = "marker-writer";
+// Existing clusters already hold the Role and RoleBinding under this name.
+const COMMAND_WRITER: &str = "marker-writer";
 pub(crate) const EMAIL_ENV: &str = "SYCO_EMAIL";
 pub(crate) const PASSWORD_ENV: &str = "SYCO_PASSWORD";
 
@@ -268,8 +270,8 @@ pub(crate) fn credentials(dir: &Path) -> Result<(String, String), String> {
     Ok((email, password))
 }
 
-pub(crate) fn marker_writer_bound(ns: &str) -> bool {
-    run_silent("kubectl", &["get", "rolebinding", MARKER_WRITER, "-n", ns])
+pub(crate) fn command_writer_bound(ns: &str) -> bool {
+    run_silent("kubectl", &["get", "rolebinding", COMMAND_WRITER, "-n", ns])
 }
 
 /// The operator's login for one command. The password lives only in this
@@ -463,14 +465,14 @@ impl OperatorKube {
     }
 }
 
-/// Let `identity` write markers in `ns`.
-pub(crate) fn grant_marker_writer(ns: &str, verbs: &str, identity: &str) -> Result<(), String> {
+/// Let `identity` write commands in `ns`.
+pub(crate) fn grant_command_writer(ns: &str, verbs: &str, identity: &str) -> Result<(), String> {
     let role = run_output(
         "kubectl",
         &[
             "create",
             "role",
-            MARKER_WRITER,
+            COMMAND_WRITER,
             "-n",
             ns,
             &format!("--verb={verbs}"),
@@ -486,10 +488,10 @@ pub(crate) fn grant_marker_writer(ns: &str, verbs: &str, identity: &str) -> Resu
         &[
             "create",
             "rolebinding",
-            MARKER_WRITER,
+            COMMAND_WRITER,
             "-n",
             ns,
-            &format!("--role={MARKER_WRITER}"),
+            &format!("--role={COMMAND_WRITER}"),
             &format!("--user={identity}"),
             "--dry-run=client",
             "-o",

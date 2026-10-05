@@ -1,10 +1,10 @@
+use crate::commands::command;
 use crate::commands::common::wait_for;
-use crate::commands::marker;
 use crate::commands::operator::Operator;
 use crate::runner::{run_output, run_silent};
 use crate::scope::Scope;
 
-/// `syco tenant down <name> [--keepalive <days>]` — write the suspend marker.
+/// `syco tenant down <name> [--keepalive <days>]` — write the suspend command.
 /// The cluster scales every tenant Deployment to zero and keeps the release,
 /// PVCs, and secrets. Use `syco tenant remove <name>` to remove data.
 pub(crate) fn run(scope: &Scope, keepalive: Option<&str>) -> Result<(), String> {
@@ -16,7 +16,7 @@ pub(crate) fn run(scope: &Scope, keepalive: Option<&str>) -> Result<(), String> 
     }
 
     eprintln!("Suspending tenant '{ns}'...");
-    marker::suspend(&Operator::login(&scope.oidc_dir())?, &ns, keepalive)?;
+    command::suspend(&Operator::login(&scope.oidc_dir())?, &ns, keepalive)?;
     wait_for("tenant Deployments scaled to zero", 120, || {
         run_output(
             "kubectl",

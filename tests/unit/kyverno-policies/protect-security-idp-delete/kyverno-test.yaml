@@ -5,7 +5,7 @@ metadata:
 policies:
   - policy.yaml
 resources:
-  - marker.yaml
+  - command.yaml
 userinfo: user-idp.yaml
 variables: values.yaml
 results:

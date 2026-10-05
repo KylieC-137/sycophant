@@ -1,5 +1,5 @@
 {{/*
-Per-workspace one-shot init Job. Renders for the workspace its marker
+Per-workspace one-shot init Job. Renders for the workspace its provision command
 installs; emits a plain batch/v1 Job (NOT a Helm hook) that:
   1. Mounts the workspace PVC at /workspace. This mount is the PVC's first
      consumer, so it also binds the PVC at install time (the StorageClass is

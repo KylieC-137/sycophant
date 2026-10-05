@@ -14,7 +14,7 @@ spec:
               tmp=$(mktemp)
               helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
                 --set render=workspace --set name=probe \
-                --set-json 'marker={"toolsets":"tool","grant.tool.reader.secret":"approved-secret"}' \
+                --set-json 'command={"toolsets":"tool","grant.tool.reader.secret":"approved-secret"}' \
                 > "$tmp"
               python3 - "$tmp" <<'PY'
               import sys, yaml

@@ -1,0 +1,8 @@
+inference:
+  name: deepseek
+  tenant: acme
+  format: openai
+  model: deepseek-v4-flash
+  baseUrl: https://api.deepseek.com
+  image: ghcr.io/sycophant-md/openai-job@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  secret: deepseek-key

@@ -12,7 +12,7 @@ spec:
     workload, so the perimeter is in place before the first pod is admitted.
 
     Gated on .Values.namespace.create (default true). With create=false the
-    template renders nothing — the provision marker's reactor creates and labels
+    template renders nothing — the provision command's reactor creates and labels
     the namespace itself, so the chart must not also create it.
 
     Self-renders via `helm template --show-only` so it runs standalone.

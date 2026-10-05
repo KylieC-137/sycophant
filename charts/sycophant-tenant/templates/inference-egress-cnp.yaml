@@ -16,7 +16,7 @@ shapes, and each arm emits its rules and stops:
   cidr      an IPv4 literal host -> a single `toCIDR <ip>/32` on the parsed
             port and NO :53 entry at all.
 
-The marker admission policy admits only a dotted or IPv4 host, so the policy
+The command admission policy admits only a dotted or IPv4 host, so the policy
 can never emit an unmatchable rule.
 
 Cilium unions same-PortProtocol L7 DNS rules across every policy selecting the
@@ -26,12 +26,12 @@ harness-cnp.yaml. An L4-only :53 rule here would unpin the L7 allowlist of any
 sibling policy selecting the same pod. There is no `matchPattern` wildcard: that
 would reopen DNS-tunnel exfil.
 
-Egress is authored by the operator through the inference marker and applied
-from outside the tenant. The tenant does not author it.
+Egress is authored by the operator through the inference provision command and
+applied from outside the tenant. The tenant does not author it.
 */}}
-{{- if not (hasKey .Values.marker "server.image") }}
+{{- if not (hasKey .Values.command "server.image") }}
 {{- $key := .Values.name }}
-{{- $baseUrl := .Values.marker.baseUrl }}
+{{- $baseUrl := .Values.command.baseUrl }}
 {{- $scheme := first (splitList "://" $baseUrl) }}
 {{- $hostPort := splitList ":" (first (splitList "/" (last (splitList "://" $baseUrl)))) }}
 {{- $host := first $hostPort }}

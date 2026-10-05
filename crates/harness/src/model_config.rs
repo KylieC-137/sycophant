@@ -7,9 +7,9 @@
 //! the harness creates. An absent name is refused, never defaulted.
 //!
 //! Each model is one `model-<key>` ConfigMap labelled `sycophant.md/type:
-//! model`, its data the operator's flat marker fields. The harness watches the
-//! label set and rebuilds the table on every change, so a model added, changed
-//! or removed takes effect on the next turn without a restart.
+//! model`, its data the operator's flat provision command fields. The harness
+//! watches the label set and rebuilds the table on every change, so a model
+//! added, changed or removed takes effect on the next turn without a restart.
 
 use std::collections::HashMap;
 
@@ -145,7 +145,7 @@ pub(crate) mod tests {
     ];
 
     #[test]
-    fn a_marker_with_a_server_image_is_local_without_a_base_url() {
+    fn a_model_with_a_server_image_is_local_without_a_base_url() {
         let (table, errors) = ModelTable::merge_configmaps(&[model_cm(
             "local",
             &[
@@ -168,7 +168,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_marker_without_a_server_image_is_remote_with_its_optional_secret() {
+    fn a_model_without_a_server_image_is_remote_with_its_optional_secret() {
         let unauthenticated: Vec<_> = REMOTE
             .iter()
             .copied()

@@ -8,6 +8,10 @@ pub(crate) static CLUSTER_CHART: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-cluster");
 pub(crate) static TENANT_CHART: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-tenant");
+/// Provision, reap and suspend command templates, rendered by `syco <kind> up`
+/// and `down` and never installed.
+pub(crate) static COMMANDS_CHART: Dir<'static> =
+    include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-commands");
 
 /// Bundled Dex issuer, installed by `syco setup`. Carries the vendored upstream
 /// subchart when it is present at build time.

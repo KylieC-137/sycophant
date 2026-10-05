@@ -26,10 +26,10 @@ idp:
   #   ...bundled issuer CA...
   #   -----END CERTIFICATE-----
 
-# The marker-triggered installer. An admitted provision marker stamps a
-# single-shot Job that runs the tenant chart baked into this image against the
-# new tenant namespace. image/tag name the installer image; chartPath is where the
-# tenant chart lives inside it.
+# The installer a provision command triggers. An admitted provision command
+# stamps a single-shot Job that runs the tenant chart baked into this image
+# against the new tenant namespace. image/tag name the installer image;
+# chartPath is where the tenant chart lives inside it.
 provisioner:
   image: sycophant-provisioner
   tag: local

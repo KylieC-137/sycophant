@@ -1,6 +1,6 @@
 {{/*
 Per-workspace materialization: emit one ServiceAccount + PersistentVolumeClaim
-+ Deployment for the workspace its marker installs. The workspace PVC is
++ Deployment for the workspace its provision command installs. The workspace PVC is
 mounted by harness-spawned tool jobs (RW). The harness owns a
 SEPARATE conversation-history PVC (tool jobs never mount it, so the
 untrusted runtime can't forge history). Instructions content (AGENTS.md,
@@ -20,7 +20,7 @@ first harness boot when audience verification fails.
 */}}
 {{- if eq .Values.render "workspace" }}
 {{- $name := .Values.name }}
-{{- $m := .Values.marker }}
+{{- $m := .Values.command }}
 {{- $grants := dict }}
 {{- range $k, $v := $m }}{{ if hasPrefix "grant." $k }}{{ $_ := set $grants $k $v }}{{ end }}{{ end }}
 ---

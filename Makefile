@@ -26,6 +26,7 @@ lint-rust: ## rustfmt + clippy, warnings are errors
 lint-k8s: ## helm lint + zero-match sweep gates
 	helm lint charts/sycophant-tenant
 	helm lint charts/sycophant-cluster
+	helm lint charts/sycophant-commands
 	@for g in $(SWEEP_GATES); do echo "== $$g =="; bash "$$g" || exit 1; done
 
 .PHONY: test-unit
@@ -49,7 +50,7 @@ test-unit-k8s: ## Render the two policy fixtures, run them, then the three chart
 		--show-only templates/protect-security-kpol.yaml \
 		> tests/unit/kyverno-policies/protect-security-idp-delete/policy.yaml
 	@kyverno test tests/unit/kyverno-policies
-	@bash tests/unit/marker-vap/acceptance.sh
+	@bash tests/unit/command-vap/acceptance.sh
 	@bash tests/unit/provision-installer/acceptance.sh
 	@bash tests/unit/tenant-chart/acceptance.sh
 

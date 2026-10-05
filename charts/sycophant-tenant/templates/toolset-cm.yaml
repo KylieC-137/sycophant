@@ -1,8 +1,8 @@
 {{- if eq .Values.render "toolset" }}
 {{- /*
-One toolset's ConfigMap, `toolset-<name>`: the toolset marker's flat data
-verbatim. The harness watches the `sycophant.md/type: toolset` label set and
-keys each toolset by its `app.kubernetes.io/name`, so a change takes effect
+One toolset's ConfigMap, `toolset-<name>`: the toolset provision command's flat
+data verbatim. The harness watches the `sycophant.md/type: toolset` label set
+and keys each toolset by its `app.kubernetes.io/name`, so a change takes effect
 without a restart.
 */}}
 apiVersion: v1
@@ -15,7 +15,7 @@ metadata:
     sycophant.md/type: toolset
     app.kubernetes.io/name: {{ .Values.name | quote }}
 data:
-  {{- range $k, $v := .Values.marker }}
+  {{- range $k, $v := .Values.command }}
   {{ $k | quote }}: {{ $v | quote }}
   {{- end }}
 {{- end }}

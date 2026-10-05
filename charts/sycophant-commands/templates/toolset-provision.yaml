@@ -1,0 +1,7 @@
+{{- /* `tools` is the image's md.sycophant.tools label, already flat `tool.*` keys. */ -}}
+{{- with .Values.toolset }}
+{{- $data := pick . "image" "keepalive" "deadlineSeconds" }}
+{{- range $k, $v := .env }}{{ $_ := set $data (printf "env.%s" $k) $v }}{{ end }}
+{{- range $k, $v := .tools }}{{ $_ := set $data $k $v }}{{ end }}
+{{ include "commands.command" (dict "name" (printf "provision-toolset-%s" .name) "namespace" (include "commands.tenantNs" .tenant) "data" $data) }}
+{{- end }}

@@ -11,9 +11,9 @@ and `tenant-resource-protection/` (which is per-tenant).
 | runtimeclass-gvisor-handler/            | `RuntimeClass/gvisor` declares `handler: runsc` (real gVisor)          |
 | cluster-chart-requires-kyverno-crds/    | Rendering without the Kyverno CRDs hard-fails naming the missing CRD    |
 | provision-generates-namespace-and-quota/ | The provision generate policy emits the tenant Namespace + capacity ResourceQuota |
-| suspend-marker-scales-to-zero/          | The suspend mutate scales the tenant Deployments to zero               |
+| suspend-command-scales-to-zero/          | The suspend mutate scales the tenant Deployments to zero               |
 | background-controller-holds-namespace-create/ | The Kyverno bg-controller role grants create on Namespaces + ResourceQuotas |
-| provision-tenant-marker-materializes-installer/ | LIVE: an admitted provision-tenant marker materializes the uid-named SA+Job+RoleBinding installer set; the Job succeeds; the Job deletes the marker |
+| provision-tenant-command-materializes-installer/ | LIVE: an admitted tenant provision command materializes the uid-named SA+Job+RoleBinding installer set; the Job succeeds; the Job deletes the command |
 | workspace-sa-name-forms/                | Every rendered `sycophant.md/type=workspace-sa` SA is named `harness-<ws>`, `unprivileged-<ws>`, or `<ws>-workspace-init` (in sync with WORKSPACE_SA_PREFIXES) |
 
 Belongs here: chainsaw assertions on the shape or render-time naming of

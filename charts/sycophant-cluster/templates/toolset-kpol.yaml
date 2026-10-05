@@ -1,6 +1,6 @@
 {{- /*
 The toolset lifecycle: the provision-toolset installer and its grant, the
-uninstall-toolset reactor on a reap marker, and the reap of both identities'
+uninstall-toolset reactor on a reap command, and the reap of both identities'
 ServiceAccounts and RoleBindings.
 */}}
 {{- if include "sycophant.renderKyverno" . }}

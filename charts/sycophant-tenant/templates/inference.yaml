@@ -1,13 +1,13 @@
 {{- if eq .Values.render "inference" }}
 {{- /*
 One Deployment plus one ClusterIP Service for a local model: the tenant's own
-in-cluster model server, from the marker's `server.*` keys. The pod carries
-`component: inference`, which the gVisor mutate does not match, so it lands on
-the kubelet's default runtime and shares one page-cache copy of the weights per
-node. The container and Service serve on `sycophant.inferenceLocalPort`; the
-marker declares no port.
+in-cluster model server, from the provision command's `server.*` keys. The pod
+carries `component: inference`, which the gVisor mutate does not match, so it
+lands on the kubelet's default runtime and shares one page-cache copy of the
+weights per node. The container and Service serve on
+`sycophant.inferenceLocalPort`; the provision command declares no port.
 */}}
-{{- $m := .Values.marker }}
+{{- $m := .Values.command }}
 {{- if hasKey $m "server.image" }}
 {{- $key := .Values.name }}
 {{- $port := include "sycophant.inferenceLocalPort" . }}

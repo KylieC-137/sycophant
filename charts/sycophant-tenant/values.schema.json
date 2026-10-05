@@ -10,16 +10,16 @@
     },
     "name": {
       "type": "string",
-      "description": "The component name a capability marker carries as its name suffix. The installer sets it from the marker name."
+      "description": "The component name a capability provision command carries as its name suffix. The installer sets it from the command name."
     },
-    "marker": {
+    "command": {
       "type": "object",
-      "description": "A capability marker's flat data, verbatim. The installer sets it from the marker.",
+      "description": "A capability provision command's flat data, verbatim. The installer sets it from the command.",
       "additionalProperties": { "type": "string" }
     },
     "users": {
       "type": "array",
-      "description": "Full issuer-prefixed identity subjects `<issuer>#<sub>`, operator-supplied, one per identity granted this tenant. When non-empty, the chart renders a RoleBinding granting those users the provision-identity ClusterRole in this namespace. Empty renders no binding. The prefix is enforced: cluster-protect-security selects tenant-scoped callers by it, so a subject without one would hold the provision-identity verbs while sitting outside the policy's reach. Neither the issuer nor the sub may carry a quote, backslash, control character, or Unicode line or paragraph separator, matching the user marker's admission rule.",
+      "description": "Full issuer-prefixed identity subjects `<issuer>#<sub>`, operator-supplied, one per identity granted this tenant. When non-empty, the chart renders a RoleBinding granting those users the provision-identity ClusterRole in this namespace. Empty renders no binding. The prefix is enforced: cluster-protect-security selects tenant-scoped callers by it, so a subject without one would hold the provision-identity verbs while sitting outside the policy's reach. Neither the issuer nor the sub may carry a quote, backslash, control character, or Unicode line or paragraph separator, matching the user command's admission rule.",
       "items": { "type": "string", "pattern": "^https?://[^#\"\\\\\\p{Cc}\\x{2028}\\x{2029}]+#[^\"\\\\\\p{Cc}\\x{2028}\\x{2029}]+$" }
     },
     "namespace": {

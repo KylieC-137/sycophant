@@ -1,5 +1,5 @@
+use crate::commands::command;
 use crate::commands::common::{ok, wait_for};
-use crate::commands::marker;
 use crate::commands::operator::Operator;
 use crate::runner::{run_output, run_silent};
 use crate::scope::Scope;
@@ -16,7 +16,7 @@ pub(crate) fn run(scope: &Scope) -> Result<(), String> {
     }
 
     eprintln!("Removing tenant '{ns}' (workloads + data)...");
-    marker::suspend(&Operator::login(&scope.oidc_dir())?, &ns, Some("0"))?;
+    command::suspend(&Operator::login(&scope.oidc_dir())?, &ns, Some("0"))?;
     wait_for("reap-after stamped on the tenant namespace", 120, || {
         run_output(
             "kubectl",

@@ -6,14 +6,14 @@
 # One reusable ClusterRole bound per namespace, not one Role per tenant,
 # keeps a single rule set to audit.
 #
-# A member holds no control-plane verbs. Every lifecycle marker is
-# written by the operator that holds the cluster credential, never by a
+# A member holds no control-plane verbs. Every provision, reap and suspend
+# command is written by the operator that holds the cluster credential, never by a
 # member from inside its own namespace. A member's access to workspaces,
 # toolsets, and tenant membership is what the operator provisions for
 # them, not something they self-author. The binding sits
 # beside the relay ServiceAccount, the machine ServiceAccounts, the
 # tenant Secrets, and the tenant RBAC objects, so any verb here
-# is a path to escalate: create on configmaps self-drops a marker, read
+# is a path to escalate: create on configmaps self-drops a command, read
 # on secrets exfiltrates keys, verbs on roles/rolebindings self-bind to
 # provision-write, serviceaccounts/token mints the relay token, pods
 # mount that token or exec the relay, impersonate acts as another

@@ -85,11 +85,12 @@ helm dependency update
 helm install sycophant-quickstart . -n <your-ns> --wait --timeout=10m
 ```
 
-Then provision one or more tenants from a tenant marker file; re-run to upgrade
-the tenant in place:
+Then provision one or more tenants from a values file
+([`examples/tenants/e2e-test.yaml`](../../examples/tenants/e2e-test.yaml)); re-run
+to upgrade the tenant in place:
 
 ```sh
-syco tenant up -f <provision-tenant marker file>
+syco tenant up -f examples/tenants/e2e-test.yaml --set tenant.name=acme
 ```
 
 ## Uninstall
