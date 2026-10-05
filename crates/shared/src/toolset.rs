@@ -1,15 +1,13 @@
 //! Toolset config and tool-call validation. `CapabilityGrant` pairs one Secret
 //! with one egress destination, `ToolsetConfig`/`ToolsetEntry` carry each
-//! toolset's runtime shape (merged live from the per-toolset `toolset-<name>`
-//! ConfigMaps the harness watches), and `validate_call_input` checks an LLM's
-//! arguments against a tool's `ArgDecl`s.
+//! toolset's image, runtime shape and tools (merged live from the per-toolset
+//! `toolset-<name>` ConfigMaps the harness watches), and `validate_call_input`
+//! checks an LLM's arguments against a tool's `ArgDecl`s.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use k8s_openapi::api::core::v1::ConfigMap;
-use serde::{Deserialize, Serialize};
-
-use crate::configmap_watcher::merge_configmaps;
+use serde::Deserialize;
 
 /// Conventional mount path for the workspace PVC inside every tool Job.
 /// Not configurable: tool images target `/workspace`.
@@ -75,26 +73,21 @@ impl TryFrom<RawGrant> for CapabilityGrant {
     }
 }
 
-/// The `data` key each per-toolset ConfigMap carries its one-entry
-/// `{name: entry}` map under.
-pub const TOOLSET_DATA_KEY: &str = "toolset.yaml";
-
-/// The operator-authored toolset config, merged from the per-toolset
-/// `toolset-<name>` ConfigMaps labelled `sycophant.md/type: toolset`.
+/// The live toolset table, keyed by the `app.kubernetes.io/name` label of each
+/// `toolset-<name>` ConfigMap labelled `sycophant.md/type: toolset`.
 #[derive(Clone, Default)]
 pub struct ToolsetConfig {
     map: HashMap<String, ToolsetEntry>,
 }
 
 impl ToolsetConfig {
-    /// Merge every per-toolset ConfigMap into one table.
+    /// Merge every toolset ConfigMap into one table. A ConfigMap that fails to
+    /// parse is skipped and named in the returned errors.
     pub fn merge_configmaps<'a, I>(cms: I) -> (Self, Vec<String>)
     where
         I: IntoIterator<Item = &'a ConfigMap>,
     {
-        let (map, errors) = merge_configmaps(cms, TOOLSET_DATA_KEY, |raw| {
-            serde_yaml::from_str(raw).map_err(|e| e.to_string())
-        });
+        let (map, errors) = crate::configmap_watcher::merge_labelled(cms, ToolsetEntry::from_data);
         (Self { map }, errors)
     }
 
@@ -111,67 +104,141 @@ impl ToolsetConfig {
     pub fn get(&self, name: &str) -> Option<&ToolsetEntry> {
         self.map.get(name)
     }
-
-    pub fn names(&self) -> Vec<String> {
-        let mut out: Vec<String> = self.map.keys().cloned().collect();
-        out.sort();
-        out
-    }
-
-    pub fn entries(&self) -> impl Iterator<Item = (&String, &ToolsetEntry)> {
-        self.map.iter()
-    }
 }
 
-/// One toolset entry. Runtime shape only: it owns no credential and no network
-/// hole.
+/// One toolset, parsed from its ConfigMap's flat data. It owns no credential
+/// and no network hole.
 ///
 /// `image` selects the tool job's pod; `keepalive` tells the reader when to reap
 /// it. Neither is forwarded to the tool job. `env` forwards each key verbatim
-/// into the tool job as an environment variable.
-#[derive(Deserialize, Clone, Debug, Default)]
-#[serde(deny_unknown_fields)]
+/// into the tool job as an environment variable. `tools` are the tools the
+/// image serves.
+#[derive(Clone, Debug, Default)]
 pub struct ToolsetEntry {
-    #[serde(default)]
     pub image: Option<String>,
-
-    #[serde(default)]
     pub keepalive: bool,
-
-    #[serde(default, rename = "deadlineSeconds")]
-    pub deadline_seconds: Option<u64>,
-
-    #[serde(default)]
-    pub env: HashMap<String, Scalar>,
+    pub deadline_seconds: Option<i64>,
+    pub env: HashMap<String, String>,
+    pub tools: Vec<ToolDecl>,
 }
 
-/// An `env` value. Only a scalar can become an environment variable, so
-/// the type admits nothing else and a map or list fails the parse.
-#[derive(Deserialize, Clone, Debug, PartialEq)]
-#[serde(untagged)]
-pub enum Scalar {
-    Bool(bool),
-    Number(serde_yaml::Number),
-    String(String),
+/// One tool a toolset serves: its LLM-facing name and description and its
+/// declared args.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ToolDecl {
+    pub name: String,
+    pub description: String,
+    pub args: Vec<ArgDecl>,
 }
 
-impl Scalar {
-    fn as_env_value(&self) -> String {
-        match self {
-            Scalar::Bool(b) => b.to_string(),
-            Scalar::Number(n) => n.to_string(),
-            Scalar::String(s) => s.clone(),
-        }
+impl ToolDecl {
+    /// The tool's JSON Schema `parameters` object, generated from its args.
+    pub fn parameters_json(&self) -> String {
+        let required: Vec<&str> = self
+            .args
+            .iter()
+            .filter(|a| a.required)
+            .map(|a| a.name.as_str())
+            .collect();
+        let properties: serde_json::Map<String, serde_json::Value> = self
+            .args
+            .iter()
+            .map(|a| {
+                let mut prop = serde_json::json!({"type": a.ty.as_schema_str()});
+                if let Some(d) = &a.description {
+                    prop["description"] = d.clone().into();
+                }
+                (a.name.clone(), prop)
+            })
+            .collect();
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": required,
+            "properties": properties,
+        })
+        .to_string()
     }
 }
 
+/// One tool's args as flat fields, keyed by arg name then attribute.
+type ArgFields<'a> = BTreeMap<&'a str, BTreeMap<&'a str, &'a str>>;
+
 impl ToolsetEntry {
+    /// Build one toolset from flat keys: `image`, `keepalive`,
+    /// `deadlineSeconds`, `env.<NAME>`, `tool.<name>.description` and
+    /// `tool.<name>.arg.<arg>.<type|required|env|description>`.
+    fn from_data(data: &BTreeMap<String, String>) -> Result<Self, String> {
+        let mut entry = ToolsetEntry::default();
+        let mut tools: BTreeMap<&str, (String, ArgFields)> = BTreeMap::new();
+        for (key, value) in data {
+            match key.as_str() {
+                "image" => entry.image = Some(value.clone()),
+                "keepalive" => entry.keepalive = value == "true",
+                "deadlineSeconds" => {
+                    entry.deadline_seconds = Some(
+                        value
+                            .parse::<i64>()
+                            .map_err(|_| format!("deadlineSeconds {value:?} is not a number"))?,
+                    )
+                }
+                _ => {
+                    if let Some(name) = key.strip_prefix("env.") {
+                        entry.env.insert(name.to_string(), value.clone());
+                        continue;
+                    }
+                    let unknown = || format!("unknown key {key}");
+                    let rest = key.strip_prefix("tool.").ok_or_else(unknown)?;
+                    let (tool, field) = rest.split_once('.').ok_or_else(unknown)?;
+                    let slot = tools.entry(tool).or_default();
+                    if field == "description" {
+                        slot.0 = value.clone();
+                    } else {
+                        let (arg, attr) = field
+                            .strip_prefix("arg.")
+                            .and_then(|a| a.split_once('.'))
+                            .ok_or_else(unknown)?;
+                        slot.1.entry(arg).or_default().insert(attr, value);
+                    }
+                }
+            }
+        }
+        for (name, (description, args)) in tools {
+            let args = args
+                .into_iter()
+                .map(|(arg, attrs)| {
+                    let field = |attr: &str| {
+                        attrs
+                            .get(attr)
+                            .ok_or_else(|| format!("tool.{name}.arg.{arg}.{attr} is missing"))
+                    };
+                    let ty = field("type")?;
+                    Ok(ArgDecl {
+                        name: arg.to_string(),
+                        ty: ArgType::from_schema_str(ty).ok_or_else(|| {
+                            format!("tool.{name}.arg.{arg}.type {ty:?} is unknown")
+                        })?,
+                        required: attrs.get("required") == Some(&"true"),
+                        env: field("env")?.to_string(),
+                        description: attrs.get("description").map(|d| d.to_string()),
+                    })
+                })
+                .collect::<Result<_, String>>()?;
+            entry.tools.push(ToolDecl {
+                name: name.to_string(),
+                description,
+                args,
+            });
+        }
+        Ok(entry)
+    }
+
     /// The `env` keys as environment pairs, in a stable order.
     pub fn forwarded_env(&self) -> Vec<(String, String)> {
         let mut out: Vec<(String, String)> = self
             .env
             .iter()
-            .map(|(key, value)| (key.clone(), value.as_env_value()))
+            .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
         out.sort();
         out
@@ -221,21 +288,16 @@ pub fn tool_name_to_k8s_segment(name: &str) -> String {
 /// A single declared tool argument: its LLM-facing `name`, JSON `ty`, whether
 /// it is `required`, the `env` var the runtime sets from its value, and an
 /// optional `description`. Feeds the per-workspace harness dispatch producer.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ArgDecl {
     pub name: String,
-    #[serde(rename = "type")]
     pub ty: ArgType,
-    #[serde(default)]
     pub required: bool,
     pub env: String,
-    #[serde(default)]
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgType {
     String,
     Integer,
@@ -343,6 +405,88 @@ pub fn validate_call_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_parameters_match_stdlib_read_schema() {
+        let cm = ConfigMap {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some("toolset-stdlib".into()),
+                labels: Some(
+                    [("app.kubernetes.io/name".to_string(), "stdlib".to_string())].into(),
+                ),
+                ..Default::default()
+            },
+            data: Some(
+                [
+                    ("image", "ghcr.io/sycophant-md/toolset@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+                    ("tool.Read.description", "Read a text file."),
+                    ("tool.Read.arg.file_path.type", "string"),
+                    ("tool.Read.arg.file_path.required", "true"),
+                    ("tool.Read.arg.file_path.env", "path"),
+                    ("tool.Read.arg.file_path.description", "File path."),
+                    ("tool.Read.arg.offset.type", "integer"),
+                    ("tool.Read.arg.offset.required", "false"),
+                    ("tool.Read.arg.offset.env", "offset"),
+                    ("tool.Read.arg.offset.description", "1-indexed starting line (default 1)."),
+                    ("tool.Read.arg.limit.type", "integer"),
+                    ("tool.Read.arg.limit.env", "limit"),
+                    ("tool.Read.arg.limit.description", "Max lines to return (default unlimited)."),
+                ]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ),
+            ..Default::default()
+        };
+        let (config, errors) = ToolsetConfig::merge_configmaps([&cm]);
+        assert!(errors.is_empty(), "{errors:?}");
+        let read = config
+            .get("stdlib")
+            .unwrap()
+            .tools
+            .iter()
+            .find(|t| t.name == "Read")
+            .unwrap();
+
+        let got: serde_json::Value = serde_json::from_str(&read.parameters_json()).unwrap();
+        assert_eq!(
+            got,
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["file_path"],
+                "properties": {
+                    "file_path": {"type": "string", "description": "File path."},
+                    "offset": {"type": "integer", "description": "1-indexed starting line (default 1)."},
+                    "limit": {"type": "integer", "description": "Max lines to return (default unlimited)."}
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn flat_data_sets_runtime_fields_and_rejects_a_bad_deadline() {
+        let mut data: BTreeMap<String, String> = [
+            ("image", "ghcr.io/x/git@sha256:00"),
+            ("keepalive", "true"),
+            ("deadlineSeconds", "300"),
+            ("env.GIT_TERMINAL_PROMPT", "0"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let entry = ToolsetEntry::from_data(&data).unwrap();
+        assert_eq!(entry.image.as_deref(), Some("ghcr.io/x/git@sha256:00"));
+        assert!(entry.keepalive);
+        assert_eq!(entry.deadline_seconds, Some(300));
+        assert_eq!(
+            entry.forwarded_env(),
+            vec![("GIT_TERMINAL_PROMPT".to_string(), "0".to_string())]
+        );
+
+        data.insert("deadlineSeconds".into(), "x".into());
+        assert!(ToolsetEntry::from_data(&data).is_err());
+    }
 
     fn arg(name: &str, ty: ArgType, required: bool, env: &str) -> ArgDecl {
         ArgDecl {

@@ -47,7 +47,7 @@ EXCLUDES=(
 # A guard has to name what it forbids. This sweep's mechanism is absence, not
 # rejection, so no in-scope fixture asserts these keys are rejected. The script
 # itself is the only file that names every forbidden string, so it excludes
-# itself the way toolset-axes-sweep-gate.sh does. main.rs is the binary
+# itself. main.rs is the binary
 # entrypoint -- it wires the provider from config and stages credentials, never
 # building the request body -- so its only matches are credential-staging test
 # fixtures (a `json!` map that is not a provider params map). The request body

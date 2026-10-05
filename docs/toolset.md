@@ -2,11 +2,11 @@
 
 [![made-with-rust](https://img.shields.io/badge/Made%20with-Rust-1f425f.svg)](https://www.rust-lang.org/)
 
-A toolset is a credentialed capability an agent workspace can call. The Harness is the one pod that spawns credentialed ephemeral Jobs: it reads its tool catalog once at boot from a chart-rendered ConfigMap, creates a short-lived Job for every tool call and every remote model call, and dials the serving Job pod directly. It holds the sole `jobs:create` grant in the tenant namespace and never reads a credential — kubelet mounts secrets into the Jobs, not the Harness.
+A toolset is a credentialed capability an agent workspace can call. The Harness is the one pod that spawns credentialed ephemeral Jobs: it watches the toolset ConfigMaps for its tool catalog, creates a short-lived Job for every tool call and every remote model call, and dials the serving Job pod directly. It holds the sole `jobs:create` grant in the tenant namespace and never reads a credential — kubelet mounts secrets into the Jobs, not the Harness.
 
 ## How It Works
 
-The Harness creates and dials every capability Job. There is no separate controller pod: the Harness reads its resolved tool catalog once at boot from the mounted `capability-manifest-<workspace>` ConfigMap, and from then on it spawns and dials Jobs itself. It creates two capability-job kinds over a set of predefined toolset images:
+The Harness creates and dials every capability Job. There is no separate controller pod: the Harness builds its tool catalog from the watched `toolset-<name>` ConfigMaps of the toolsets its workspace binds, and spawns and dials Jobs itself. It creates two capability-job kinds over a set of predefined toolset images:
 
 1. **Inference job** — the remote model call. For a remote `baseUrl` the Harness spawns an `inference-runtime` Job, dials it, and streams the model's result events back. This is the LLM dispatch that used to be a separate pod; there is no separate LLM-dispatch controller.
 
@@ -30,7 +30,7 @@ Spawning a credentialed pod is the sharpest privilege in the namespace. Making t
 ```
    Harness ──────────────────────────────────────────────┐
    (agent loop,        creates k8s Jobs (sole jobs:create) │
-    conversation       reads catalog from mounted ConfigMap │
+    conversation       watches toolset ConfigMaps          │
     history,                                                │  dials each pod
     dials pods)                                             │  (headless per-pod DNS)
                                           ┌─────────────────┴─────────────┐
@@ -50,57 +50,78 @@ The Harness spawns the matching capability Job and dials it over a headless per-
 
 ## Toolset Configuration
 
-Toolsets are chart values, not CRs. `charts/sycophant-tenant` renders each
-`toolsets` entry into its own `toolset-<name>` ConfigMap, which the Harness
-watches live, and each workspace's resolved catalog into a
-`capability-manifest-<workspace>` ConfigMap the Harness reads once at startup.
-Changing the catalog rolls the Harness pod.
+Each toolset is one marker, `provision-toolset-<name>`, applied with
+`syco toolset up -f <file>` and removed with
+`syco toolset down <name> --tenant <t>`. Its installer renders one
+`toolset-<name>` ConfigMap whose data is the marker's data. The Harness watches
+those ConfigMaps and lists the tools of each toolset named in its workspace's
+`toolsets`, with no restart. A toolset whose tool shadows a built-in Harness
+tool, or whose arg maps to `HOME` or a `TOOLSET_` env, is left out with a
+warning naming it.
 
-An entry is flat. `image` and `keepalive` are read by the Harness: `image`
-selects the tool job's pod, `keepalive` sets the Job restart policy and idle-reap.
-Neither is forwarded to the tool job.
+Marker data is flat strings:
 
-An entry owns no credential and no network hole. Both come from the binding
-workspace's grants, so one generic toolset definition serves every
-workspace. `env` keys are forwarded into the tool job verbatim as env vars.
+- `image`, pinned by digest (`<ref>@sha256:<64 hex>`);
+- `keepalive`, `"true"` or `"false"`: sets the Job restart policy and idle-reap;
+- `deadlineSeconds`, a positive integer overriding the tool-job runtime bound;
+- `env.<NAME>`, forwarded into the tool job verbatim;
+- `tool.<name>.description`;
+- `tool.<name>.arg.<arg>.<type|required|env|description>`.
+
+A marker owns no credential and no network hole. Both come from the binding
+workspace's grants, so one toolset serves every workspace.
 
 ### A tool toolset
 
-An image holding one or more tools. Each image bakes its canonical schema as a
-`tools.yaml` at `/etc/toolset/tools.yaml` and carries the
-`md.sycophant.tools.source` label pointing at it. `syco toolset manifest <image>`
-reads that baked file back out of the built image to build the capability
-manifest. Each tool declares a structured arg schema the Harness validates the
-model's input against before dispatch.
+An image holding one or more tools. Each image directory holds a flat
+`tools.yaml` whose keys are the marker's `tool.*` keys. Every value is a quoted
+string, including `"true"` and `"false"`. The builder converts it to one-line
+JSON, fails on any non-string value, and stamps it on the image as the
+`md.sycophant.tools` label:
+
+```sh
+label=$(yq -o=json -I=0 tools.yaml \
+  | jq -ce 'if all(.[]; type=="string") then . else error("non-string value") end')
+docker build --label md.sycophant.tools="$label" ...
+```
+
+The operator copies the label into the marker:
 
 ```yaml
-toolsets:
-  git-ops:
-    image: ghcr.io/calebfaruki/toolset-git:latest
-    keepalive: false
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-toolset-git-ops
+  namespace: tenant-acme
+  labels:
+    sycophant.md/lifecycle-marker: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  image: ghcr.io/calebfaruki/toolset-git@sha256:...
+  keepalive: "false"
+  tool.git-status.description: Show the working tree status in the workspace.
 ```
+
+The Harness generates each tool's JSON Schema `parameters` from its args and
+validates the model's input against them before dispatch.
 
 The workspace PVC is always mounted RW at `/workspace`.
 
 ### Grants
 
-A workspace binds a toolset either by bare name or by an object carrying
-grants. A grant is one operator-approved credential scoped to that
-(workspace, toolset) pair: it names a Kubernetes Secret, and optionally a `path`
-where the credential file lands and one `egress` domain.
+A workspace marker lists the toolsets it binds in `toolsets` and carries its
+grants as `grant.<toolset>.<grant>.<field>` keys. A grant is one
+operator-approved credential scoped to that (workspace, toolset) pair: it names
+a Kubernetes Secret, and optionally a `path` where the credential file lands and
+one `egress` domain. A grant may name only a toolset in `toolsets`.
 
 ```yaml
-workspaces:
-  research:
-    toolsets:
-      - name: git-ops
-        grants:
-          deploy-key:
-            secret: research-git-ssh-key
-            path: /home/agent/.ssh/id_ed25519
-          github:
-            secret: research-github-token
-            egress: github.com
+data:
+  toolsets: stdlib,git-ops
+  grant.git-ops.deploy-key.secret: research-git-ssh-key
+  grant.git-ops.deploy-key.path: /home/agent/.ssh/id_ed25519
+  grant.git-ops.github.secret: research-github-token
+  grant.git-ops.github.egress: github.com
 ```
 
 A tool call selects one grant by name from those grants; a name outside it is

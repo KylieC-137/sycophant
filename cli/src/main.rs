@@ -5,7 +5,6 @@ mod interrupt;
 mod runner;
 mod scope;
 mod sync;
-mod values;
 
 use std::process;
 
@@ -24,22 +23,24 @@ fn main() {
         Command::Destroy(_) => commands::destroy::run(),
         Command::Upgrade(cmd) => commands::upgrade::run(cmd),
         Command::Tenant(cmd) => commands::tenant::run(cmd),
-        Command::Toolset(cmd) => commands::toolset::run(cmd),
-        Command::Workspace(cli::MarkerCmd {
-            sub: cli::MarkerSub::Up(c),
-        }) => commands::marker::up("workspace", &c.file),
+        Command::Toolset(cmd) => component("toolset", cmd),
+        Command::Workspace(cmd) => component("workspace", cmd),
         Command::User(cli::MarkerCmd {
             sub: cli::MarkerSub::Up(c),
         }) => commands::marker::up("user", &c.file),
-        Command::Inference(cli::InferenceCmd { sub }) => match sub {
-            cli::InferenceSub::Up(c) => commands::marker::up("inference", &c.file),
-            cli::InferenceSub::Down(c) => commands::marker::down("inference", &c.name, &c.tenant),
-        },
+        Command::Inference(cmd) => component("inference", cmd),
     };
 
     if let Err(e) = result {
         eprintln!("Error: {e}");
         process::exit(1);
+    }
+}
+
+fn component(kind: &str, cmd: cli::ComponentCmd) -> Result<(), String> {
+    match cmd.sub {
+        cli::ComponentSub::Up(c) => commands::marker::up(kind, &c.file),
+        cli::ComponentSub::Down(c) => commands::marker::down(kind, &c.name, &c.tenant),
     }
 }
 

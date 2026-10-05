@@ -57,12 +57,6 @@ results:
     result: fail
     resources:
       - tenant-acme/provision-user-3f1e2d3c4b
-  - policy: marker-provision-workspace
-    isValidatingAdmissionPolicy: true
-    kind: ConfigMap
-    result: fail
-    resources:
-      - tenant-acme/provision-workspace-two
   - policy: marker-provision-user
     isValidatingAdmissionPolicy: true
     kind: ConfigMap

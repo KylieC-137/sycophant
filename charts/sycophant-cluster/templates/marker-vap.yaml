@@ -12,7 +12,8 @@ the policy cannot evaluate.
 
 Params: ctx, name (policy name), marker (marker name, or the name prefix when
 prefix is true, with the rest of the name in variables.suffix), keys (the
-closed set of data keys), noun and action (for the identity message), shape
+closed set of data keys), keyPattern and keyHelp (optional: a regex a key may
+match instead, and its wording for the message), noun and action (for the identity message), shape
 (extra validations), and system (true when the marker lives in
 sycophant-system rather than a tenant namespace).
 */ -}}
@@ -55,12 +56,14 @@ spec:
         has(request.userInfo.username) &&
         request.userInfo.username.startsWith('{{ include "sycophant.idpUserPrefix" $ctx }}')
       message: "a {{ .noun }} marker is admitted only for an issuer-prefixed user identity; standing cluster credentials cannot {{ .action }}"
+    {{- $known := printf "k in %s" (.keys | toJson | replace "\"" "'") }}
+    {{- if .keyPattern }}{{ $known = printf "(%s || k.matches(r'%s'))" $known .keyPattern }}{{ end }}
     - expression: >-
-        !has(object.data) || object.data.all(k, k in {{ .keys | toJson | replace "\"" "'" }})
+        !has(object.data) || object.data.all(k, {{ $known }})
       messageExpression: >-
         "a {{ .noun }} marker carries unknown key '" +
-        object.data.filter(k, !(k in {{ .keys | toJson | replace "\"" "'" }}))[0] +
-        "'; {{ if .keys }}allowed keys are {{ join ", " .keys }}{{ else }}it carries no data{{ end }}"
+        object.data.filter(k, !({{ $known }}))[0] +
+        "'; {{ if .keys }}allowed keys are {{ join ", " .keys }}{{ with .keyHelp }}, {{ . }}{{ end }}{{ else }}it carries no data{{ end }}"
     {{- .shape | trim | nindent 4 }}
     # A marker is a sycophant-controlled object, so it must carry part-of=sycophant.
     - expression: >-
@@ -106,15 +109,69 @@ a missing one would abort the whole generate silently, so it fails closed here.
 ---
 {{ include "sycophant.markerVap" (dict "ctx" . "name" "marker-provision-workspace" "prefix" true
   "marker" (include "sycophant.workspaceProvisionMarkerName" .) "noun" "workspace" "action" "mint a workspace"
-  "keys" (list "values")
+  "keys" (list "toolsets" "models" "storage")
+  "keyPattern" `^grant\.[a-z0-9]([-a-z0-9]*[a-z0-9])?\.[a-z0-9]([-a-z0-9]*[a-z0-9])?\.(secret|path|egress)$`
+  "keyHelp" "grant.<toolset>.<grant>.<secret|path|egress>"
   "shape" `
 - expression: >-
     variables.suffix.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
     size(variables.suffix) <= 43
   message: "a workspace marker name must be provision-workspace-<name> with a DNS-safe name of at most 43 characters, so the release workspace-<name> fits helm's 53"
 - expression: >-
-    has(object.data) && 'values' in object.data
-  message: "a workspace marker must carry a 'values' key"` ) }}
+    !has(object.data) || ['toolsets', 'models'].all(k, !(k in object.data) ||
+    object.data[k].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(,[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'))
+  messageExpression: >-
+    "a workspace marker's '" +
+    ['toolsets', 'models'].filter(k, k in object.data &&
+    !object.data[k].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(,[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'))[0] +
+    "' must be a comma list of DNS-safe names"
+- expression: >-
+    !has(object.data) || !('storage' in object.data) || isQuantity(object.data['storage'])
+  message: "a workspace marker's 'storage' must be a quantity"
+- expression: >-
+    !has(object.data) || object.data.all(k, !k.startsWith('grant.') ||
+    k.split('.')[1] in object.data.?toolsets.orValue('').split(','))
+  messageExpression: >-
+    "a workspace marker's '" +
+    object.data.filter(k, k.startsWith('grant.') &&
+    !(k.split('.')[1] in object.data.?toolsets.orValue('').split(',')))[0] +
+    "' grants a toolset not in 'toolsets'"
+- expression: >-
+    !has(object.data) || object.data.all(k, !k.startsWith('grant.') ||
+    k.substring(0, k.lastIndexOf('.')) + '.secret' in object.data)
+  messageExpression: >-
+    "a workspace marker's '" +
+    object.data.filter(k, k.startsWith('grant.') &&
+    !(k.substring(0, k.lastIndexOf('.')) + '.secret' in object.data))[0] +
+    "' has no '.secret' beside it"
+- expression: >-
+    !has(object.data) || object.data.all(k, !(k.startsWith('grant.') && k.endsWith('.secret')) ||
+    object.data[k].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'))
+  message: "a workspace grant's 'secret' must be a Secret name"
+- expression: >-
+    !has(object.data) || object.data.all(k, !(k.startsWith('grant.') && k.endsWith('.path')) ||
+    object.data[k].matches('^/[^\\s]*$'))
+  messageExpression: >-
+    "a workspace marker's '" +
+    object.data.filter(k, k.startsWith('grant.') && k.endsWith('.path') &&
+    !object.data[k].matches('^/[^\\s]*$'))[0] + "' must be an absolute path"
+- expression: >-
+    !has(object.data) || object.data.all(k, !(k.startsWith('grant.') && k.endsWith('.egress')) ||
+    object.data[k].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$'))
+  messageExpression: >-
+    "a workspace marker's '" +
+    object.data.filter(k, k.startsWith('grant.') && k.endsWith('.egress') &&
+    !object.data[k].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$'))[0] +
+    "' must be a dotted hostname"` ) }}
+---
+{{ include "sycophant.markerVap" (dict "ctx" . "name" "marker-reap-workspace" "prefix" true
+  "marker" "reap-workspace" "noun" "reap-workspace" "action" "remove a workspace"
+  "keys" (list)
+  "shape" `
+- expression: >-
+    variables.suffix.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
+    size(variables.suffix) <= 43
+  message: "a reap marker name must be reap-workspace-<name> with a DNS-safe name of at most 43 characters"` ) }}
 ---
 {{ include "sycophant.markerVap" (dict "ctx" . "name" "marker-provision-user" "prefix" true
   "marker" (include "sycophant.userProvisionMarkerName" .) "noun" "user" "action" "bind a framework user"
@@ -134,15 +191,68 @@ a missing one would abort the whole generate silently, so it fails closed here.
 ---
 {{ include "sycophant.markerVap" (dict "ctx" . "name" "marker-provision-toolset" "prefix" true
   "marker" (include "sycophant.toolsetProvisionMarkerName" .) "noun" "toolset" "action" "install a toolset"
-  "keys" (list "values")
+  "keys" (list "image" "keepalive" "deadlineSeconds")
+  "keyPattern" `^(env\.[A-Za-z_][A-Za-z0-9_]*|tool\.[A-Za-z0-9_-]+\.description|tool\.[A-Za-z0-9_-]+\.arg\.[A-Za-z0-9_-]+\.(type|required|env|description))$`
+  "keyHelp" "env.<NAME>, tool.<name>.description, tool.<name>.arg.<arg>.<type|required|env|description>"
   "shape" `
 - expression: >-
     variables.suffix.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
     size(variables.suffix) <= 45
   message: "a toolset marker name must be provision-toolset-<name> with a DNS-safe name of at most 45 characters, so the release toolset-<name> fits helm's 53"
 - expression: >-
-    has(object.data) && 'values' in object.data
-  message: "a toolset marker must carry a 'values' key"` ) }}
+    has(object.data) && object.data.?image.orValue('').matches(r'^[^@\s]+@sha256:[a-f0-9]{64}$')
+  message: "a toolset marker's 'image' must be pinned by digest, <ref>@sha256:<64 hex>"
+- expression: >-
+    !has(object.data) || object.data.?keepalive.orValue('false') in ['true', 'false']
+  message: "a toolset marker's 'keepalive' must be \"true\" or \"false\""
+- expression: >-
+    !has(object.data) || object.data.?deadlineSeconds.orValue('1').matches('^[1-9][0-9]*$')
+  message: "a toolset marker's 'deadlineSeconds' must be a positive integer"
+- expression: >-
+    !has(object.data) || object.data.all(k, !k.matches(r'^tool\.[A-Za-z0-9_-]+\.arg\.[A-Za-z0-9_-]+\.type$') ||
+      object.data[k] in ['string', 'integer', 'number', 'boolean'])
+  messageExpression: >-
+    "a toolset marker's '" +
+    object.data.filter(k, k.matches(r'^tool\.[A-Za-z0-9_-]+\.arg\.[A-Za-z0-9_-]+\.type$') &&
+      !(object.data[k] in ['string', 'integer', 'number', 'boolean']))[0] +
+    "' must be one of string, integer, number, boolean"
+- expression: >-
+    !has(object.data) || object.data.all(k, !k.matches(r'^tool\.[A-Za-z0-9_-]+\.arg\.[A-Za-z0-9_-]+\.required$') ||
+      object.data[k] in ['true', 'false'])
+  messageExpression: >-
+    "a toolset marker's '" +
+    object.data.filter(k, k.matches(r'^tool\.[A-Za-z0-9_-]+\.arg\.[A-Za-z0-9_-]+\.required$') &&
+      !(object.data[k] in ['true', 'false']))[0] +
+    "' must be \"true\" or \"false\""
+- expression: >-
+    !has(object.data) || object.data.all(k, !k.matches(r'^tool\.[A-Za-z0-9_-]+\.arg\.[A-Za-z0-9_-]+\.env$') ||
+      object.data[k].matches('^[A-Za-z_][A-Za-z0-9_]*$'))
+  messageExpression: >-
+    "a toolset marker's '" +
+    object.data.filter(k, k.matches(r'^tool\.[A-Za-z0-9_-]+\.arg\.[A-Za-z0-9_-]+\.env$') &&
+      !object.data[k].matches('^[A-Za-z_][A-Za-z0-9_]*$'))[0] +
+    "' must be an environment variable name"
+- expression: >-
+    !has(object.data) || object.data.all(k, !k.matches(r'^tool\.[A-Za-z0-9_-]+\.arg\.[A-Za-z0-9_-]+\.[a-z]+$') ||
+      (k.substring(0, k.lastIndexOf('.')) + '.type' in object.data &&
+       k.substring(0, k.lastIndexOf('.')) + '.env' in object.data))
+  messageExpression: >-
+    "a toolset marker is missing '" +
+    object.data.filter(k, k.matches(r'^tool\.[A-Za-z0-9_-]+\.arg\.[A-Za-z0-9_-]+\.[a-z]+$') &&
+      !(k.substring(0, k.lastIndexOf('.')) + '.type' in object.data &&
+        k.substring(0, k.lastIndexOf('.')) + '.env' in object.data))
+      .map(k, k.substring(0, k.lastIndexOf('.')))
+      .map(p, p + '.type' in object.data ? p + '.env' : p + '.type')[0] +
+    "'; every arg needs a type and an env"` ) }}
+---
+{{ include "sycophant.markerVap" (dict "ctx" . "name" "marker-reap-toolset" "prefix" true
+  "marker" "reap-toolset" "noun" "reap-toolset" "action" "remove a toolset"
+  "keys" (list)
+  "shape" `
+- expression: >-
+    variables.suffix.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
+    size(variables.suffix) <= 45
+  message: "a reap marker name must be reap-toolset-<name> with a DNS-safe name of at most 45 characters"` ) }}
 ---
 {{- /*
 One model per marker. A `server.image` key makes it local: the chart renders

@@ -9,7 +9,7 @@ description: |
   Renders the per-tenant relay controller, per-workspace harness Pods,
   per-model inference Pods, per-grant CNPs, and all related per-tenant
   configuration. Harness Pods, PVCs, SAs, and their capability ConfigMaps
-  are rendered by helm from `.Values.workspaces`. Each harness syncs its
+  are rendered by helm from each workspace marker. Each harness syncs its
   own instructions from object storage into an emptyDir at pod start and
   reads them in-process. No cluster-scoped resources.
 version: 0.1.0

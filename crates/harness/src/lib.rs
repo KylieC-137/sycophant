@@ -1,5 +1,4 @@
 mod agent;
-mod capability_manifest;
 mod channel_tools;
 mod clients;
 mod config;
@@ -32,7 +31,6 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use capability_manifest::CapabilityManifest;
 use config::HarnessConfig;
 use conversation::{ConversationStoreFactory, LocalFsFactory};
 use dispatch::DispatchState;
@@ -124,17 +122,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     // The live toolset table, empty at boot; the toolset watcher below fills it.
     let toolset_config = Arc::new(RwLock::new(ToolsetConfig::empty()));
-    // The tool catalog, read once at boot from the mounted capability manifest.
-    // It carries each bound toolset's tools with their argument schemas and this
-    // workspace's resolved grants, so the harness needs no runtime discovery and
-    // no credential detail crosses a controller link. Empty in local dev, where
-    // no kube client exists to spawn tool Jobs.
-    let manifest = if kube_client.is_some() {
-        CapabilityManifest::load(std::path::Path::new(&config.capability_manifest_file))
-            .map_err(|e| format!("capability manifest: {e}"))?
-    } else {
-        CapabilityManifest::empty()
-    };
     let scheduling =
         SchedulingConfig::load_or_default(&config.scheduling_file, kube_client.is_some())
             .map_err(|e| format!("scheduling config: {e}"))?;
@@ -161,9 +148,27 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         "tool dispatch ready"
     );
 
-    // The live dispatch table. Only in cluster: local dev holds no kube client
-    // and dispatches no Jobs.
+    // The toolset execution log is harness-authored and toolset-unwritable,
+    // one `execution.json` per conversation in that conversation's directory on
+    // the harness's PVC. The router derives each writer from the registry;
+    // there is no separate execution-log root.
+    let tool_router: Arc<tool_router::ToolRouter> = Arc::new(
+        tool_router::ToolRouter::new(
+            instructions.clone(),
+            config.workspace.clone(),
+            None,
+            Some(relay),
+            registry.clone(),
+        )
+        .with_dispatch(dispatch.clone())
+        .with_toolset_scope(config.toolsets.clone(), config.grants.clone()),
+    );
+
+    // The live dispatch table, which also rebuilds the router's toolset tools on
+    // every change. Only in cluster: local dev holds no kube client and
+    // dispatches no Jobs.
     if let Some(client) = kube_for_toolset {
+        let router = tool_router.clone();
         // An unsynced table dispatches no toolset, so a timeout crashes the
         // process and lets the kubelet's restart backoff retry rather than
         // answer every call with "not found".
@@ -173,17 +178,26 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             client,
             config.namespace.clone(),
             toolset_config.clone(),
-            |client, ns, table, tx| async move {
-                shared::configmap_watcher::watch_configmaps(
-                    client,
-                    &ns,
-                    "sycophant.md/type=toolset",
-                    "toolset",
-                    table,
-                    tx,
-                    |cms| shared::toolset::ToolsetConfig::merge_configmaps(cms.values()),
-                )
-                .await
+            move |client, ns, table, tx| {
+                let router = router.clone();
+                async move {
+                    shared::configmap_watcher::watch_configmaps(
+                        client,
+                        &ns,
+                        "sycophant.md/type=toolset",
+                        "toolset",
+                        table,
+                        tx,
+                        move |cms| {
+                            let (config, errors) = ToolsetConfig::merge_configmaps(cms.values());
+                            for warning in router.apply_toolsets(&config) {
+                                tracing::warn!(reason = %warning, "toolset excluded");
+                            }
+                            (config, errors)
+                        },
+                    )
+                    .await
+                }
             },
         )
         .await?;
@@ -226,30 +240,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         config.workspace.clone(),
         scheduling_for_inference,
     );
-
-    // The toolset execution log is harness-authored and toolset-unwritable,
-    // one `execution.json` per conversation in that conversation's directory on
-    // the harness's PVC. The router derives each writer from the registry;
-    // there is no separate execution-log root.
-    let tool_router: Arc<tool_router::ToolRouter> = Arc::new(
-        tool_router::ToolRouter::new(
-            instructions.clone(),
-            config.workspace.clone(),
-            None,
-            Some(relay),
-            registry.clone(),
-        )
-        .with_dispatch(dispatch.clone()),
-    );
-
-    // Populate the toolset-owned catalog from the mounted manifest once at boot.
-    // There is no gRPC catalog stream to wait on: the manifest is a static file,
-    // and a change to it rolls the pod via the manifest checksum annotation.
-    // Instructions-served tools (Skill/Skills) and the primary agent are read
-    // in-process on demand, so they need no startup barrier.
-    tool_router
-        .apply_manifest_catalog(&manifest)
-        .map_err(|e| format!("apply capability manifest: {e}"))?;
 
     let subscribed_flag = Arc::new(AtomicBool::new(false));
     tokio::spawn(healthz::serve(subscribed_flag.clone(), HEALTHZ_PORT));

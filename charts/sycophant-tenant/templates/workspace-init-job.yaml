@@ -1,6 +1,6 @@
 {{/*
-Per-workspace one-shot init Job. Renders for EVERY workspace; emits a plain
-batch/v1 Job (NOT a Helm hook) that:
+Per-workspace one-shot init Job. Renders for the workspace its marker
+installs; emits a plain batch/v1 Job (NOT a Helm hook) that:
   1. Mounts the workspace PVC at /workspace. This mount is the PVC's first
      consumer, so it also binds the PVC at install time (the StorageClass is
      WaitForFirstConsumer).
@@ -21,7 +21,8 @@ Image: toolset-git (alpine + git). No RBAC: the Job only reads/writes the
 PVC, never the apiserver. Reuses the per-workspace ServiceAccount with
 automountServiceAccountToken=false.
 */}}
-{{- range $name, $ws := .Values.workspaces }}
+{{- if eq .Values.render "workspace" }}
+{{- $name := .Values.name }}
 ---
 apiVersion: batch/v1
 kind: Job

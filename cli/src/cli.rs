@@ -17,10 +17,13 @@ pub(crate) enum Command {
     Destroy(DestroyCmd),
     Upgrade(UpgradeCmd),
     Tenant(TenantCmd),
-    Toolset(ToolsetCmd),
-    Workspace(MarkerCmd),
+    /// Install or remove one toolset through its lifecycle markers
+    Toolset(ComponentCmd),
+    /// Install or remove one workspace through its lifecycle markers
+    Workspace(ComponentCmd),
     User(MarkerCmd),
-    Inference(InferenceCmd),
+    /// Install or remove one model through its lifecycle markers
+    Inference(ComponentCmd),
 }
 
 // --- setup / destroy (cluster — no --ns) ---
@@ -54,11 +57,11 @@ pub(crate) struct UpgradeCmd {
 
 // --- tenant ---
 
-/// Operate on a tenant. `--ns <name>` selects the namespace for secret,
-/// workspace and audit, and may appear anywhere on the line.
+/// Operate on a tenant. `--ns <name>` selects the namespace for secret and
+/// audit, and may appear anywhere on the line.
 #[derive(Args)]
 pub(crate) struct TenantCmd {
-    /// tenant namespace (secret, workspace and audit only)
+    /// tenant namespace (secret and audit only)
     #[arg(long, global = true)]
     pub ns: Option<String>,
     #[command(subcommand)]
@@ -71,15 +74,13 @@ pub(crate) enum TenantSub {
     Down(TenantDown),
     Remove(TenantRemove),
     Secret(SecretCmd),
-    Workspace(WorkspaceCmd),
     Audit(AuditCmd),
 }
 
-/// Provision or re-provision a tenant through lifecycle markers. Prompts for the
-/// operator password. Applies the tenant marker file and waits for its
-/// installer, then writes one marker per workspace, user, and toolset in the
-/// tenant values file; each installer upgrades its release in place. The
-/// capacity quota is set on first provision and not resized after
+/// Provision or re-provision a tenant through its lifecycle marker. Prompts for
+/// the operator password. Applies the tenant marker file and waits for its
+/// installer, which upgrades the release in place. The capacity quota is set on
+/// first provision and not resized after
 #[derive(Args)]
 pub(crate) struct TenantUp {
     /// the provision-tenant marker file
@@ -144,56 +145,6 @@ pub(crate) struct SecretDelete {
     pub name: String,
 }
 
-// --- workspace ---
-
-/// Manage workspaces
-#[derive(Args)]
-pub(crate) struct WorkspaceCmd {
-    #[command(subcommand)]
-    pub sub: WorkspaceSub,
-}
-
-#[derive(Subcommand)]
-pub(crate) enum WorkspaceSub {
-    Create(WorkspaceCreate),
-    List(WorkspaceList),
-    Show(WorkspaceShow),
-    Delete(WorkspaceDelete),
-}
-
-/// Create a new workspace
-#[derive(Args)]
-pub(crate) struct WorkspaceCreate {
-    /// workspace name
-    pub name: String,
-}
-
-/// List configured workspaces
-#[derive(Args)]
-pub(crate) struct WorkspaceList {
-    /// emit JSON to stdout instead of human-readable table to stderr
-    #[arg(long)]
-    pub json: bool,
-}
-
-/// Show workspace details
-#[derive(Args)]
-pub(crate) struct WorkspaceShow {
-    /// workspace name
-    pub name: String,
-
-    /// emit JSON to stdout instead of human-readable output to stderr
-    #[arg(long)]
-    pub json: bool,
-}
-
-/// Delete a workspace
-#[derive(Args)]
-pub(crate) struct WorkspaceDelete {
-    /// workspace name
-    pub name: String,
-}
-
 // --- audit ---
 
 /// Audit a running workspace against the security clauses (gVisor isolation,
@@ -230,17 +181,16 @@ pub(crate) struct MarkerUp {
     pub file: String,
 }
 
-// --- inference ---
+// --- components (toolset, workspace, inference) ---
 
-/// Install or remove one model through its lifecycle markers
 #[derive(Args)]
-pub(crate) struct InferenceCmd {
+pub(crate) struct ComponentCmd {
     #[command(subcommand)]
-    pub sub: InferenceSub,
+    pub sub: ComponentSub,
 }
 
 #[derive(Subcommand)]
-pub(crate) enum InferenceSub {
+pub(crate) enum ComponentSub {
     Up(MarkerUp),
     Down(MarkerDown),
 }
@@ -255,48 +205,4 @@ pub(crate) struct MarkerDown {
     /// tenant name (the namespace is tenant-<name>)
     #[arg(long)]
     pub tenant: String,
-}
-
-// --- toolset ---
-
-/// Inspect and build from toolset images, and apply toolset markers
-#[derive(Args)]
-pub(crate) struct ToolsetCmd {
-    #[command(subcommand)]
-    pub sub: ToolsetSub,
-}
-
-#[derive(Subcommand)]
-pub(crate) enum ToolsetSub {
-    Lint(ToolsetLint),
-    Manifest(ToolsetManifest),
-    Up(MarkerUp),
-}
-
-/// Statically check a toolset directory for shell-injection vulnerabilities
-/// in its dispatch and Makefile against the tools.yaml schema vars.
-#[derive(Args)]
-pub(crate) struct ToolsetLint {
-    /// path to the toolset directory (must contain a Dockerfile and a
-    /// tools.yaml; dispatch and Makefile are linted if present)
-    pub path: String,
-}
-
-/// Read a built toolset image's baked schema (`/etc/toolset/tools.yaml`) and
-/// emit its capability-manifest content to stdout. Fails closed (non-zero, no
-/// output) for an image carrying no baked schema.
-#[derive(Args)]
-pub(crate) struct ToolsetManifest {
-    /// image reference to read the baked schema from (must be present locally)
-    pub image: String,
-
-    /// owning toolset name recorded on each tool. Defaults to the image
-    /// reference's repository basename.
-    #[arg(long)]
-    pub toolset: Option<String>,
-
-    /// path to a grants file (YAML/JSON map of grant-name -> {secret, path?,
-    /// egress?}) merged onto every tool in the emitted manifest.
-    #[arg(long)]
-    pub grants: Option<String>,
 }

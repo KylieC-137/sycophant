@@ -37,7 +37,8 @@
 {{- $endpointHostParts := (splitList "." $endpointHost) }}
 {{- $storeNamespace := "" }}
 {{- if ge (len $endpointHostParts) 2 }}{{ $storeNamespace = (index $endpointHostParts 1) }}{{- end }}
-{{- range $name, $ws := .Values.workspaces }}
+{{- if eq .Values.render "workspace" }}
+{{- $name := .Values.name }}
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy

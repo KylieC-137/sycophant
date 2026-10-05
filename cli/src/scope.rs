@@ -20,8 +20,7 @@ fn config_dir_from(over: Option<OsString>, home: Option<OsString>) -> Option<Pat
 
 /// A sycophant config scope rooted at the global config dir
 /// (`~/.config/sycophant`). Charts/examples live at the root; when `tenant` is
-/// set (every `syco tenant` command but `up`), the namespace-scoped
-/// accessors (`release_name`, `values_file`) resolve to that tenant.
+/// set, `release_name` resolves to that tenant.
 pub(crate) struct Scope {
     pub root: PathBuf,
     pub tenant: Option<String>,
@@ -38,8 +37,7 @@ impl Scope {
     }
 
     /// Global scope bound to a named tenant: `release_name()` returns the
-    /// tenant, `values_file()` resolves the per-tenant values, chart dirs stay
-    /// global.
+    /// tenant, chart dirs stay global.
     pub(crate) fn for_tenant(ns: &str) -> Result<Self, String> {
         let mut s = Self::global()?;
         s.tenant = Some(ns.to_string());
@@ -81,14 +79,6 @@ impl Scope {
             .clone()
             .ok_or_else(|| "no tenant in scope (cluster-level command?)".to_string())
     }
-
-    /// Per-tenant values: `~/.config/sycophant/tenants/<ns>/values.yaml`.
-    pub(crate) fn values_file(&self) -> PathBuf {
-        match &self.tenant {
-            Some(t) => self.root.join("tenants").join(t).join("values.yaml"),
-            None => self.root.join("values.yaml"),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -124,16 +114,6 @@ mod tests {
     }
 
     #[test]
-    fn tenant_values_file_is_per_tenant() {
-        // Mutant dropping the tenant branch (→ root/values.yaml) is caught here.
-        let s = Scope {
-            root: PathBuf::from("/r"),
-            tenant: Some("foo".into()),
-        };
-        assert_eq!(s.values_file(), PathBuf::from("/r/tenants/foo/values.yaml"));
-    }
-
-    #[test]
     fn config_dir_override_wins_over_home() {
         assert_eq!(
             config_dir_from(Some("/tmp/e2e".into()), Some("/home/u".into())),
@@ -144,14 +124,6 @@ mod tests {
             Some(PathBuf::from("/home/u/.config/sycophant"))
         );
         assert_eq!(config_dir_from(None, None), None);
-    }
-
-    #[test]
-    fn global_values_file_is_root() {
-        assert_eq!(
-            global().values_file(),
-            PathBuf::from("/home/user/.config/sycophant/values.yaml")
-        );
     }
 
     #[test]

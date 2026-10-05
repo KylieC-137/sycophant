@@ -7,8 +7,8 @@ spec:
   bindings:
     - name: ws
       value: demo
-    - name: workspace_values
-      value: '{"demo":{"toolsets":["stdlib"]}}'
+    - name: workspace_marker
+      value: '{"toolsets":"stdlib"}'
   steps:
     - name: every-workspace-sa-name-matches-a-documented-form
       try:
@@ -16,13 +16,13 @@ spec:
             env:
               - name: WS
                 value: ($ws)
-              - name: WORKSPACE_VALUES
-                value: ($workspace_values)
+              - name: WORKSPACE_MARKER
+                value: ($workspace_marker)
             content: |
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
               out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
-                --set-json "workspaces=$WORKSPACE_VALUES")
+                --set render=workspace --set name="$WS" --set-json "marker=$WORKSPACE_MARKER")
 
               # name|type for every ServiceAccount in the render.
               sas=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \

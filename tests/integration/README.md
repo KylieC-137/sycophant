@@ -19,10 +19,8 @@ tenant namespace comes from the tenant-namespace fixture with real perimeter lab
 | gvisor-scope/                   | gVisor runtime scope pinned to toolsets only (capability-job); other components on runc |
 | conversation-log-mount/         | Only the harness may mount the `conversation-data-*` PVC (VAP, label-agnostic)   |
 | relay-access-grants/            | The deployed relay reconciles the chart-created relay-access-grants ConfigMap |
-| toolset-grants/                 | Toolset entries own no credential or egress; a workspace's grants are schema-bounded |
 | inference-workload/             | Applied shape of the in-cluster inference server and its fence |
 | namespace-egress-baseline/      | Namespace-wide egress default-deny floor; uncovered pods denied |
-| capability-grants/              | Chart-rendered shape of the per-workspace capability-grants ConfigMap |
 | capability-job-gate/            | Identity-keyed Job CREATE gate: harness-<ws> Jobs forced into the envelope + secret allowlist or denied; the two per-workspace SAs |
 
 ## Picking a bucket for a new test
@@ -39,13 +37,10 @@ Ask: "What property is this test asserting?"
 - Chart-shipped cluster-scoped resource shape → `cluster-resources/`
 - gVisor runtime scope (toolsets only) → `gvisor-scope/`
 - Relay reconciling the relay-access-grants ConfigMap → `relay-access-grants/`
-- What a toolset entry or a workspace grant may declare (values schema) → `toolset-grants/`
 - Applied pod shape or network fence of the in-cluster inference server →
   `inference-workload/`
 - Namespace-wide egress default-deny floor, or a pod left uncovered by it →
   `namespace-egress-baseline/`
-- Rendered shape of the per-workspace capability-grants ConfigMap →
-  `capability-grants/`
 - Job CREATE forced into a hardened, secret-bounded pod template keyed on the
   creating harness identity (mutate + validate) → `capability-job-gate/`
 - "PSA does X" — usually wrong bucket; PSA is upstream, not sycophant.

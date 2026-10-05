@@ -28,6 +28,12 @@ const GRANT_CREDENTIAL_PATH: &str = "/run/secrets/grant/credential";
 /// token.
 const TOOL_JOB_DEFAULT_DEADLINE_SECONDS: i64 = 3600;
 
+/// Whether the harness stamps `name` on a tool container: `HOME` and the
+/// `TOOLSET_` runtime contract. A tool arg mapped to one would overwrite it.
+pub(crate) fn is_reserved_env(name: &str) -> bool {
+    name == "HOME" || name.starts_with("TOOLSET_")
+}
+
 /// Which Secret a value came from and where it lands. Names and paths only; the
 /// harness never reads a secret value.
 struct SecretMapping {
@@ -335,7 +341,6 @@ pub(crate) fn build_tool_job(
             active_deadline_seconds: Some(
                 entry
                     .deadline_seconds
-                    .map(|s| s as i64)
                     .unwrap_or(TOOL_JOB_DEFAULT_DEADLINE_SECONDS),
             ),
             template: PodTemplateSpec {
@@ -694,7 +699,13 @@ mod tests {
     fn tool_job_pod_carries_per_pod_dns_hostname_and_subdomain() {
         let entry = ToolsetEntry {
             image: Some("ghcr.io/test/toolset:latest".into()),
+            keepalive: true,
             ..Default::default()
+        };
+        let grant = CapabilityGrant {
+            secret: "git-ssh".into(),
+            path: None,
+            egress: None,
         };
         let job = build_tool_job(
             "git-push",
@@ -707,9 +718,12 @@ mod tests {
             "test",
             "workspace-data-test",
             &SchedulingConfig::default(),
-            None,
+            Some(("git", &grant)),
         );
         let spec = pod_spec(&job);
+        for env in spec.containers[0].env.as_deref().unwrap() {
+            assert!(is_reserved_env(&env.name), "{} is not reserved", env.name);
+        }
         assert_eq!(
             spec.hostname.as_deref(),
             Some(TEST_CALL_ID),

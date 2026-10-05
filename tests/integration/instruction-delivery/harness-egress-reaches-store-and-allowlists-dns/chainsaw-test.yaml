@@ -16,7 +16,7 @@ spec:
               REPO_ROOT=$(git rev-parse --show-toplevel)
               render=$(mktemp)
               helm template t "$REPO_ROOT/charts/sycophant-tenant" -n tenant-1 \
-                --set-string 'workspaces.research.instructions.prefix=tenant-1/research' \
+                --set render=workspace --set name=research \
                 --set-string 'harness.instructions.endpoint=seaweedfs.sycophant-system.svc.cluster.local:8333' \
                 > "$render"
               python3 - "$render" <<'PY'

@@ -87,13 +87,13 @@ spec:
       volumes:
         - name: bindings
           configMap:
-            name: capability-manifest
+            name: toolset-git
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9
           volumeMounts:
             - name: bindings
-              mountPath: /etc/sycophant/capability-manifest
+              mountPath: /etc/sycophant/toolset
 ---
 apiVersion: batch/v1
 kind: Job
@@ -115,7 +115,7 @@ spec:
             - name: BINDINGS
               valueFrom:
                 configMapKeyRef:
-                  name: capability-manifest
+                  name: toolset-git
                   key: bindings.yaml
 ---
 apiVersion: batch/v1
@@ -136,4 +136,4 @@ spec:
           image: registry.k8s.io/pause:3.9
           envFrom:
             - configMapRef:
-                name: capability-manifest
+                name: toolset-git

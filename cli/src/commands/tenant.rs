@@ -1,6 +1,6 @@
 use crate::cli::{TenantCmd, TenantSub};
 use crate::commands::marker::tenant_ns;
-use crate::commands::{audit, down, remove, secret, up, workspace};
+use crate::commands::{audit, down, remove, secret, up};
 use crate::scope::Scope;
 
 /// Dispatch a `syco tenant` subcommand. `down` and `remove` take the tenant
@@ -18,7 +18,6 @@ pub(crate) fn run(cmd: TenantCmd) -> Result<(), String> {
         ),
         TenantSub::Remove(c) => remove::run(&Scope::for_tenant(&tenant_ns(&c.name))?),
         TenantSub::Secret(c) => secret::run(&scope()?, c),
-        TenantSub::Workspace(c) => workspace::run(&scope()?, c),
         TenantSub::Audit(c) => audit::run(&scope()?, c),
     }
 }

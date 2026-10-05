@@ -8,21 +8,23 @@
 
 # Which slice of the chart this release renders.
 #   base      (default) the tenant's shared control plane (relay, scheduling,
-#             relay-access-grants) plus every workspace under `workspaces`.
-#             What the tenant marker renders, from chart defaults.
-#   workspace only the per-workspace objects for the workspaces under
-#             `workspaces`. A per-workspace marker installs one workspace into an
-#             existing tenant namespace as its own release (release name
-#             workspace-<name>), leaving the base release and sibling workspaces
-#             untouched. The shared objects it references (scheduling,
-#             relay-controller) are owned by the base release and read by name
-#             at runtime.
+#             relay-access-grants). What the tenant marker renders, from chart
+#             defaults.
+#   workspace one workspace from the marker under `marker`, keyed by `name`:
+#             its harness, PVCs, grants and policies. The marker carries
+#             `toolsets` and `models` (comma lists), `storage`, and
+#             `grant.<toolset>.<grant>.<secret|path|egress>`. A per-workspace
+#             marker installs it into an existing tenant namespace as its own
+#             release (release name workspace-<name>), leaving the base release
+#             and sibling workspaces untouched. The shared objects it references
+#             (scheduling, relay-controller) are owned by the base release and
+#             read by name at runtime.
 #   user      the per-user provision-identity RoleBinding for the identities
 #             under `users`. A per-user marker binds one identity into an existing
 #             tenant namespace as its own release (release name user-<handle>).
-#   toolset   the per-toolset ConfigMaps for the toolsets under `toolsets`. A
-#             per-toolset marker installs one toolset into an existing tenant
-#             namespace as its own release (release name toolset-<name>).
+#   toolset   one toolset from the marker under `marker`, keyed by `name`: its
+#             `toolset-<name>` ConfigMap. A per-toolset marker installs it as its
+#             own release (release name toolset-<name>).
 #   channel   the app channel adapter and headscale under `channels` and
 #             `headscale`, installed host-side as its own release.
 #   inference one model from the marker under `marker`, keyed by `name`: its
@@ -31,9 +33,6 @@
 #             `inference-egress-<name>` policy for its job pods when not. A
 #             per-model marker installs it as its own release (release name
 #             inference-<name>).
-#   Workspace and toolset templates are not gated on `render`: user and toolset
-#   also render whatever sits under `workspaces` and `toolsets`. `syco tenant up`
-#   leaves `workspaces` empty in both, and `toolsets` empty in the user marker.
 render: base
 
 # A capability marker's name suffix and flat data, set by the installer. Read
@@ -80,10 +79,8 @@ relay:
   tag: local
   pullPolicy: Never
 
-# Harness -- agent runtime. Reads its per-workspace capability manifest
-# once at boot and dispatches tool and LLM calls in-process (stdlib
-# bundled into the base toolset image, tenant-defined toolsets per
-# `toolsets` entry). Stateless.
+# Harness -- agent runtime. Watches the toolset and model ConfigMaps and
+# dispatches tool and LLM calls in-process. Stateless.
 harness:
   image: sycophant-harness
   tag: local
@@ -91,7 +88,7 @@ harness:
   instructions:
     # Object-storage delivery of instruction content. At
     # pod start the harness init container syncs this workspace's prefix from
-    # <bucket>/<workspace prefix> at <endpoint> into an emptyDir the serving
+    # <bucket>/<namespace>/<workspace> at <endpoint> into an emptyDir the serving
     # container mounts read-only. The read-only, prefix-scoped credential
     # (credentialName, a Secret the operator provides) is mounted into the
     # init container ONLY; the serving container holds no credential.
@@ -123,122 +120,6 @@ workspaceInit:
   image: toolset-git
   tag: local
   pullPolicy: Never
-
-# Toolsets -- one entry per tool environment. Each renders into its own
-# `toolset-<name>` ConfigMap the harness watches.
-#
-# An entry is flat. `image` and `keepalive` are read by the harness:
-# `image` selects the tool job's pod, `keepalive` sets the Job restart policy and
-# idle-reap so an expensive, frequently-called toolset skips cold-start.
-# Neither is forwarded to the tool job as an env var.
-#
-# An entry is runtime shape only: it owns no credential and no network hole.
-# Those come from the binding workspace's grants under `workspaces` below,
-# so one generic toolset definition serves every workspace. `env` forwards each
-# key into the tool job as an env var, the key verbatim as the name and its
-# scalar as the value. Models are not here: each is its own inference marker.
-#
-# A toolset's tools are authored here under `tools`. Each tool declares its
-# argument schema and the env var each argument reaches the tool job under. The
-# chart renders each bound toolset's tools into the per-workspace capability
-# manifest the harness reads; there is no runtime discovery.
-#
-# Schema:
-#   <toolset-name>:
-#     image: <image ref>
-#     keepalive: <bool>               (default: false)
-#     deadlineSeconds: <int>          (optional: overrides the framework default tool-job runtime bound)
-#     env:
-#       <KEY>: <scalar>               (forwarded verbatim as an env var)
-#     tools:                          (optional, list of tools this toolset exposes)
-#       - name: <tool name>
-#         description: <shown to the model>
-#         parameters: <JSON Schema object for the tool's parameters>
-#         args:
-#           - name: <arg name>
-#             type: string | integer | number | boolean
-#             required: <bool>
-#             env: <env var the tool job receives this arg under>
-#             description: <arg description>
-#
-# Example:
-#   toolsets:
-#     stdlib:
-#       image: toolset-git:local
-#     notion:
-#       image: toolset-notion:local
-#       keepalive: true
-#       env:
-#         NOTION_API_VERSION: "2022-06-28"
-#       tools:
-#         - name: NotionSearch
-#           description: search notion
-#           parameters:
-#             type: object
-#             properties:
-#               query: { type: string }
-#           args:
-#             - name: query
-#               type: string
-#               required: true
-#               env: NOTION_QUERY
-#               description: the query
-toolsets: {}
-
-# Workspaces -- one entry per agent workspace.
-# Each workspace materializes a harness Pod (always-on, single
-# container) and binds the toolsets listed under `toolsets:`. All tool
-# execution (stdlib via the default base toolset image, tenant-defined
-# tools per `toolsets` entry) runs in harness-spawned capability-job
-# pods. The shared workspace PVC mounts RW into the tool-job pods that
-# need filesystem access.
-#
-# Schema (validated by values.schema.json):
-#   <name>:
-#     harness:                      (optional resource bounds)
-#       cpu: <K8s CPU quantity>
-#       memory: <K8s memory quantity>
-#     storage: <K8s storage quantity>   (default: 1Gi)
-#     toolsets:                         (optional, list of bindings; each item
-#                                        references a `toolsets` entry by name)
-#       - <toolset-name>                  (bare form: no credential, baseline
-#                                          egress)
-#       - name: <toolset-name>            (grant-bearing form)
-#         grants:
-#           <grant-name>:                 (RFC 1123 label)
-#             secret: <k8s secret name>   (required; its data key must equal the
-#                                          Secret's own name)
-#             path: <absolute path>       (optional; default
-#                                          /run/secrets/grant/credential)
-#             egress: <domain>            (optional; one domain, opened by a
-#                                          per-grant CiliumNetworkPolicy)
-#     models:                           (optional, list of model keys this
-#       - <model-key>                    workspace's harness may name; a turn
-#                                        naming any other key is refused)
-#     instructions:                           (operator-set; optional)
-#       prefix: <bucket key prefix>       (optional; overrides the convention
-#                                          <namespace>/<workspace>)
-#
-# A workspace's instructions are its agent content (AGENTS.md, agents/*.md,
-# skills/*.md), authored elsewhere and uploaded to object storage under a
-# per-workspace prefix in `harness.instructions.bucket`. The harness init container
-# syncs `<bucket>/<prefix>` into the pod at start; omit `instructions.prefix` and it
-# syncs the convention prefix <namespace>/<workspace>.
-#
-# Example:
-#   workspaces:
-#     research:
-#       harness:
-#         cpu: "500m"      # framework default; override only if needed
-#         memory: "256Mi"  # framework default; harness is a pure gRPC router
-#       toolsets:
-#         - git-ops
-#         - name: notion
-#           grants:
-#             reader:
-#               secret: research-notion-reader
-#               egress: notion.com
-workspaces: {}
 
 # Headscale -- self-hosted Tailscale-compatible control plane.
 #

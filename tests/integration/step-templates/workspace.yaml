@@ -20,7 +20,7 @@ spec:
           REPO_ROOT=$(git rev-parse --show-toplevel)
           helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
             --show-only templates/harness-cnp.yaml \
-            --set 'workspaces.probe.storage=1Gi' \
+            --set render=workspace --set name=probe \
             -n "$TENANT_NS" \
             | kubectl apply -f -
   cleanup:

@@ -337,11 +337,17 @@ step_1_build() {
     -t sycophant-harness:local . >/dev/null
   rm "harness-linux-musl-${DOCKER_ARCH}"
 
-  docker build -q --build-arg "BASE_IMAGE=toolset-base:local" -f images/toolset/Dockerfile images/toolset/ -t toolset:local >/dev/null
-
-  docker build -q --build-arg "BASE_IMAGE=toolset-base:local" -f images/git/Dockerfile images/git/ -t toolset-git:local >/dev/null
-
-  docker build -q --build-arg "BASE_IMAGE=toolset-base:local" -f examples/toolsets/ssh-credentials/Dockerfile examples/toolsets/ssh-credentials/ -t toolset-ssh-credentials:local >/dev/null
+  # Each toolset image carries its tools.yaml, as one-line JSON, in the
+  # md.sycophant.tools label; its toolset marker is built from that label.
+  # Every value must already be a string. A non-string aborts the build.
+  local ctx tag label
+  for ctx in images/toolset:toolset images/git:toolset-git examples/toolsets/ssh-credentials:toolset-ssh-credentials; do
+    tag="${ctx#*:}"; ctx="${ctx%%:*}"
+    label=$(python3 -c 'import json,sys,yaml; m=yaml.safe_load(open(sys.argv[1])); assert all(isinstance(v,str) for v in m.values()), "non-string value in "+sys.argv[1]; print(json.dumps(m,separators=(",",":")))' "$ctx/tools.yaml")
+    docker build -q --build-arg "BASE_IMAGE=toolset-base:local" \
+      --label "md.sycophant.tools=$label" \
+      -f "$ctx/Dockerfile" "$ctx/" -t "$tag:local" >/dev/null
+  done
 
   docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" images/kubectl/ -t sycophant-kubectl:local >/dev/null
 
@@ -490,70 +496,6 @@ EOF
   ok "Instructions uploaded to ${INSTRUCTIONS_BUCKET}/${prefix}; read credential ${INSTRUCTIONS_CREDENTIAL_NAME} minted"
 }
 
-# ---- step 2: configure ----
-# Author the tenant's values file where `syco tenant up` reads it. The values are
-# docs/e2e/values.yaml plus this run's overrides: the bound user, each toolset's
-# local-registry digest, and the capability manifest.
-step_2_configure() {
-  step "Step 2: Configure tenant values"
-
-  # Resolve local-registry digests for toolset images. The host rewrite
-  # (localhost:5555 → sycophant-registry:5000) swaps the docker-push-facing
-  # host for the in-cluster name resolved via the CoreDNS NodeHosts entry
-  # `syco setup` adds; the digest is identical either way.
-  local git_ref ssh_ref stdlib_ref
-  git_ref="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' localhost:5555/toolset-git:latest | grep '^localhost:5555/')"
-  ssh_ref="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' localhost:5555/toolset-ssh-credentials:latest | grep '^localhost:5555/')"
-  stdlib_ref="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' localhost:5555/toolset:latest | grep '^localhost:5555/')"
-  git_ref="${git_ref/localhost:5555/sycophant-registry:5000}"
-  ssh_ref="${ssh_ref/localhost:5555/sycophant-registry:5000}"
-  stdlib_ref="${stdlib_ref/localhost:5555/sycophant-registry:5000}"
-
-  # Capability manifest: the chart no longer renders tool schema from
-  # values. The operator reads each BOUND toolset image's baked schema with
-  # `syco toolset manifest`, annotates the operator-supplied grants, and hands
-  # the merged result to the chart verbatim; the chart copies it into the
-  # workspace ConfigMap the harness mounts. The reader runs host-side
-  # (docker create/cp), so it reads the local `:local` image tags rather than the
-  # in-cluster refs above; the baked schema is identical across both. A bound
-  # image lacking baked schema makes the reader exit non-zero (pipefail aborts
-  # the run) — the deploy fails closed rather than shipping a partial manifest.
-  cargo build --release -p syco >/dev/null
-  local work ws_grants manifest_file
-  work="$(mktemp -d)"
-  trap 'rm -rf "$work"' RETURN
-  ws_grants="$work/grants.yaml"
-  cat >"$ws_grants" <<'EOF'
-demo-key:
-  secret: demo-ssh-key
-  path: /home/agent/.ssh/id_ed25519
-EOF
-  manifest_file="$work/manifest.yaml"
-  {
-    echo "tools:"
-    "$SYCO" toolset manifest toolset:local --toolset stdlib | tail -n +2
-    "$SYCO" toolset manifest toolset-git:local --toolset workspace-ro | tail -n +2
-    "$SYCO" toolset manifest toolset-ssh-credentials:local --toolset ssh-credentials --grants "$ws_grants" | tail -n +2
-  } >"$manifest_file"
-  ok "Capability manifest built from baked image schema ($(grep -c '^- name:' "$manifest_file") tools)"
-
-  # Merge with helm's own -f/--set/--set-file semantics by rendering the supplied
-  # values through a scratch chart. Nothing touches the cluster.
-  mkdir -p "$work/merge/templates"
-  printf 'apiVersion: v2\nname: e2e-values\nversion: 0.0.0\n' > "$work/merge/Chart.yaml"
-  printf '{{ toYaml .Values }}\n' > "$work/merge/templates/values.yaml"
-  mkdir -p "$(dirname "$TENANT_VALUES_FILE")"
-  helm template e2e-values "$work/merge" \
-    -f "$REPO_ROOT/docs/e2e/values.yaml" \
-    --set "users[0]=${APISERVER_OIDC_ISSUER}#${TENANT_A_USER_SUB}" \
-    --set-string "toolsets.stdlib.image=${stdlib_ref}" \
-    --set-string "toolsets.workspace-ro.image=${git_ref}" \
-    --set-string "toolsets.ssh-credentials.image=${ssh_ref}" \
-    --set-file "workspaces.hello-world.capabilityManifest=${manifest_file}" \
-    > "$TENANT_VALUES_FILE"
-  ok "Tenant values written to ${TENANT_VALUES_FILE} (client: ${CLIENT_NAME})"
-}
-
 # Write the provision-tenant marker for tenant token $1 with capacity $2 to file
 # $3. The base release installs from chart defaults.
 tenant_marker_file() {
@@ -612,6 +554,70 @@ YAML
   } > "$(inference_marker_path "$INFERENCE_PROFILE")"
 }
 
+# The main tenant's marker file for toolset $1.
+toolset_marker_path() {
+  printf '%s/%s-provision-toolset-%s.yaml' "$MARKER_DIR" "$NAMESPACE" "$1"
+}
+
+# Write the main tenant's marker for toolset $1 from local image $2 with
+# keepalive $3. `image` is the in-cluster
+# registry digest: the host rewrite (localhost:5555 to sycophant-registry:5000)
+# swaps the push-facing host for the name the CoreDNS NodeHosts entry `syco
+# setup` adds resolves, and the digest is identical either way. The tool keys
+# are the image's md.sycophant.tools label.
+write_toolset_marker() {
+  local name="$1" image="localhost:5555/$2:latest" keepalive="$3" ref tools
+  ref="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image" | grep '^localhost:5555/')"
+  ref="${ref/localhost:5555/sycophant-registry:5000}"
+  tools="$(docker inspect --format '{{ index .Config.Labels "md.sycophant.tools" }}' "$image")"
+  case "$tools" in
+    "{"*) ;;
+    *) warn "${image} carries no md.sycophant.tools label; rebuild with --clean"; exit 1 ;;
+  esac
+  mkdir -p "$MARKER_DIR"
+  { marker_yaml "provision-toolset-${name}" "$NAMESPACE"
+    printf '%s' "$tools" \
+      | jq -r --arg image "$ref" --arg keepalive "$keepalive" \
+        '. + {image: $image, keepalive: $keepalive}
+         | to_entries[] | "  \(.key | @json): \(.value | @json)"'
+  } > "$(toolset_marker_path "$name")"
+}
+
+# The main tenant's marker file for workspace $1.
+workspace_marker_path() {
+  printf '%s/%s-provision-workspace-%s.yaml' "$MARKER_DIR" "$NAMESPACE" "$1"
+}
+
+# Write the main tenant's hello-world workspace marker. It may name only the
+# models and toolsets installed above. `demo-key` is secret-only: it delivers
+# the key where ssh expects it and opens no network hole, so no per-grant policy
+# renders and a job holding it stays on the fail-closed baseline floor.
+write_workspace_marker() {
+  mkdir -p "$MARKER_DIR"
+  { marker_yaml provision-workspace-hello-world "$NAMESPACE"; cat <<YAML
+  toolsets: stdlib,workspace-ro,ssh-credentials
+  models: ${REMOTE_MODEL},${INFERENCE_PROFILE}
+  grant.ssh-credentials.demo-key.secret: demo-ssh-key
+  grant.ssh-credentials.demo-key.path: /home/agent/.ssh/id_ed25519
+YAML
+  } > "$(workspace_marker_path hello-world)"
+}
+
+# The user marker file for tenant namespace $1.
+user_marker_path() {
+  printf '%s/%s-provision-user.yaml' "$MARKER_DIR" "$1"
+}
+
+# Write the user marker binding identity $2 in tenant namespace $1 to file $3.
+# Its name carries the identity's handle.
+write_user_marker() {
+  mkdir -p "$(dirname "$3")"
+  { marker_yaml "provision-user-$(handle_of "$2")" "$1"; cat <<YAML
+  user: "$2"
+YAML
+  } > "$3"
+}
+
 # Seed what the tenant reads but no marker installs: the instructions tree and
 # its read credential, the vendor model key, and the ssh-credentials fixtures.
 seed_tenant() {
@@ -667,10 +673,9 @@ step_3_deploy() {
       --ignore-not-found >/dev/null
   fi
 
-  # The operator's path: `syco tenant up -f` applies the tenant marker, then
-  # writes one workspace, user, and toolset marker each, under the operator's Dex
-  # login, and waits on every installer Job. The provision runs in the
-  # background while this step seeds the namespace the reactor generates.
+  # The operator's path: `syco tenant up -f` applies the tenant marker under the
+  # operator's Dex login and waits on its installer Job. The provision runs in
+  # the background while this step seeds the namespace the reactor generates.
   local tenant_marker="$MARKER_DIR/${NAMESPACE}-provision-tenant.yaml"
   tenant_marker_file "${NAMESPACE#tenant-}" "$TENANT_CAPACITY" "$tenant_marker"
   "$SYCO" tenant up -f "$tenant_marker" &
@@ -743,7 +748,7 @@ POD
   # system namespace (seeded above) into an emptyDir it mounts read-only.
 
   wait "$up_pid" || { warn "syco tenant up failed"; exit 1; }
-  ok "syco tenant up: tenant, workspace, user, and toolset markers admitted; each installer Job succeeded (install-wait passed)"
+  ok "syco tenant up: tenant marker admitted; its installer Job succeeded (install-wait passed)"
   wait_for "tenant release ${NAMESPACE} deployed" 120 \
     "release_deployed '$NAMESPACE' '$NAMESPACE'"
   ok "tenant release ${NAMESPACE} deployed"
@@ -762,6 +767,32 @@ POD
       || { warn "model ConfigMap model-${model} missing after its install"; exit 1; }
   done
   ok "syco inference up: ${REMOTE_MODEL} and ${INFERENCE_PROFILE} model markers installed"
+
+  # Each toolset is its own marker, built from its image's tool label. The
+  # harness watches the toolset ConfigMaps, so no restart. keepalive keeps the
+  # stdlib and grant-bearing pods alive for the later exec assertions.
+  local ts name img keepalive
+  for ts in stdlib:toolset:true workspace-ro:toolset-git:false ssh-credentials:toolset-ssh-credentials:true; do
+    IFS=: read -r name img keepalive <<<"$ts"
+    write_toolset_marker "$name" "$img" "$keepalive"
+    "$SYCO" toolset up -f "$(toolset_marker_path "$name")" \
+      || { warn "syco toolset up ${name} failed"; exit 1; }
+    [ -n "$(kubectl get configmap "toolset-${name}" -n "$NAMESPACE" \
+      -o 'jsonpath={.data.image}' 2>/dev/null)" ] \
+      || { warn "toolset ConfigMap toolset-${name} missing or has no image after its install"; exit 1; }
+  done
+  ok "syco toolset up: stdlib, workspace-ro and ssh-credentials toolset markers installed"
+
+  # The workspace and its bound user are one marker each.
+  write_workspace_marker
+  "$SYCO" workspace up -f "$(workspace_marker_path hello-world)" \
+    || { warn "syco workspace up hello-world failed"; exit 1; }
+  kubectl get deploy hello-world -n "$NAMESPACE" >/dev/null 2>&1 \
+    || { warn "hello-world harness Deployment missing after its install"; exit 1; }
+  write_user_marker "$NAMESPACE" "${APISERVER_OIDC_ISSUER}#${TENANT_A_USER_SUB}" "$(user_marker_path "$NAMESPACE")"
+  "$SYCO" user up -f "$(user_marker_path "$NAMESPACE")" \
+    || { warn "syco user up ${TENANT_A_USER_SUB} failed"; exit 1; }
+  ok "syco workspace up and syco user up: hello-world and its bound user installed"
 
   # The app channel installs host-side after the base: its adapter needs a
   # pre-auth key minted from the tenant's own headscale.
@@ -886,17 +917,6 @@ step_4_verify() {
     kubectl get job,pod -n "$NAMESPACE" -l app.kubernetes.io/component=workspace-init 2>&1 | sed 's/^/    /' >&2
     return 1
   fi
-
-  # The stdlib toolset must have rendered into its own toolset-stdlib ConfigMap by
-  # now. Toolset pods are spawned lazily on the first CallTool RPC, so zero pods is
-  # the correct pre-tool-call state. Step 6 verifies the pod appears after the
-  # first call and survives subsequent calls (keepalive=true).
-  if ! kubectl get configmap toolset-stdlib -n "$NAMESPACE" \
-       -o jsonpath='{.data.toolset\.yaml}' 2>/dev/null | grep -q '^stdlib:'; then
-    warn "toolset-stdlib ConfigMap has no 'stdlib' entry — helm render failed"
-    return 1
-  fi
-  ok "toolset-stdlib carries the stdlib toolset (keepalive=true, lazy-spawn)"
 }
 
 # ---- step 5: flutter ----
@@ -1550,7 +1570,7 @@ step_6_grant_row_hot_reload() {
 
 # ---- step 7: syco upgrade via the CLI ----
 # Exercises the operator upgrade path: it re-extracts the binary's charts and
-# re-provisions the main tenant from its values file, so this is the only
+# re-provisions the main tenant from its marker, so this is the only
 # coverage that `syco upgrade` actually delivers the binary's charts. Wiping the config-root charts first is the regression guard: an upgrade
 # that skips the chart re-extract has nothing to apply and fails here.
 step_7_upgrade_cli() {
@@ -1644,8 +1664,6 @@ export SYCO_CONFIG_DIR="${SYCO_CONFIG_DIR:-$REPO_ROOT/tmp/syco-config}"
 SYCO_PASSWORD_FILE="$REPO_ROOT/tmp/e2e-operator-password"
 # The public Dex CA `syco setup` generated and the apiserver trusts.
 SYCO_DEX_CA="$SYCO_CONFIG_DIR/oidc/ca.crt"
-# The main tenant's values, where `syco tenant up` and `syco upgrade` read them.
-TENANT_VALUES_FILE="$SYCO_CONFIG_DIR/tenants/$NAMESPACE/values.yaml"
 # Marker files the operator applies with `syco <kind> up -f`.
 MARKER_DIR="$SYCO_CONFIG_DIR/markers"
 # Memory quota for the main tenant, summed over pod limits: inference 2560Mi;
@@ -1871,15 +1889,24 @@ verify_user_isolation() {
   wait_for "Dex signing key" 60 \
     "kubectl get signingkeies openid-connect-keys -n $APISERVER_OIDC_NS >/dev/null 2>&1"
 
-  # A second tenant namespace bound to a DIFFERENT identity, so the cross-tenant
-  # target exists and carries its own per-identity binding. The binding is the
-  # tenant chart's own rendered YAML, not a hand-written copy, so a namespace no
-  # live identity binds admits the wrong identity nowhere.
-  kubectl create namespace "$TENANT_B_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-  helm template "$TENANT_B_NAMESPACE" "$REPO_ROOT/charts/sycophant-tenant" \
-    -n "$TENANT_B_NAMESPACE" --show-only templates/tenant-user-rolebinding.yaml \
-    --set "users[0]=${APISERVER_OIDC_ISSUER}#${TENANT_B_USER_SUB}" \
-    | kubectl apply -f - >/dev/null
+  # A second tenant bound to a DIFFERENT identity, so the cross-tenant target
+  # exists and carries its own per-identity binding. Both come from markers, the
+  # same path as the main tenant. A bare namespace left by an older run would
+  # block the provision, so it is cleared first.
+  if kubectl get namespace "$TENANT_B_NAMESPACE" >/dev/null 2>&1 \
+     && ! kubectl get namespace "$TENANT_B_NAMESPACE" \
+       -o jsonpath='{.metadata.labels.app\.kubernetes\.io/part-of}' 2>/dev/null | grep -qx sycophant-tenant; then
+    kubectl delete namespace "$TENANT_B_NAMESPACE" --timeout=300s >/dev/null
+  fi
+  local tenant_b_marker="$MARKER_DIR/${TENANT_B_NAMESPACE}-provision-tenant.yaml"
+  tenant_marker_file "${TENANT_B_NAMESPACE#tenant-}" 512Mi "$tenant_b_marker"
+  "$SYCO" tenant up -f "$tenant_b_marker" \
+    || { warn "syco tenant up ${TENANT_B_NAMESPACE} failed"; exit 1; }
+  write_user_marker "$TENANT_B_NAMESPACE" "${APISERVER_OIDC_ISSUER}#${TENANT_B_USER_SUB}" \
+    "$(user_marker_path "$TENANT_B_NAMESPACE")"
+  "$SYCO" user up -f "$(user_marker_path "$TENANT_B_NAMESPACE")" \
+    || { warn "syco user up ${TENANT_B_USER_SUB} failed"; exit 1; }
+  ok "tenant ${TENANT_B_NAMESPACE} provisioned and bound to ${TENANT_B_USER_SUB}"
 
   # Two Dex-signed tokens: a positive one whose sub is tenant A's bound
   # identity, and a negative one whose sub carries the reserved system: prefix.
@@ -2062,9 +2089,6 @@ YAML
 # RoleBinding suffix.
 handle_of() { printf '%s' "$1" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10; }
 
-# The installer objects' suffix for marker uid $1.
-uid10_of() { printf '%s' "$1" | tr -d - | cut -c1-10; }
-
 # Emit a lifecycle marker ConfigMap up to `data:`. $1 name; $2 namespace.
 marker_yaml() {
   cat <<YAML
@@ -2078,28 +2102,6 @@ metadata:
     app.kubernetes.io/part-of: sycophant
 data:
 YAML
-}
-
-# Prove marker file $2 for kind $1: the standing SA ($sa_kube) is refused by
-# marker-provision-$1, the operator ($op_kube) is admitted, the Job named from
-# the marker uid completes, and the marker is gone.
-prove_marker() {
-  local kind="$1" file="$2" err uid job name
-  if err="$(kubectl --kubeconfig="$sa_kube" create -f "$file" 2>&1)"; then
-    warn "a standing ServiceAccount wrote a ${kind} marker; the ${kind} VAP failed open"; exit 1
-  fi
-  printf '%s' "$err" | grep -qi "marker-provision-${kind}" \
-    || { warn "SA ${kind} marker was refused, but not by the ${kind} identity VAP: ${err}"; exit 1; }
-  ok "a standing ServiceAccount credential cannot write a ${kind} marker"
-  uid="$(kubectl --kubeconfig="$op_kube" create -f "$file" -o jsonpath='{.metadata.uid}')" \
-    || { warn "the ${kind} VAP refused the IdP-authenticated operator identity"; exit 1; }
-  ok "${kind} marker admitted for the IdP-authenticated operator identity"
-  job="provision-${kind}-$(uid10_of "$uid")"
-  wait_for "${job} Job succeeded" 600 \
-    "kubectl get job '${job}' -n sycophant-system -o jsonpath='{.status.succeeded}' 2>/dev/null | grep -qx 1"
-  name="$(kubectl create --dry-run=client -f "$file" -o jsonpath='{.metadata.namespace}/{.metadata.name}')"
-  wait_for "${kind} marker ${name#*/} deleted by its installer" 30 \
-    "! kubectl get configmap '${name#*/}' -n '${name%%/*}' >/dev/null 2>&1"
 }
 
 # Prove the identity gate on marker file $2 for kind $1, sent with kubectl
@@ -2130,14 +2132,18 @@ harness_identity() {
       -o jsonpath='{.metadata.generation}' 2>/dev/null)"
 }
 
-# Write the toolset marker for toolset $1 (image name $2) to $work.
+# The digest image the lifecycle toolset marker for toolset $1 carries. No tool
+# is called, so nothing pulls it.
+lifecycle_toolset_image() {
+  printf 'registry.local/%s@sha256:%064d' "$1" 0
+}
+
+# Write the toolset marker for toolset $1 to $work.
 toolset_marker() {
   { marker_yaml "provision-toolset-$1" "$LIFECYCLE_TENANT_NS"; cat <<YAML
-  values: |
-    toolsets:
-      $1:
-        image: registry.local/$2:local
-        keepalive: false
+  image: "$(lifecycle_toolset_image "$1")"
+  keepalive: "false"
+  tool.$1-status.description: "Report status."
 YAML
   } > "$work/toolset-$1.yaml"
 }
@@ -2187,24 +2193,13 @@ verify_tenant_lifecycle() {
   tenant_marker_file "$LIFECYCLE_TENANT_TOKEN" 512Mi "$tenant_marker"
   prove_gate tenant "$tenant_marker"
 
-  # The operator's real path: syco writes the tenant, workspace, and user
-  # markers under its Dex login and waits on each installer Job, failing loudly
-  # on a refused marker or a failed Job.
-  local values_file="${SYCO_CONFIG_DIR}/tenants/${LIFECYCLE_TENANT_NS}/values.yaml"
-  mkdir -p "$(dirname "$values_file")"
-  cat > "$values_file" <<YAML
-users:
-  - "${LIFECYCLE_USER}"
-workspaces:
-  ${LIFECYCLE_WORKSPACE}:
-    toolsets:
-      - stdlib
-      - workspace-ro
-YAML
+  # The operator's real path: syco writes the tenant marker under its Dex login
+  # and waits on its installer Job, failing loudly on a refused marker or a
+  # failed Job.
   syco_credentials
   "$SYCO" tenant up -f "$tenant_marker" \
     || { warn "syco tenant up failed"; exit 1; }
-  ok "syco tenant up: tenant, workspace, and user markers admitted for the operator's Dex identity; each installer Job succeeded"
+  ok "syco tenant up: tenant marker admitted for the operator's Dex identity; its installer Job succeeded"
 
   wait_for "tenant namespace generated" 120 \
     "kubectl get namespace '$LIFECYCLE_TENANT_NS' >/dev/null 2>&1"
@@ -2233,24 +2228,25 @@ YAML
     --serviceaccount=sycophant-system:lifecycle-standing-sa \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
-  # Each installer deleted its marker. Fresh copies are refused for the standing
-  # SA and admitted (dry-run) for the second issuer's identity.
+  # Each marker is refused for the standing SA and admitted (dry-run) for the
+  # second issuer's identity, then syco applies it under its Dex login.
+  { marker_yaml "provision-workspace-${LIFECYCLE_WORKSPACE}" "$LIFECYCLE_TENANT_NS"; cat <<YAML
+  toolsets: stdlib,workspace-ro
+YAML
+  } > "$work/workspace-marker.yaml"
+  write_user_marker "$LIFECYCLE_TENANT_NS" "$LIFECYCLE_USER" "$work/user-marker.yaml"
+  prove_gate workspace "$work/workspace-marker.yaml"
+  prove_gate user "$work/user-marker.yaml"
+  "$SYCO" workspace up -f "$work/workspace-marker.yaml" \
+    || { warn "syco workspace up failed"; exit 1; }
+  "$SYCO" user up -f "$work/user-marker.yaml" \
+    || { warn "syco user up failed"; exit 1; }
   local m
   for m in "provision-workspace-${LIFECYCLE_WORKSPACE}" "provision-user-${user_handle}"; do
     kubectl get configmap "$m" -n "$LIFECYCLE_TENANT_NS" >/dev/null 2>&1 \
       && { warn "marker ${m} survived a successful install"; exit 1; }
   done
   ok "the workspace and user installers deleted their markers"
-  { marker_yaml "provision-workspace-${LIFECYCLE_WORKSPACE}" "$LIFECYCLE_TENANT_NS"; cat <<YAML
-  values: "{}"
-YAML
-  } > "$work/workspace-marker.yaml"
-  { marker_yaml "provision-user-${user_handle}" "$LIFECYCLE_TENANT_NS"; cat <<YAML
-  user: "${LIFECYCLE_USER}"
-YAML
-  } > "$work/user-marker.yaml"
-  prove_gate workspace "$work/workspace-marker.yaml"
-  prove_gate user "$work/user-marker.yaml"
 
   wait_for "workspace helm release deployed" 120 \
     "release_deployed 'workspace-${LIFECYCLE_WORKSPACE}' '$LIFECYCLE_TENANT_NS'"
@@ -2290,14 +2286,17 @@ YAML
 
   # Two toolsets, one marker each. The harness merges each per-toolset
   # ConfigMap by watch, so its pod and Deployment generation must not change.
-  local harness_before ts image n=0
+  local harness_before ts n=0
   harness_before="$(harness_identity)"
   [ -n "${harness_before%/*}" ] || { warn "no lifecycle harness pod before the toolset add"; exit 1; }
   for ts in "$LIFECYCLE_TOOLSET" "$LIFECYCLE_TOOLSET_2"; do
     n=$((n + 1))
-    image="tool-lifecycle"; [ "$n" = 1 ] || image="tool-lifecycle-$n"
-    toolset_marker "$ts" "$image"
-    prove_marker toolset "$work/toolset-${ts}.yaml"
+    toolset_marker "$ts"
+    prove_gate toolset "$work/toolset-${ts}.yaml"
+    "$SYCO" toolset up -f "$work/toolset-${ts}.yaml" \
+      || { warn "syco toolset up ${ts} failed"; exit 1; }
+    kubectl get configmap "provision-toolset-${ts}" -n "$LIFECYCLE_TENANT_NS" >/dev/null 2>&1 \
+      && { warn "toolset marker ${ts} survived a successful install"; exit 1; }
 
     wait_for "toolset ${ts} helm release deployed" 120 \
       "release_deployed 'toolset-${ts}' '$LIFECYCLE_TENANT_NS'"
@@ -2305,8 +2304,8 @@ YAML
       -o jsonpath='{.metadata.labels.sycophant\.md/type}' 2>/dev/null | grep -qx toolset \
       || { warn "per-toolset ConfigMap for ${ts} missing or not labelled sycophant.md/type=toolset"; exit 1; }
     kubectl get configmap "toolset-${ts}" -n "$LIFECYCLE_TENANT_NS" \
-      -o "jsonpath={.data.toolset\.yaml}" 2>/dev/null | grep -q "registry.local/${image}:local" \
-      || { warn "per-toolset ConfigMap for ${ts} does not carry the marker's toolset definition"; exit 1; }
+      -o "jsonpath={.data.image}" 2>/dev/null | grep -qFx "$(lifecycle_toolset_image "$ts")" \
+      || { warn "per-toolset ConfigMap for ${ts} does not carry the marker's data"; exit 1; }
 
     wait_for "harness merged toolset set=${n} by watch" 120 \
       "kubectl logs deploy/${LIFECYCLE_WORKSPACE} -n ${LIFECYCLE_TENANT_NS} -c harness --tail=200 2>/dev/null | grep -E 'toolset delivery applied.*\"configmaps\":${n},' -q"
@@ -2362,7 +2361,6 @@ YAML
   wait_for "tenant namespace reaped" 720 \
     "! kubectl get namespace '$LIFECYCLE_TENANT_NS' >/dev/null 2>&1"
   ok "the zero-keepalive tenant namespace was reaped"
-  rm -rf "$(dirname "$values_file")"
 
   ok "tenant lifecycle marker-contract proof passed"
 }
@@ -2397,7 +2395,6 @@ main() {
   fi
 
   syco_credentials
-  step_2_configure
   step_3_deploy
   verify_user_isolation
   verify_tenant_lifecycle

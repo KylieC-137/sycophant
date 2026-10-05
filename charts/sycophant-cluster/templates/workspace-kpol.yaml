@@ -1,10 +1,13 @@
 {{- /*
-The workspace lifecycle: the provision-workspace installer, its grant, and the
-reap of the installer's ServiceAccount and RoleBinding.
+The workspace lifecycle: the provision-workspace installer and its grant, the
+uninstall-workspace reactor on a reap marker, and the reap of both identities'
+ServiceAccounts and RoleBindings.
 */}}
 {{- if include "sycophant.renderKyverno" . }}
 ---
 {{ include "sycophant.provisionInstaller" (dict "ctx" $ "kind" "workspace") }}
+---
+{{ include "sycophant.provisionUninstaller" (dict "ctx" $ "kind" "workspace") }}
 ---
 {{ include "sycophant.provisionReap" (dict "ctx" $ "kind" "workspace") }}
 {{- end }}

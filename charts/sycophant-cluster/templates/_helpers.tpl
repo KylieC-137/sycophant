@@ -296,13 +296,10 @@ NAME="${MARKER#provision-{{ $kind }}-}"
 SUBJECT="$(kubectl get configmap "$MARKER" \
   -n "$TENANT" -o "jsonpath={.data.user}")"
 printf 'users:\n  - "%s"\n' "$SUBJECT" > /tmp/values.yaml
-{{- else if eq $kind "inference" }}
+{{- else }}
 # The marker's flat data rides into the chart verbatim as .Values.marker.
 printf '{"marker":%s}' "$(kubectl get configmap "$MARKER" \
   -n "$TENANT" -o 'jsonpath={.data}')" > /tmp/values.yaml
-{{- else }}
-kubectl get configmap "$MARKER" \
-  -n "$TENANT" -o "jsonpath={.data.values}" > /tmp/values.yaml
 {{- end }}
 helm upgrade --install "{{ $kind }}-$NAME" {{ $ctx.Values.provisioner.chartPath }} \
   --namespace "$TENANT" \

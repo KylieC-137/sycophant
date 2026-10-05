@@ -1,9 +1,10 @@
-//! Tool router: fan-in across the mounted capability manifest and the
-//! harness-local runtime (read / dispatch / list).
+//! Tool router: fan-in across the live toolset table and the harness-local
+//! runtime (read / dispatch / list).
 //!
 //! Every tool the LLM sees has a `Source`. `Toolset` tools come from the
-//! capability manifest the harness reads once at boot from a mounted ConfigMap
-//! and dispatch in-process via `DispatchState`, which spawns the tool Job.
+//! toolsets this workspace binds, rebuilt from the watched toolset ConfigMaps on
+//! every change, and dispatch in-process via `DispatchState`, which spawns the
+//! tool Job.
 //! `Runtime` tools (`read`, `dispatch`, `list`, `Think`, `RecentTurns`) are
 //! statically defined here and dispatched in-process — instruction content is
 //! read directly from this workspace's mounted instructions volume; `dispatch` also
@@ -14,14 +15,13 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use proto_common::{CallToolResponse, ToolDefinition, ToolInfo, ToolResultFrame};
-use shared::toolset::{validate_call_input, ArgDecl, CapabilityGrant};
+use shared::toolset::{validate_call_input, ArgDecl, CapabilityGrant, ToolsetConfig, ToolsetEntry};
 use tokio::sync::{broadcast, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Status;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::capability_manifest::CapabilityManifest;
 use crate::channel_tools;
 use crate::clients::{RelayClient, RelayRpc, ToolsetRpc};
 use crate::dispatch::DispatchState;
@@ -116,10 +116,15 @@ pub(crate) struct ToolRouter<A = UnconfiguredToolset> {
     /// change. Lock-free reads via `ArcSwap`; writers serialize through
     /// `apply_lock`.
     tools: ArcSwap<Vec<CatalogEntry>>,
-    /// Serializes the two `apply_*_tools` watcher tasks so concurrent
-    /// read-modify-swap can't drop one source's update. No `.await`
-    /// crosses the guard, so `std::sync::Mutex` is correct.
+    /// Serializes `apply_toolsets` so concurrent read-modify-swap can't drop
+    /// an update. No `.await` crosses the guard, so `std::sync::Mutex` is
+    /// correct.
     apply_lock: std::sync::Mutex<()>,
+    /// The toolsets this workspace binds, in order. A toolset outside it is
+    /// never listed.
+    toolset_scope: Vec<String>,
+    /// This workspace's grants, keyed by toolset then grant name.
+    toolset_grants: HashMap<String, HashMap<String, CapabilityGrant>>,
     /// Explicit execution-log override. When set, every call persists here
     /// regardless of conversation — a test seam. When unset (production), the
     /// per-conversation writer is derived from the registry
@@ -180,6 +185,27 @@ impl ToolsetRpc for UnconfiguredToolset {
     async fn cancel_turn(&mut self, _conversation_id: &str) -> Result<(), String> {
         Err("toolset client not configured".into())
     }
+}
+
+/// Why a toolset cannot be listed: a tool shadowing a runtime or channel tool,
+/// or an arg mapped to an env the harness reserves on tool jobs.
+fn clash(entry: &ToolsetEntry, builtin: &[String]) -> Option<String> {
+    for tool in &entry.tools {
+        if builtin.contains(&tool.name) {
+            return Some(format!("tool {} is a built-in tool", tool.name));
+        }
+        if let Some(arg) = tool
+            .args
+            .iter()
+            .find(|a| crate::job::is_reserved_env(&a.env))
+        {
+            return Some(format!(
+                "tool {} arg {} maps to reserved env {}",
+                tool.name, arg.name, arg.env
+            ));
+        }
+    }
+    None
 }
 
 /// Whether a frame is the terminal `ToolComplete`.
@@ -254,6 +280,8 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
             registry,
             tools: ArcSwap::new(Arc::new(tools)),
             apply_lock: std::sync::Mutex::new(()),
+            toolset_scope: Vec::new(),
+            toolset_grants: HashMap::new(),
             execution_log: None,
             calls: Arc::new(RwLock::new(HashMap::new())),
             dispatch: None,
@@ -291,84 +319,67 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         self
     }
 
-    /// Replace the toolset-owned subset of the tool list from a set of manifest
-    /// tools. Test seam; production reads the manifest from the mounted file and
-    /// drives `apply_manifest_catalog`.
-    #[cfg(test)]
-    pub(crate) fn apply_toolset_tools(
-        &self,
-        tools: Vec<crate::capability_manifest::ManifestTool>,
-    ) -> Result<(), String> {
-        self.apply_manifest_catalog(&CapabilityManifest { tools })
+    /// Bind this workspace's toolsets and their grants.
+    pub(crate) fn with_toolset_scope(
+        mut self,
+        toolsets: Vec<String>,
+        grants: HashMap<String, HashMap<String, CapabilityGrant>>,
+    ) -> Self {
+        self.toolset_scope = toolsets;
+        self.toolset_grants = grants;
+        self
     }
 
-    /// Replace the toolset-owned subset of the catalog from the mounted
-    /// capability manifest. Each `ManifestTool` becomes a `Source::Toolset`
-    /// entry carrying its argument schema and this workspace's resolved grants
-    /// (Secret name, mount path, egress), so the dispatch producer resolves a
-    /// selected grant without a second lookup. Runtime entries are preserved.
-    /// Errors hard on any name collision with an existing source.
-    pub(crate) fn apply_manifest_catalog(
-        &self,
-        manifest: &CapabilityManifest,
-    ) -> Result<(), String> {
-        // Copy only the four env-free fields into `info`; `env` rides `args`
-        // and grant names ride `grants`, both confined to the in-process
-        // dispatch producer.
-        let snapshot: Vec<CatalogEntry> = manifest
-            .tools
-            .iter()
-            .map(|t| CatalogEntry {
-                info: ToolInfo {
-                    name: t.name.clone(),
-                    description: t.description.clone(),
-                    parameters_json: t.parameters_json.clone(),
-                    toolset: t.toolset.clone(),
-                },
-                source: Source::Toolset,
-                args: t.args.clone(),
-                grants: t
-                    .grants
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
-            })
-            .collect();
-        self.apply_source(Source::Toolset, snapshot)
-    }
-
-    fn apply_source(&self, source: Source, snapshot: Vec<CatalogEntry>) -> Result<(), String> {
-        // Serialize concurrent watcher RMWs. The collision check below
-        // reads the live snapshot — both halves must run inside the
-        // writer-lock scope or two simultaneous applies of colliding
-        // names could both pass it.
+    /// Rebuild the toolset-owned catalog from the live toolset table, listing
+    /// only the toolsets this workspace binds, each tool carrying its args and
+    /// the workspace's grants for its toolset. A toolset that names a runtime
+    /// or channel tool, or maps an arg to an env the harness stamps on tool
+    /// jobs, is left out whole and the returned warnings name it. Runtime and
+    /// channel entries are preserved.
+    pub(crate) fn apply_toolsets(&self, table: &ToolsetConfig) -> Vec<String> {
         let _guard = self
             .apply_lock
             .lock()
             .expect("apply_lock poisoned — unrecoverable");
-        let current = self.tools.load();
-        // Detect collisions against entries owned by a different source.
-        // Runtime ones are framework-defined; toolset ones are
-        // operator-configured. Either side colliding with another is a
-        // configuration bug we want to surface loudly.
-        for entry in &snapshot {
-            for existing in current.iter() {
-                if existing.info.name == entry.info.name && existing.source != source {
-                    return Err(format!(
-                        "tool name collision: {} advertised by both {:?} and {:?}",
-                        entry.info.name, existing.source, source
-                    ));
-                }
+        let mut next: Vec<CatalogEntry> = self
+            .tools
+            .load()
+            .iter()
+            .filter(|e| e.source != Source::Toolset)
+            .cloned()
+            .collect();
+        let builtin: Vec<String> = next.iter().map(|e| e.info.name.clone()).collect();
+        let mut warnings = Vec::new();
+        for name in &self.toolset_scope {
+            let Some(entry) = table.get(name) else {
+                continue;
+            };
+            if let Some(reason) = clash(entry, &builtin) {
+                warnings.push(format!("toolset {name} left out: {reason}"));
+                continue;
             }
+            let grants = self.toolset_grants.get(name).cloned().unwrap_or_default();
+            next.extend(entry.tools.iter().map(|t| CatalogEntry {
+                info: ToolInfo {
+                    name: t.name.clone(),
+                    description: t.description.clone(),
+                    parameters_json: t.parameters_json(),
+                    toolset: name.clone(),
+                },
+                source: Source::Toolset,
+                args: t.args.clone(),
+                grants: grants.clone(),
+            }));
         }
-        let mut next: Vec<CatalogEntry> = current.iter().cloned().collect();
-        next.retain(|e| e.source != source);
-        next.extend(snapshot);
         next.sort_by(|a, b| a.info.name.cmp(&b.info.name));
-        let len = next.len();
+        let toolset_tools: Vec<&str> = next
+            .iter()
+            .filter(|e| e.source == Source::Toolset)
+            .map(|e| e.info.name.as_str())
+            .collect();
+        tracing::info!(count = next.len(), tools = ?toolset_tools, "tool router refreshed");
         self.tools.store(Arc::new(next));
-        tracing::info!(count = len, source = ?source, "tool router refreshed");
-        Ok(())
+        warnings
     }
 
     pub(crate) fn tool_definitions(&self) -> Vec<ToolDefinition> {
@@ -1006,8 +1017,8 @@ impl<A: ToolsetRpc + Clone + Send + Sync + 'static> ToolDispatcher for ToolRoute
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capability_manifest::ManifestTool;
     use crate::instructions::Instructions;
+    use shared::toolset::ToolDecl;
     use tokio_stream::StreamExt;
 
     const WS: &str = "ws";
@@ -1020,15 +1031,40 @@ mod tests {
         Arc::new(Instructions::new(root))
     }
 
-    fn t(name: &str) -> ManifestTool {
-        ManifestTool {
+    fn t(name: &str) -> ToolDecl {
+        ToolDecl {
             name: name.into(),
             description: format!("desc:{name}"),
-            parameters_json: "{}".into(),
-            toolset: "ts".into(),
             args: Vec::new(),
-            grants: std::collections::BTreeMap::new(),
         }
+    }
+
+    fn seed_granted<A: ToolsetRpc + Clone + Send + 'static>(
+        router: ToolRouter<A>,
+        tools: Vec<ToolDecl>,
+        grants: HashMap<String, CapabilityGrant>,
+    ) -> ToolRouter<A> {
+        let router = router.with_toolset_scope(
+            vec!["ts".to_string()],
+            HashMap::from([("ts".to_string(), grants)]),
+        );
+        let entry = ToolsetEntry {
+            tools,
+            ..Default::default()
+        };
+        let warnings = router.apply_toolsets(&ToolsetConfig::from_map(HashMap::from([(
+            "ts".to_string(),
+            entry,
+        )])));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        router
+    }
+
+    fn seed<A: ToolsetRpc + Clone + Send + 'static>(
+        router: ToolRouter<A>,
+        tools: Vec<ToolDecl>,
+    ) -> ToolRouter<A> {
+        seed_granted(router, tools, HashMap::new())
     }
 
     fn no_grants() -> HashMap<String, String> {
@@ -1070,138 +1106,103 @@ mod tests {
     }
 
     #[test]
-    fn apply_toolset_tools_preserves_runtime_entries() {
-        let router = empty_router();
-        router
-            .apply_toolset_tools(vec![t("Bash"), t("Git")])
-            .unwrap();
+    fn applied_toolset_preserves_runtime_entries() {
+        let router = seed(empty_router(), vec![t("Bash"), t("Git")]);
         let names = names(&router);
         assert!(names.iter().any(|n| n == "dispatch"));
         assert!(names.iter().any(|n| n == "Bash"));
         assert!(names.iter().any(|n| n == "Git"));
     }
 
-    #[test]
-    fn apply_replaces_within_same_source() {
-        let router = empty_router();
-        router.apply_toolset_tools(vec![t("Bash")]).unwrap();
-        router.apply_toolset_tools(vec![t("Git")]).unwrap();
-        let names = names(&router);
-        assert!(!names.iter().any(|n| n == "Bash"));
-        assert!(names.iter().any(|n| n == "Git"));
-    }
-
-    #[test]
-    fn apply_rejects_collision_with_runtime_tool() {
-        let router = empty_router();
-        // `dispatch` and `read` are built-in runtime tools; an toolset snapshot
-        // colliding with either is a configuration bug the router rejects.
-        assert!(router
-            .apply_toolset_tools(vec![t("dispatch")])
-            .unwrap_err()
-            .contains("collision"));
-        assert!(router
-            .apply_toolset_tools(vec![t("read")])
-            .unwrap_err()
-            .contains("collision"));
-    }
-
-    // The harness obtains its tool catalog by reading the mounted
-    // `capability-manifest-<ws>` file, then applying it to the router — no gRPC
-    // catalog stream and no Kubernetes API read. This test drives both halves:
-    // `CapabilityManifest::load` parses a manifest file into a tool carrying its
-    // arg schema (the `env` mapping the harness resolves the model's input
-    // against) and its secret binding, with no Service address; and
-    // `apply_manifest_catalog` populates the live catalog from it, sourcing the
-    // grant's credential detail from the manifest itself rather than the wire.
-    //
-    // The fixture's arg row uses the tool-arg vocabulary already serialized in
-    // this tree (name/type/required/env/description).
-    #[test]
-    fn manifest_load_then_apply_populates_the_catalog_from_the_mounted_file() {
-        use crate::capability_manifest::CapabilityManifest;
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("manifest.yaml");
-        std::fs::write(
-            &path,
-            concat!(
-                "tools:\n",
-                "  - name: NotionSearch\n",
-                "    description: search notion\n",
-                "    parameters_json: '{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}}}'\n",
-                "    toolset: notion\n",
-                "    args:\n",
-                "      - name: query\n",
-                "        type: string\n",
-                "        required: true\n",
-                "        env: NOTION_QUERY\n",
-                "        description: the query\n",
-                "    grants:\n",
-                "      reader:\n",
-                "        secret: research-notion-reader\n",
-                "        path: /etc/creds/notion\n",
-                "        egress: notion.com\n",
-            ),
+    fn table(toolsets: Vec<(&str, Vec<ToolDecl>)>) -> ToolsetConfig {
+        ToolsetConfig::from_map(
+            toolsets
+                .into_iter()
+                .map(|(name, tools)| {
+                    let entry = ToolsetEntry {
+                        tools,
+                        ..Default::default()
+                    };
+                    (name.to_string(), entry)
+                })
+                .collect(),
         )
-        .unwrap();
-
-        let manifest = CapabilityManifest::load(&path).expect("the manifest file parses");
-
-        // One tool, with its arg schema and secret binding.
-        assert_eq!(manifest.tools.len(), 1, "the manifest carries the one tool");
-        let tool = &manifest.tools[0];
-        assert_eq!(tool.name, "NotionSearch");
-        assert_eq!(tool.toolset, "notion");
-        let arg = tool
-            .args
-            .iter()
-            .find(|a| a.name == "query")
-            .expect("the query arg parses");
-        assert_eq!(
-            arg.env, "NOTION_QUERY",
-            "the arg's env mapping is part of the schema the harness resolves"
-        );
-        let reader = tool.grants.get("reader").expect("the reader grant parses");
-        assert_eq!(reader.secret, "research-notion-reader");
-        assert_eq!(reader.path.as_deref(), Some("/etc/creds/notion"));
-        assert_eq!(reader.egress.as_deref(), Some("notion.com"));
-
-        // Applying the loaded manifest populates the router's live catalog.
-        let router = empty_router();
-        router
-            .apply_manifest_catalog(&manifest)
-            .expect("the manifest catalog applies");
-
-        assert!(
-            names(&router).iter().any(|n| n == "NotionSearch"),
-            "the manifest's tool is advertised after apply"
-        );
-        let grants = router
-            .grants_for("NotionSearch")
-            .expect("NotionSearch is a catalog tool");
-        let reader = grants
-            .get("reader")
-            .expect("the reader grant is selectable from the manifest");
-        assert_eq!(
-            reader.secret, "research-notion-reader",
-            "the grant's Secret comes from the manifest the harness read, not a catalog wire"
-        );
-        let args = router
-            .args_for("NotionSearch")
-            .expect("NotionSearch carries args");
-        assert!(
-            args.iter().any(|a| a.env == "NOTION_QUERY"),
-            "the arg env mapping survives from the manifest into the router catalog"
-        );
     }
 
-    fn tool_with_arg(name: &str, arg_name: &str, env: &str) -> ManifestTool {
-        ManifestTool {
+    fn scoped_router(toolsets: &[&str]) -> ToolRouter {
+        empty_router().with_toolset_scope(
+            toolsets.iter().map(|s| s.to_string()).collect(),
+            HashMap::<String, HashMap<String, CapabilityGrant>>::new(),
+        )
+    }
+
+    #[test]
+    fn toolset_naming_a_builtin_tool_is_excluded_and_named() {
+        let router = scoped_router(&["clash", "git"]);
+
+        let warnings = router.apply_toolsets(&table(vec![
+            ("clash", vec![t("read"), t("Other")]),
+            ("git", vec![t("git-status")]),
+        ]));
+
+        assert!(warnings.iter().any(|w| w.contains("clash")), "{warnings:?}");
+        let names = names(&router);
+        assert!(names.iter().any(|n| n == "git-status"));
+        assert!(!names.iter().any(|n| n == "Other"));
+        assert_eq!(names.iter().filter(|n| *n == "read").count(), 1);
+        assert_eq!(router.source_of("read"), Some(Source::Runtime));
+    }
+
+    #[test]
+    fn toolset_mapping_an_arg_to_reserved_env_is_excluded_and_named() {
+        let router = scoped_router(&["fetch", "git"]);
+
+        let warnings = router.apply_toolsets(&table(vec![
+            ("fetch", vec![tool_with_arg("Fetch", "url", "HOME")]),
+            ("git", vec![t("git-status")]),
+        ]));
+
+        assert!(warnings.iter().any(|w| w.contains("fetch")), "{warnings:?}");
+        let names = names(&router);
+        assert!(names.iter().any(|n| n == "git-status"));
+        assert!(!names.iter().any(|n| n == "Fetch"));
+    }
+
+    #[test]
+    fn toolset_added_after_first_apply_is_listed() {
+        let router = scoped_router(&["git", "extra"]);
+        router.apply_toolsets(&table(vec![("git", vec![t("git-status")])]));
+        assert!(!names(&router).iter().any(|n| n == "Extra"));
+
+        let warnings = router.apply_toolsets(&table(vec![
+            ("git", vec![t("git-status")]),
+            ("extra", vec![t("Extra")]),
+        ]));
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let names = names(&router);
+        assert!(names.iter().any(|n| n == "Extra"));
+        assert!(names.iter().any(|n| n == "git-status"));
+    }
+
+    #[test]
+    fn toolset_outside_scope_is_never_listed() {
+        let router = scoped_router(&["git"]);
+
+        router.apply_toolsets(&table(vec![
+            ("git", vec![t("git-status")]),
+            ("other", vec![t("Other")]),
+        ]));
+
+        let names = names(&router);
+        assert!(names.iter().any(|n| n == "git-status"));
+        assert!(!names.iter().any(|n| n == "Other"));
+    }
+
+    fn tool_with_arg(name: &str, arg_name: &str, env: &str) -> ToolDecl {
+        ToolDecl {
             name: name.into(),
             description: format!("desc:{name}"),
-            parameters_json: "{}".into(),
-            toolset: "ts".into(),
             args: vec![ArgDecl {
                 name: arg_name.into(),
                 ty: shared::toolset::ArgType::String,
@@ -1209,7 +1210,6 @@ mod tests {
                 env: env.into(),
                 description: None,
             }],
-            grants: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1335,10 +1335,10 @@ mod tests {
 
     #[test]
     fn args_for_surfaces_arg_env_after_ingest() {
-        let router = empty_router();
-        router
-            .apply_toolset_tools(vec![tool_with_arg("Git", "message", "MESSAGE")])
-            .unwrap();
+        let router = seed(
+            empty_router(),
+            vec![tool_with_arg("Git", "message", "MESSAGE")],
+        );
         let args = router.args_for("Git").expect("Git is a toolset tool");
         assert_eq!(args.len(), 1);
         assert_eq!(args[0].env, "MESSAGE");
@@ -1346,10 +1346,10 @@ mod tests {
 
     #[test]
     fn outbound_definitions_carry_no_arg_env() {
-        let router = empty_router();
-        router
-            .apply_toolset_tools(vec![tool_with_arg("Git", "message", "SECRET_ENV")])
-            .unwrap();
+        let router = seed(
+            empty_router(),
+            vec![tool_with_arg("Git", "message", "SECRET_ENV")],
+        );
         for def in router.tool_definitions() {
             assert!(!def.name.contains("SECRET_ENV"));
             assert!(!def.description.contains("SECRET_ENV"));
@@ -1395,8 +1395,7 @@ mod tests {
 
     #[tokio::test]
     async fn call_tool_routes_toolset_through_in_process_dispatch() {
-        let router = empty_router();
-        router.apply_toolset_tools(vec![t("Bash")]).unwrap();
+        let router = seed(empty_router(), vec![t("Bash")]);
         let mut tb = UnconfiguredToolset;
         let cancel = CancellationToken::new();
         let err = router
@@ -1472,8 +1471,7 @@ mod tests {
 
     #[test]
     fn source_of_returns_correct_attribution() {
-        let router = empty_router();
-        router.apply_toolset_tools(vec![t("Bash")]).unwrap();
+        let router = seed(empty_router(), vec![t("Bash")]);
         assert_eq!(router.source_of("Bash"), Some(Source::Toolset));
         // read/dispatch are built-in runtime tools.
         assert_eq!(router.source_of("read"), Some(Source::Runtime));
@@ -1500,11 +1498,7 @@ mod tests {
     /// Router carrying all three sources: runtime + channel from `empty_router`,
     /// plus two toolset tools.
     fn router_with_two_toolset_tools() -> ToolRouter {
-        let router = empty_router();
-        router
-            .apply_toolset_tools(vec![t("Bash"), t("Curl")])
-            .unwrap();
-        router
+        seed(empty_router(), vec![t("Bash"), t("Curl")])
     }
 
     fn scoped_names(router: &ToolRouter, agent_tools: Option<&[String]>) -> Vec<String> {
@@ -1577,8 +1571,7 @@ mod tests {
     /// wiring the list into dispatch later would break this test.
     #[tokio::test]
     async fn scoping_a_tool_out_of_the_advertisement_does_not_gate_dispatch() {
-        let router = empty_router();
-        router.apply_toolset_tools(vec![t("Bash")]).unwrap();
+        let router = seed(empty_router(), vec![t("Bash")]);
 
         // A scoped advertisement naming only "Other" hides Bash from the catalog.
         let advertised = scoped_names(&router, Some(&["Other".to_string()]));
@@ -1691,7 +1684,7 @@ mod tests {
             test_registry(),
         )
         .with_dispatch(dispatch.clone());
-        router.apply_toolset_tools(vec![t("Bash")]).unwrap();
+        let router = seed(router, vec![t("Bash")]);
 
         let capture = spawn_claiming_pod(&dispatch, "Bash", "job-x");
 
@@ -1784,9 +1777,7 @@ mod tests {
             test_registry(),
         )
         .with_dispatch(dispatch.clone());
-        router
-            .apply_toolset_tools(vec![tool_with_arg("Git", "message", "MESSAGE")])
-            .unwrap();
+        let router = seed(router, vec![tool_with_arg("Git", "message", "MESSAGE")]);
 
         // The pod: dequeue the assignment for its job, capture the args, then
         // fire the cancel so `call_tool` unblocks and returns.
@@ -1858,18 +1849,18 @@ mod tests {
             test_registry(),
         )
         .with_dispatch(dispatch.clone());
-        // `t()` stamps toolset "ts"; the manifest tool carries the "deploy" grant
-        // that toolset offers, resolved credential detail and all.
-        let mut bash = t("Bash");
-        bash.grants.insert(
-            "deploy".to_string(),
-            CapabilityGrant {
-                secret: "ws-ts-deploy".to_string(),
-                path: Some("/home/agent/.config/deploy/token".to_string()),
-                egress: None,
-            },
+        let router = seed_granted(
+            router,
+            vec![t("Bash")],
+            HashMap::from([(
+                "deploy".to_string(),
+                CapabilityGrant {
+                    secret: "ws-ts-deploy".to_string(),
+                    path: Some("/home/agent/.config/deploy/token".to_string()),
+                    egress: None,
+                },
+            )]),
         );
-        router.apply_toolset_tools(vec![bash]).unwrap();
 
         let capture = spawn_pod(&dispatch, "Bash", "job-x", vec![done_terminal()]);
 
@@ -1918,7 +1909,7 @@ mod tests {
             test_registry(),
         )
         .with_dispatch(dispatch.clone());
-        router.apply_toolset_tools(vec![t("Bash")]).unwrap();
+        let router = seed(router, vec![t("Bash")]);
 
         let capture = spawn_pod(&dispatch, "Bash", "job-x", vec![done_terminal()]);
 
@@ -1962,7 +1953,7 @@ mod tests {
             test_registry(),
         )
         .with_dispatch(dispatch.clone());
-        router.apply_toolset_tools(vec![t("Bash")]).unwrap();
+        let router = seed(router, vec![t("Bash")]);
 
         spawn_pod(
             &dispatch,
@@ -2024,7 +2015,7 @@ mod tests {
         )
         .with_dispatch(dispatch.clone())
         .with_execution_log(log.clone());
-        router.apply_toolset_tools(vec![t("Bash")]).unwrap();
+        let router = seed(router, vec![t("Bash")]);
 
         let capture = spawn_pod(
             &dispatch,
@@ -2111,7 +2102,7 @@ mod tests {
         )
         .with_dispatch(dispatch.clone())
         .with_execution_log(log.clone());
-        router.apply_toolset_tools(vec![t("Bash")]).unwrap();
+        let router = seed(router, vec![t("Bash")]);
 
         // The runtime streams a partial output line, then — because its child was
         // SIGKILLed on the cancel — its own terminal with outcome Canceled. The
@@ -2289,7 +2280,7 @@ mod tests {
         // The client path resolves the tool's source, so the toolset tool under
         // test must be advertised — as it is in production, where the client can
         // only dispatch a tool the harness advertised to it.
-        router.apply_toolset_tools(vec![t("Bash")]).unwrap();
+        let router = seed(router, vec![t("Bash")]);
 
         // The pod streams one stdout frame then the terminal.
         spawn_pod(
@@ -2764,7 +2755,7 @@ mod tests {
             let router: ToolRouter =
                 ToolRouter::new(test_instructions(), WS.to_string(), None, None, reg.clone())
                     .with_dispatch(dispatch.clone());
-            router.apply_toolset_tools(vec![t("Bash")]).unwrap();
+            let router = seed(router, vec![t("Bash")]);
             spawn_pod(
                 &dispatch,
                 "Bash",

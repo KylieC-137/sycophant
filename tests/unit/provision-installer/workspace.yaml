@@ -8,4 +8,5 @@ metadata:
     sycophant.md/lifecycle-marker: "true"
     app.kubernetes.io/part-of: sycophant
 data:
-  values: "workspaces: {one: {}}"
+  toolsets: stdlib,ssh-credentials
+  grant.ssh-credentials.demo-key.secret: demo-ssh-key

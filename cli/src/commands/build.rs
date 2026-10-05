@@ -4,6 +4,7 @@
 //! checkout (the pre-published-image path); otherwise setup expects the images
 //! to already exist.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -139,15 +140,27 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
     )?;
     let _ = fs::remove_file(&staged);
 
-    // Tool toolsets: each adds only its tools on top of the base image.
+    // Tool toolsets: each adds only its tools on top of the base image, and
+    // carries its tools.yaml, as one-line JSON, in the md.sycophant.tools label.
     for img in TOOLSET_IMAGES {
         let ctx = toolset_context(img);
         let basearg = format!("BASE_IMAGE={TOOLSET_BASE_TAG}");
         let tag = format!("{img}:local");
         let dockerfile = format!("{ctx}/Dockerfile");
+        let label = format!("md.sycophant.tools={}", tools_label(&repo.join(ctx))?);
         docker_build(
             repo,
-            &["--build-arg", &basearg, "-f", &dockerfile, ctx, "-t", &tag],
+            &[
+                "--build-arg",
+                &basearg,
+                "--label",
+                &label,
+                "-f",
+                &dockerfile,
+                ctx,
+                "-t",
+                &tag,
+            ],
         )?;
     }
 
@@ -192,6 +205,24 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
     }
     ok("images built + loaded");
     Ok(())
+}
+
+/// A toolset context's `tools.yaml` as one-line JSON for the image label.
+/// Every value must be a quoted string. serde_yaml would coerce a plain
+/// `true` or `5` into a `String`, so values are checked as YAML values.
+fn tools_label(ctx: &Path) -> Result<String, String> {
+    let path = ctx.join("tools.yaml");
+    let raw = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let parsed: BTreeMap<String, serde_yaml::Value> =
+        serde_yaml::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let flat = parsed
+        .into_iter()
+        .map(|(k, v)| match v {
+            serde_yaml::Value::String(s) => Ok((k, s)),
+            _ => Err(format!("{}: {k} is not a string", path.display())),
+        })
+        .collect::<Result<BTreeMap<String, String>, String>>()?;
+    serde_json::to_string(&flat).map_err(|e| e.to_string())
 }
 
 /// Copy `target/<triple>/release/<src_bin>` to `<repo>/<dst_rel>` (the build

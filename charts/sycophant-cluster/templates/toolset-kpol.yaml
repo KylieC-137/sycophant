@@ -1,10 +1,13 @@
 {{- /*
-The toolset lifecycle: the provision-toolset installer, its grant, and the
-reap of the installer's ServiceAccount and RoleBinding.
+The toolset lifecycle: the provision-toolset installer and its grant, the
+uninstall-toolset reactor on a reap marker, and the reap of both identities'
+ServiceAccounts and RoleBindings.
 */}}
 {{- if include "sycophant.renderKyverno" . }}
 ---
 {{ include "sycophant.provisionInstaller" (dict "ctx" $ "kind" "toolset") }}
+---
+{{ include "sycophant.provisionUninstaller" (dict "ctx" $ "kind" "toolset") }}
 ---
 {{ include "sycophant.provisionReap" (dict "ctx" $ "kind" "toolset") }}
 {{- end }}

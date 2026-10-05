@@ -14,7 +14,8 @@ token.
 `harness-<ws>` is the sole Job creator: the harness creates every capability
 Job in its own namespace via the kube API.
 */}}
-{{- range $name, $ws := .Values.workspaces }}
+{{- if eq .Values.render "workspace" }}
+{{- $name := .Values.name }}
 ---
 apiVersion: v1
 kind: ServiceAccount

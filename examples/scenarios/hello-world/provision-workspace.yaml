@@ -1,0 +1,18 @@
+# The hello-world workspace marker. Apply it with `syco workspace up -f` once
+# its model and toolsets are installed (see README.md).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-workspace-hello-world
+  namespace: tenant-hello-world
+  labels:
+    sycophant.md/lifecycle-marker: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  # The model keys this workspace may name. Each is its own inference marker.
+  models: deepseek-v4-flash
+  toolsets: stdlib,ssh-credentials
+  # A secret-only grant: the credential lands where ssh expects it and no
+  # network hole opens, so the tool job stays on the baseline floor.
+  grant.ssh-credentials.demo-key.secret: demo-ssh-key
+  grant.ssh-credentials.demo-key.path: /home/agent/.ssh/id_ed25519

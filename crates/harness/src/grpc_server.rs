@@ -410,6 +410,22 @@ mod dispatch_await_cancel_tests {
         )
     }
 
+    fn stdlib_bash() -> shared::toolset::ToolsetConfig {
+        use shared::toolset::{ToolDecl, ToolsetConfig, ToolsetEntry};
+        let entry = ToolsetEntry {
+            tools: vec![ToolDecl {
+                name: "Bash".into(),
+                description: "run a shell tool".into(),
+                args: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        ToolsetConfig::from_map(std::collections::HashMap::from([(
+            "stdlib".to_string(),
+            entry,
+        )]))
+    }
+
     async fn seed_bash_job(dispatch: &Arc<DispatchState>) {
         dispatch
             .set_active_job(ActiveJob {
@@ -541,18 +557,10 @@ mod dispatch_await_cancel_tests {
                 registry.clone(),
             )
             .with_execution_log(exec_log)
-            .with_dispatch(dispatch.clone()),
+            .with_dispatch(dispatch.clone())
+            .with_toolset_scope(vec!["stdlib".into()], Default::default()),
         );
-        router
-            .apply_toolset_tools(vec![crate::capability_manifest::ManifestTool {
-                toolset: "stdlib".into(),
-                name: "Bash".into(),
-                description: "run a shell tool".into(),
-                parameters_json: "{}".into(),
-                args: Vec::new(),
-                grants: std::collections::BTreeMap::new(),
-            }])
-            .unwrap();
+        assert!(router.apply_toolsets(&stdlib_bash()).is_empty());
         (HarnessService::new(router, registry), dispatch)
     }
 
@@ -1047,18 +1055,10 @@ mod dispatch_await_cancel_tests {
                 None,
                 registry.clone(),
             )
-            .with_dispatch(dispatch.clone()),
+            .with_dispatch(dispatch.clone())
+            .with_toolset_scope(vec!["stdlib".into()], Default::default()),
         );
-        router
-            .apply_toolset_tools(vec![crate::capability_manifest::ManifestTool {
-                toolset: "stdlib".into(),
-                name: "Bash".into(),
-                description: "run a shell tool".into(),
-                parameters_json: "{}".into(),
-                args: Vec::new(),
-                grants: std::collections::BTreeMap::new(),
-            }])
-            .unwrap();
+        assert!(router.apply_toolsets(&stdlib_bash()).is_empty());
         let svc = HarnessService::new(router, registry);
         (svc, root, conv_id, dispatch)
     }

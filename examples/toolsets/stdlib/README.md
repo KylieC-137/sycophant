@@ -17,24 +17,20 @@ Tool names are PascalCase (the canonical LLM-facing identifier). The
 K8s Job name the toolset builds for each call is kebab-cased
 (`tool-read-<call_id_prefix>`) to satisfy RFC 1123.
 
-`keepalive: true` keeps one toolset pod alive per workspace for the
+A marker `keepalive: "true"` keeps one toolset pod alive per workspace for the
 workspace's lifetime — there is no per-call cold start.
 
 ## Extending the base image
 
-The capability manifest is built from the image's baked `tools.yaml`, not a
-label. A derived image's `tools.yaml` REPLACES the base's — the reader reads one
-file — so to extend the stdlib toolset you author a single `tools.yaml` listing
-ALL five stdlib entries alongside your additions, bake it, and point the source
-label at it:
+The tool list is the image's `md.sycophant.tools` label, built from a flat
+`tools.yaml` of string values. A derived image's label REPLACES the base's, so
+to extend the stdlib toolset you author one `tools.yaml` holding all five stdlib
+entries (copy `images/toolset/tools.yaml`) alongside your additions, convert it
+to one-line JSON with a string-only check, and build with
+`--label md.sycophant.tools="$label"` (see docs/toolset.md):
 
 ```dockerfile
 FROM ghcr.io/calebfaruki/toolset:latest
-
-# Lists all five stdlib tools plus your own; see images/toolset/tools.yaml for
-# the schema format. This file is the single source of truth for the image.
-COPY tools.yaml /etc/toolset/tools.yaml
-LABEL md.sycophant.tools.source="/etc/toolset/tools.yaml"
 
 # tool dispatcher for non-built-in tools
 COPY dispatch /etc/toolset/dispatch

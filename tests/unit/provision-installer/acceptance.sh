@@ -25,6 +25,8 @@ for kind in tenant workspace user toolset inference; do
   generate "$kind" "$kind"
 done
 generate inference reap-inference
+generate toolset reap-toolset
+generate workspace reap-workspace
 
 mkdir -p "$WORK/bin"
 cat > "$WORK/bin/kubectl" <<'SH'
@@ -214,63 +216,66 @@ if taking:
 else:
     ok("capability installs never take ownership of another release's objects")
 
-marker_data = yaml.safe_load(open(os.path.join(sys.argv[2], "inference.yaml")))["data"]
-argv = install_call("inference", json.dumps(marker_data))
-name = "inference: install hands the marker data and name to the chart"
-if not argv:
-    bad(name, "no helm upgrade call")
-else:
+for kind, release in (("inference", "local"), ("toolset", "one"), ("workspace", "one")):
+    marker_data = yaml.safe_load(open(os.path.join(sys.argv[2], f"{kind}.yaml")))["data"]
+    argv = install_call(kind, json.dumps(marker_data))
+    name = f"{kind}: install hands the marker data and name to the chart"
+    if not argv:
+        bad(name, "no helm upgrade call")
+        continue
     files = [argv[i + 1] for i in range(len(argv) - 1) if argv[i] in ("-f", "--values")]
     loaded = [yaml.safe_load(open(f)) for f in files if os.path.exists(f)]
     sets = [argv[i + 1] for i in range(len(argv) - 1) if argv[i] in ("--set", "--set-string")]
-    if any((v or {}).get("marker") == marker_data for v in loaded) and "render=inference" in sets and "name=local" in sets:
+    if any((v or {}).get("marker") == marker_data for v in loaded) and f"render={kind}" in sets and f"name={release}" in sets:
         ok(name)
     else:
         bad(name, f"argv={' '.join(argv)}, values={loaded}")
 
-docs = generated("reap-inference")
-name = f"uninstall-inference-{uid10}"
-sa = find(docs, "ServiceAccount", name, "sycophant-system")
-job = find(docs, "Job", name, "sycophant-system")
-rb = find(docs, "RoleBinding", name, "tenant-acme")
-if sa and job and rb and job["spec"]["template"]["spec"].get("serviceAccountName") == name \
-        and rb["roleRef"] == {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "provision-write"} \
-        and [(s.get("kind"), s.get("name"), s.get("namespace")) for s in rb.get("subjects", [])] == [("ServiceAccount", name, "sycophant-system")]:
-    ok("inference: reap marker generates a uid-named uninstall identity bound to provision-write")
-else:
-    bad("inference: reap marker generates a uid-named uninstall identity bound to provision-write",
-        f"generated {[(d['kind'], d['metadata'].get('name'), d['metadata'].get('namespace')) for d in docs]}")
+for kind, release in (("inference", "deepseek"), ("toolset", "one"), ("workspace", "one")):
+    docs = generated(f"reap-{kind}")
+    marker = f"reap-{kind}-{release}"
+    name = f"uninstall-{kind}-{uid10}"
+    sa = find(docs, "ServiceAccount", name, "sycophant-system")
+    job = find(docs, "Job", name, "sycophant-system")
+    rb = find(docs, "RoleBinding", name, "tenant-acme")
+    if sa and job and rb and job["spec"]["template"]["spec"].get("serviceAccountName") == name \
+            and rb["roleRef"] == {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "provision-write"} \
+            and [(s.get("kind"), s.get("name"), s.get("namespace")) for s in rb.get("subjects", [])] == [("ServiceAccount", name, "sycophant-system")]:
+        ok(f"{kind}: reap marker generates a uid-named uninstall identity bound to provision-write")
+    else:
+        bad(f"{kind}: reap marker generates a uid-named uninstall identity bound to provision-write",
+            f"generated {[(d['kind'], d['metadata'].get('name'), d['metadata'].get('namespace')) for d in docs]}")
 
-if job:
-    rc, calls = run_job(job, 0)
-    un_at = [i for i, a in enumerate(calls) if a[:2] == ["helm", "uninstall"] and "inference-deepseek" in a
-             and any(a[j] in ("-n", "--namespace") and a[j + 1] == "tenant-acme" for j in range(len(a) - 1))]
-    del_at = [i for i, a in enumerate(calls) if deletes_marker(a, "reap-inference-deepseek", "tenant-acme")]
-    if rc == 0 and un_at and del_at and min(del_at) > max(un_at) and not any(a[0] == "helm" and "upgrade" in a for a in calls):
-        ok("inference: uninstall removes the release, then deletes its reap marker")
+    if job:
+        rc, calls = run_job(job, 0)
+        un_at = [i for i, a in enumerate(calls) if a[:2] == ["helm", "uninstall"] and f"{kind}-{release}" in a
+                 and any(a[j] in ("-n", "--namespace") and a[j + 1] == "tenant-acme" for j in range(len(a) - 1))]
+        del_at = [i for i, a in enumerate(calls) if deletes_marker(a, marker, "tenant-acme")]
+        if rc == 0 and un_at and del_at and min(del_at) > max(un_at) and not any(a[0] == "helm" and "upgrade" in a for a in calls):
+            ok(f"{kind}: uninstall removes the release, then deletes its reap marker")
+        else:
+            bad(f"{kind}: uninstall removes the release, then deletes its reap marker", f"rc={rc}, calls={[' '.join(a) for a in calls]}")
+        rc, calls = run_job(job, 1)
+        if rc != 0 and not any(deletes_marker(a, marker, "tenant-acme") for a in calls):
+            ok(f"{kind}: failed uninstall leaves its reap marker")
+        else:
+            bad(f"{kind}: failed uninstall leaves its reap marker", f"rc={rc}, calls={[' '.join(a) for a in calls]}")
     else:
-        bad("inference: uninstall removes the release, then deletes its reap marker", f"rc={rc}, calls={[' '.join(a) for a in calls]}")
-    rc, calls = run_job(job, 1)
-    if rc != 0 and not any(deletes_marker(a, "reap-inference-deepseek", "tenant-acme") for a in calls):
-        ok("inference: failed uninstall leaves its reap marker")
-    else:
-        bad("inference: failed uninstall leaves its reap marker", f"rc={rc}, calls={[' '.join(a) for a in calls]}")
-else:
-    bad("inference: uninstall removes the release, then deletes its reap marker", "no uninstall Job")
-    bad("inference: failed uninstall leaves its reap marker", "no uninstall Job")
+        bad(f"{kind}: uninstall removes the release, then deletes its reap marker", "no uninstall Job")
+        bad(f"{kind}: failed uninstall leaves its reap marker", "no uninstall Job")
 
-reap = reap_policy("inference")
-name = "inference: the scheduled sweep selects the uninstall identity"
-if not (reap and sa and rb):
-    bad(name, "missing reap-inference DeletingPolicy or uninstall identity")
-else:
-    miss = [f"{d['kind']}/{d['metadata']['name']}" for d in (sa, rb)
-            if (d["metadata"].get("labels") or {}).get("app.kubernetes.io/component") != "uninstall-inference"]
-    miss += reaps(reap, (sa, rb))
-    if miss:
-        bad(name, f"{miss} not labelled uninstall-inference or not reaped")
+    reap = reap_policy(kind)
+    name = f"{kind}: the scheduled sweep selects the uninstall identity"
+    if not (reap and sa and rb):
+        bad(name, f"missing reap-{kind} DeletingPolicy or uninstall identity")
     else:
-        ok(name)
+        miss = [f"{d['kind']}/{d['metadata']['name']}" for d in (sa, rb)
+                if (d["metadata"].get("labels") or {}).get("app.kubernetes.io/component") != f"uninstall-{kind}"]
+        miss += reaps(reap, (sa, rb))
+        if miss:
+            bad(name, f"{miss} not labelled uninstall-{kind} or not reaped")
+        else:
+            ok(name)
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

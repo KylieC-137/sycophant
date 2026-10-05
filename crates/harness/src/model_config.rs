@@ -96,27 +96,8 @@ impl ModelTable {
     where
         I: IntoIterator<Item = &'a ConfigMap>,
     {
-        let mut models = HashMap::new();
-        let mut errors = Vec::new();
-        for cm in cms {
-            let name = cm.metadata.name.as_deref().unwrap_or("<unnamed>");
-            let Some(key) = cm
-                .metadata
-                .labels
-                .as_ref()
-                .and_then(|l| l.get("app.kubernetes.io/name"))
-            else {
-                errors.push(format!("{name}: no app.kubernetes.io/name label"));
-                continue;
-            };
-            let empty = Default::default();
-            match ModelConfig::from_data(cm.data.as_ref().unwrap_or(&empty)) {
-                Ok(config) => {
-                    models.insert(key.clone(), config);
-                }
-                Err(e) => errors.push(format!("{name}: {e}")),
-            }
-        }
+        let (models, errors) =
+            shared::configmap_watcher::merge_labelled(cms, ModelConfig::from_data);
         (Self { models }, errors)
     }
 

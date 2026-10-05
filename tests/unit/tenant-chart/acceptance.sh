@@ -14,6 +14,8 @@ trap 'rm -rf "$WORK"' EXIT
 
 LOCAL='{"format":"openai","model":"liquid/lfm2.5-8b-a1b","server.image":"llama-server:local","server.weights":"ghcr.io/example/weights:1","server.weightsPath":"/weights/model.gguf"}'
 REMOTE='{"format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","image":"inference-runtime:local","secret":"llm-openrouter"}'
+TOOLSET='{"image":"ghcr.io/sycophant-md/git@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","keepalive":"false","tool.git-status.description":"Show the working tree status.","tool.git-commit.description":"Commit staged changes.","tool.git-commit.arg.message.type":"string","tool.git-commit.arg.message.required":"true","tool.git-commit.arg.message.env":"MESSAGE"}'
+WORKSPACE='{"toolsets":"git,ssh","models":"a,b","storage":"5Gi","grant.ssh.demo.secret":"demo-key","grant.ssh.demo.path":"/home/agent/.ssh/id","grant.ssh.demo.egress":"github.com"}'
 CHANNEL=(--set headscale.enabled=true --set headscale.serverUrl=http://localhost:8080
   --set-json 'channels={"app":{"kind":"app","loginServer":"http://headscale:8080"}}')
 
@@ -28,8 +30,9 @@ render channel "${CHANNEL[@]}" --set render=channel
 render bare --set render=base
 render local --set render=inference --set name=local --set-json "marker=$LOCAL"
 render remote --set render=inference --set name=deepseek --set-json "marker=$REMOTE"
-render models --set render=workspace --set-json 'workspaces={"one":{"models":["a","b"]}}'
-render wsbase --set render=base --set-json 'workspaces={"one":{}}'
+render toolset --set render=toolset --set name=git --set-json "marker=$TOOLSET"
+render workspace --set render=workspace --set name=one --set-json "marker=$WORKSPACE"
+render wsbase --set render=workspace --set name=one --set-json 'marker={}'
 render upgrade --set render=base --is-upgrade
 render channel-off --set render=channel
 render acme "${CHANNEL[@]}" --set render=channel \
@@ -45,10 +48,10 @@ for m in override:'{"server.weightsPath":"/opt/m.gguf","server.contextBudget":"8
   render "local-${m%%:*}" --set render=inference --set name=local --set-json "marker=$(printf '%s' "$LOCAL" | jq -c ". + ${m#*:}")"
 done
 
-python3 - "$WORK" "$REMOTE" <<'PY'
+python3 - "$WORK" "$REMOTE" "$TOOLSET" "$WORKSPACE" <<'PY'
 import json, sys, yaml
 
-work, remote = sys.argv[1], json.loads(sys.argv[2])
+work, remote, toolset, workspace = sys.argv[1], json.loads(sys.argv[2]), json.loads(sys.argv[3]), json.loads(sys.argv[4])
 passed = failed = 0
 
 def ok(name):
@@ -197,10 +200,10 @@ def listeners(docs):
             for p in sorted(named.values())}
     gaps = {p: g for p, g in gaps.items() if g}
     return None if named and not gaps else f"listeners {sorted(named.values())} missing {gaps}"
-wsbase, err1 = load("wsbase")
-channel, err2 = load("channel")
+parts = [load(o) for o in ("bare", "wsbase", "channel")]
 check("every relay listener is published, admitted and dialed",
-      (wsbase + channel, None) if wsbase is not None and channel is not None else (None, err1 or err2),
+      (sum((d for d, _ in parts), []), None) if all(d is not None for d, _ in parts)
+      else (None, next(e for d, e in parts if d is None)),
       listeners)
 
 def adapter_shape(docs):
@@ -297,6 +300,17 @@ def harness_reaches_inference(docs):
     return None if warm and want in dns else f"warm={warm} dns={dns}"
 check("harness egress reaches the inference pods and resolves their Services", "wsbase", harness_reaches_inference)
 
+def harness_dials_tool_pods(docs):
+    p = get(docs, "CiliumNetworkPolicy", "harness-egress-one")
+    if p is None:
+        return "harness-egress-one missing"
+    ingress = [r for r in p["spec"].get("ingress") or [] if 9090 in ports(r)]
+    dials = any(9090 in ports(r) and any((e.get("matchLabels") or {}).get("app.kubernetes.io/component") == "capability-job"
+                                         for e in r.get("toEndpoints") or [])
+                for r in p["spec"].get("egress") or [])
+    return None if not ingress and dials else f"ingress on 9090 {ingress}, egress to capability-job on 9090 {dials}"
+check("harness admits no ingress on 9090 and dials capability-job pods on 9090", "wsbase", harness_dials_tool_pods)
+
 def local_server(docs):
     want = ["CiliumNetworkPolicy/inference-local", "ConfigMap/model-local", "Deployment/inference-local", "Service/inference-local"]
     if objects(docs) != want or not model_cm(docs, "local"):
@@ -312,11 +326,62 @@ check("remote marker renders only its model ConfigMap and provider egress", "rem
       and (model_cm(docs, "deepseek") or {}).get("data") == remote
       else f"got {objects(docs)} {[d.get('data') for d in docs if d['kind'] == 'ConfigMap']}")
 
-def models_env(docs):
-    env = [e for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "one"
-           for c in pod(d)["spec"]["containers"] for e in c.get("env") or [] if e["name"] == "MODELS"]
-    return None if env and env[0].get("value") == "a,b" else f"MODELS env {env}"
-check("workspace models reach its harness as MODELS", "models", models_env)
+def toolset_cm(docs):
+    if objects(docs) != ["ConfigMap/toolset-git"]:
+        return f"want only ConfigMap/toolset-git, got {objects(docs)}"
+    d = docs[0]
+    labels = d["metadata"].get("labels") or {}
+    if (labels.get("sycophant.md/type"), labels.get("app.kubernetes.io/name")) != ("toolset", "git"):
+        return f"labels {labels}"
+    return None if d.get("data") == toolset else f"data {d.get('data')}"
+check("toolset marker renders only its toolset ConfigMap carrying the marker data", "toolset", toolset_cm)
+
+def harness_env(docs):
+    return {e["name"]: e.get("value") for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "one"
+            for c in pod(d)["spec"]["containers"] if c["name"] == "harness" for e in c.get("env") or []}
+
+def marker_env(docs):
+    env = harness_env(docs)
+    grants = json.loads(env.get("GRANTS") or "null")
+    want = {k: v for k, v in workspace.items() if k.startswith("grant.")}
+    got = (env.get("TOOLSETS"), env.get("MODELS"), grants)
+    return None if got == ("git,ssh", "a,b", want) else f"TOOLSETS, MODELS, GRANTS {got}"
+check("workspace marker toolsets, models and grants reach its harness env", "workspace", marker_env)
+
+def no_stdlib_default(docs):
+    env = harness_env(docs)
+    cm = get(docs, "ConfigMap", "capability-grants-one")
+    if not get(docs, "Deployment", "one") or env.get("TOOLSETS", "") != "" or cm is None or cm.get("data"):
+        return f"TOOLSETS {env.get('TOOLSETS')!r}, capability-grants-one {cm and cm.get('data')}"
+check("a workspace marker naming no toolsets lists none and approves no Secret", "wsbase", no_stdlib_default)
+
+def marker_grant_objects(docs):
+    cm = get(docs, "ConfigMap", "capability-grants-one") or {"metadata": {}}
+    if (cm.get("data"), (cm["metadata"].get("labels") or {}).get("sycophant.md/type")) != ({"demo-key": "ssh"}, "capability-grants"):
+        return f"capability-grants-one {cm}"
+    sel = {"sycophant.md/workspace": "one", "sycophant.md/toolset": "ssh", "sycophant.md/grant": "demo"}
+    fqdns = [n.get("matchName") for p in cnps(docs)
+             if selects(sel, (p["spec"].get("endpointSelector") or {}).get("matchLabels") or {})
+             for r in p["spec"].get("egress") or [] for n in r.get("toFQDNs") or []]
+    if fqdns != ["github.com"]:
+        return f"grant egress toFQDNs {fqdns}"
+    relay = get(docs, "ConfigMap", "relay-toolset-grants-one")
+    names = yaml.safe_load(((relay or {}).get("data") or {}).get("grants.yaml") or "null")
+    want = {"one": ["git", {"name": "ssh", "grants": {"demo": {}}}]}
+    return None if names == want else f"relay-toolset-grants-one {names}"
+check("a workspace marker grant renders its Secret approval, its egress and its relay grant name", "workspace", marker_grant_objects)
+
+def marker_harness_storage(docs):
+    d = get(docs, "Deployment", "one")
+    if d is None:
+        return "Deployment/one missing"
+    sync = " ".join(a for c in pod(d)["spec"].get("initContainers") or [] if c["name"] == "instructions-sync"
+                    for a in c.get("args") or [])
+    pvc = get(docs, "PersistentVolumeClaim", "workspace-data-one")
+    size = (pvc or {}).get("spec", {}).get("resources", {}).get("requests", {}).get("storage")
+    if "/tenant-acme/one\"" not in sync or size != "5Gi":
+        return f"sync {sync!r}, workspace-data-one {size}"
+check("a workspace marker syncs instructions from <namespace>/<workspace> and sizes its storage", "workspace", marker_harness_storage)
 
 def engine_caps(docs):
     d = get(docs, "Deployment", "inference-local")
@@ -405,6 +470,30 @@ def node_separation(_):
     values = [t.get("value") for t in sched["tolerations"]]
     return values != ["toolset"] and f"toolset pods tolerate {values}"
 check("inference and toolset pods stay on separate nodes unless the exception is declared", ([], None), node_separation)
+
+def headless_service(docs):
+    for d in docs:
+        spec = d.get("spec") or {}
+        sel = spec.get("selector") or {}
+        if d["kind"] == "Service" and spec.get("clusterIP") == "None" \
+                and sel.get("app.kubernetes.io/component") == "capability-job" \
+                and sel.get("sycophant.md/workspace") == "one" \
+                and any(str(p.get("port")) == "9090" for p in spec.get("ports") or []):
+            return None
+    return "no headless Service selects workspace one's capability-job pods on 9090"
+check("a headless Service addresses each workspace's capability-job pods on 9090", "wsbase", headless_service)
+
+def tool_pod_ingress(docs):
+    harness = {"app.kubernetes.io/component": "harness", "sycophant.md/workspace": "one"}
+    for c in cnps(docs):
+        sel = (c["spec"].get("endpointSelector") or {}).get("matchLabels") or {}
+        if (sel.get("app.kubernetes.io/component"), sel.get("sycophant.md/workspace")) != ("capability-job", "one"):
+            continue
+        for rule in c["spec"].get("ingress") or []:
+            if 9090 in ports(rule) and any(selects(harness, e.get("matchLabels") or {}) for e in rule.get("fromEndpoints") or []):
+                return None
+    return "no policy admits workspace one's harness to its capability-job pods on 9090"
+check("capability-job pods admit their own workspace's harness on 9090", "wsbase", tool_pod_ingress)
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

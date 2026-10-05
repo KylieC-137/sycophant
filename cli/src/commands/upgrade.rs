@@ -6,8 +6,6 @@
 //! the first failure while applying stops the run. `--check` reports and
 //! applies nothing. Host/toolchain prereqs live in `syco setup`, not here.
 
-use std::path::Path;
-
 use crate::cli::UpgradeCmd;
 use crate::commands::common::{ok, step, warn};
 use crate::commands::operator::Operator;
@@ -63,6 +61,10 @@ const KYVERNO_POLICIES: &[(&str, &str)] = &[
         "generatingpolicies.policies.kyverno.io",
         "provision-workspace-grant",
     ),
+    (
+        "generatingpolicies.policies.kyverno.io",
+        "uninstall-workspace",
+    ),
     ("generatingpolicies.policies.kyverno.io", "provision-user"),
     (
         "generatingpolicies.policies.kyverno.io",
@@ -75,6 +77,10 @@ const KYVERNO_POLICIES: &[(&str, &str)] = &[
     (
         "generatingpolicies.policies.kyverno.io",
         "provision-toolset-grant",
+    ),
+    (
+        "generatingpolicies.policies.kyverno.io",
+        "uninstall-toolset",
     ),
     (
         "generatingpolicies.policies.kyverno.io",
@@ -156,11 +162,7 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
     let mut skipped: Vec<(String, Vec<String>)> = Vec::new();
     for ns in &tenants {
         step(&format!("Tenant `{ns}` re-provision checks"));
-        let plan = Scope::for_tenant(ns).and_then(|tenant| {
-            let values = tenant.values_file();
-            tenant_plan(ns, values.is_file(), &values, &tenant_capacity(ns))
-        });
-        match plan {
+        match tenant_capacity(ns).ok_or_else(|| format!("no {ns}-capacity quota")) {
             Ok(capacity) => {
                 ok(&format!(
                     "tenant `{ns}` re-provisions at capacity {capacity}"
@@ -226,26 +228,6 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-/// Whether a tenant can be re-provisioned through its markers, and at what
-/// capacity. A tenant needs its values file on this host and the capacity quota
-/// a provision marker generated.
-fn tenant_plan(
-    ns: &str,
-    has_values: bool,
-    values: &Path,
-    capacity: &Option<String>,
-) -> Result<String, String> {
-    if !has_values {
-        return Err(format!(
-            "no values file at {}; re-provisioning reads it",
-            values.display()
-        ));
-    }
-    capacity
-        .clone()
-        .ok_or_else(|| format!("no {ns}-capacity quota"))
 }
 
 fn skipped_result(skipped: &[(String, Vec<String>)]) -> Result<(), String> {
@@ -385,21 +367,6 @@ fn version_gte(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tenant_plan_needs_values_and_quota() {
-        let v = Path::new("/c/tenants/x/values.yaml");
-        assert_eq!(
-            tenant_plan("tenant-acme", true, v, &Some("2Gi".into())).unwrap(),
-            "2Gi"
-        );
-        assert!(tenant_plan("tenant-acme", false, v, &Some("2Gi".into()))
-            .unwrap_err()
-            .contains("no values file"));
-        assert!(tenant_plan("tenant-acme", true, v, &None)
-            .unwrap_err()
-            .contains("no tenant-acme-capacity quota"));
-    }
 
     #[test]
     fn an_unprovisionable_tenant_fails_the_run() {

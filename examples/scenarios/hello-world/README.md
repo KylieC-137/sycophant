@@ -52,14 +52,11 @@ cp examples/instructions/simple/AGENTS.md ~/sycophant/tmp/hello-world-data/AGENT
 
 ## 3. Workspace + deploy
 
-Toolsets, the workspace's instructions mount, the toolset attachment, and the
-workspace's `models` list all live in the tenant values file. Seed the file from
-the scenario, then deploy:
+The tenant, each model, each toolset and the workspace are one marker each. The
+workspace marker, `provision-workspace.yaml`, lists the model and toolsets it
+binds and its grant. Deploy:
 
 ```sh
-mkdir -p ~/.config/sycophant/tenants/tenant-hello-world
-cp examples/scenarios/hello-world/values.yaml \
-  ~/.config/sycophant/tenants/tenant-hello-world/values.yaml
 cat > provision-tenant.yaml <<'YAML'
 apiVersion: v1
 kind: ConfigMap
@@ -91,16 +88,39 @@ data:
   secret: openrouter
 YAML
 syco inference up -f provision-inference.yaml
+for t in stdlib:toolset ssh-credentials:toolset-ssh-credentials; do
+  name="${t%%:*}" img="localhost:5555/${t#*:}:latest"
+  ref="$(docker inspect --format '{{index .RepoDigests 0}}' "$img")"
+  { cat <<YAML
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-toolset-$name
+  namespace: tenant-hello-world
+  labels:
+    sycophant.md/lifecycle-marker: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+YAML
+    docker inspect --format '{{ index .Config.Labels "md.sycophant.tools" }}' "$img" \
+      | jq -r --arg image "${ref/localhost:5555/sycophant-registry:5000}" \
+        '. + {image: $image, keepalive: "true"} | to_entries[] | "  \(.key | @json): \(.value | @json)"'
+  } > "provision-toolset-$name.yaml"
+  syco toolset up -f "provision-toolset-$name.yaml"
+done
+syco workspace up -f examples/scenarios/hello-world/provision-workspace.yaml
 ```
 
 `tenant up` prompts for the operator password you set during `syco setup` and
 applies the tenant marker file under a short-lived Dex token: the cluster
 creates the `tenant-hello-world` namespace, its memory quota, and the base
 release from chart defaults. Once the installer succeeds it deletes the marker.
-`tenant up` then writes one marker each for the workspace and each toolset in
-the values file. `inference up` installs the model the workspace lists; `syco
-inference down deepseek-v4-flash --tenant hello-world` removes it. Re-run it after editing either file to upgrade the
-tenant in place.
+`inference up` installs the model the workspace lists; `syco inference down
+deepseek-v4-flash --tenant hello-world` removes it. `toolset up` installs each
+toolset from its image's `md.sycophant.tools` label; `syco toolset down stdlib
+--tenant hello-world` removes one. `workspace up` installs the workspace;
+`syco workspace down hello-world --tenant hello-world` removes it and keeps its
+PVCs. Re-apply any marker after editing it to upgrade that part in place.
 
 ## 4. Tenant content
 

@@ -102,6 +102,38 @@ where
     (map, errors)
 }
 
+/// Parse each ConfigMap's whole flat data with `parse`, keyed by its
+/// `app.kubernetes.io/name` label. A ConfigMap without the label or failing to
+/// parse is reported and skipped.
+pub fn merge_labelled<'a, I, V, F>(cms: I, parse: F) -> (HashMap<String, V>, Vec<String>)
+where
+    I: IntoIterator<Item = &'a ConfigMap>,
+    F: Fn(&BTreeMap<String, String>) -> Result<V, String>,
+{
+    let mut map = HashMap::new();
+    let mut errors = Vec::new();
+    let empty = BTreeMap::new();
+    for cm in cms {
+        let name = cm.metadata.name.as_deref().unwrap_or("<unnamed>");
+        let Some(key) = cm
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|l| l.get("app.kubernetes.io/name"))
+        else {
+            errors.push(format!("{name}: no app.kubernetes.io/name label"));
+            continue;
+        };
+        match parse(cm.data.as_ref().unwrap_or(&empty)) {
+            Ok(value) => {
+                map.insert(key.clone(), value);
+            }
+            Err(e) => errors.push(format!("{name}: {e}")),
+        }
+    }
+    (map, errors)
+}
+
 fn key(cm: &ConfigMap) -> String {
     cm.metadata.name.clone().unwrap_or_default()
 }

@@ -85,10 +85,8 @@ helm dependency update
 helm install sycophant-quickstart . -n <your-ns> --wait --timeout=10m
 ```
 
-Then provision one or more tenants. Each reads its values file at
-`$SYCO_CONFIG_DIR/tenants/tenant-<name>/values.yaml` (default
-`~/.config/sycophant/tenants/tenant-<name>/values.yaml`); re-run to apply
-changed values:
+Then provision one or more tenants from a tenant marker file; re-run to upgrade
+the tenant in place:
 
 ```sh
 syco tenant up -f <provision-tenant marker file>

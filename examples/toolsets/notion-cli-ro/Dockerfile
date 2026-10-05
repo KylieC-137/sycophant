@@ -1,9 +1,5 @@
 ARG BASE_IMAGE=toolset-base:local
 FROM ${BASE_IMAGE}
-# Bake the canonical tool schema into the image. tools.yaml is the single
-# source of truth; `syco toolset manifest` reads it back out of the built image.
-COPY tools.yaml /etc/toolset/tools.yaml
-LABEL md.sycophant.tools.source="/etc/toolset/tools.yaml"
 RUN apk add --no-cache curl bash ca-certificates jq make \
     && curl -fsSL https://ntn.dev | bash \
     && (test -x /root/.local/bin/ntn && mv /root/.local/bin/ntn /usr/local/bin/ntn \

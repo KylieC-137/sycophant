@@ -1,6 +1,6 @@
 {{/*
 Per-workspace materialization: emit one ServiceAccount + PersistentVolumeClaim
-+ Deployment per entry under `.Values.workspaces`. The workspace PVC is
++ Deployment for the workspace its marker installs. The workspace PVC is
 mounted by harness-spawned tool jobs (RW). The harness owns a
 SEPARATE conversation-history PVC (tool jobs never mount it, so the
 untrusted runtime can't forge history). Instructions content (AGENTS.md,
@@ -18,9 +18,11 @@ Audience strings on the projected tokens are duplicated from
 `crates/shared/src/auth.rs` (HARNESS_RELAY_AUDIENCE). Drift surfaces at
 first harness boot when audience verification fails.
 */}}
-{{- range $name, $ws := .Values.workspaces }}
-{{- $instructions := $ws.instructions | default dict }}
-{{- $prefix := $instructions.prefix | default (printf "%s/%s" $.Release.Namespace $name) }}
+{{- if eq .Values.render "workspace" }}
+{{- $name := .Values.name }}
+{{- $m := .Values.marker }}
+{{- $grants := dict }}
+{{- range $k, $v := $m }}{{ if hasPrefix "grant." $k }}{{ $_ := set $grants $k $v }}{{ end }}{{ end }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -51,7 +53,7 @@ spec:
   {{- end }}
   resources:
     requests:
-      storage: {{ $ws.storage | default "1Gi" | quote }}
+      storage: {{ $m.storage | default "1Gi" | quote }}
 ---
 # Conversation history, owned solely by the harness. Separate from
 # workspace-data on purpose: tool jobs mount workspace-data RW, and the
@@ -74,7 +76,7 @@ spec:
   {{- end }}
   resources:
     requests:
-      storage: {{ $ws.conversationStorage | default "1Gi" | quote }}
+      storage: "1Gi"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -100,9 +102,7 @@ spec:
     metadata:
       annotations:
         # Roll the harness on scheduling changes (read once at boot). The
-        # toolset and model tables are watched, so they are absent. The
-        # capability manifest ConfigMap name carries its hash, so a change rolls
-        # the pod.
+        # toolset and model tables are watched, so they are absent.
         checksum/scheduling: {{ include (print $.Template.BasePath "/scheduling-cm.yaml") $ | sha256sum }}
       labels:
         {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 8 }}
@@ -147,7 +147,7 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - >
-              rclone sync "os:{{ $.Values.harness.instructions.bucket }}/{{ $prefix }}" "/etc/instructions/{{ $name }}"
+              rclone sync "os:{{ $.Values.harness.instructions.bucket }}/{{ $.Release.Namespace }}/{{ $name }}" "/etc/instructions/{{ $name }}"
           env:
             # readOnlyRootFilesystem: rclone's cache (under HOME) and its config
             # path both point at the writable scratch emptyDir below.
@@ -188,8 +188,8 @@ spec:
               drop: [ALL]
           resources:
             limits:
-              cpu: {{ (or $ws.harness dict).cpu | default "500m" | quote }}
-              memory: {{ (or $ws.harness dict).memory | default "256Mi" | quote }}
+              cpu: "500m"
+              memory: "256Mi"
           env:
             - { name: RELAY_GATEWAY_ADDR,      value: "http://relay-controller:9090" }
             # This harness serves only its own workspace's instructions, read
@@ -205,13 +205,13 @@ spec:
             # The model keys this harness may name. Each model's config is its
             # own watched `model-<key>` ConfigMap; a turn naming a key outside
             # this list is refused.
-            - { name: MODELS, value: {{ join "," ($ws.models | default list) | quote }} }
-            # This workspace's tool catalog: each bound toolset's tools with
-            # their argument schemas and resolved grants (Secret name, mount
-            # path, egress), read from this workspace's own manifest ConfigMap.
-            # Credential detail rides no controller link, and this harness sees
-            # no sibling's grants.
-            - { name: CAPABILITY_MANIFEST_FILE, value: "/etc/sycophant/capability-manifest/manifest.yaml" }
+            - { name: MODELS, value: {{ $m.models | default "" | quote }} }
+            # The toolsets this harness lists and this workspace's grants for
+            # them. Each toolset's tools are its own watched `toolset-<name>`
+            # ConfigMap; a toolset outside this list is never listed, and this
+            # harness sees no sibling's grants.
+            - { name: TOOLSETS, value: {{ $m.toolsets | default "" | quote }} }
+            - { name: GRANTS, value: {{ toJson $grants | quote }} }
             - { name: TOOLSET_SCHEDULING_FILE,  value: "/etc/sycophant/scheduling/scheduling.yaml" }
             # The per-workspace headless Service that publishes each tool pod's
             # per-pod record. Stamped as the pod subdomain and the middle DNS
@@ -240,9 +240,6 @@ spec:
             # the pod-hardening-vap hostPath ban holds and the serving container
             # mounts no credential.
             - { name: instructions-{{ $name }}, mountPath: {{ printf "/etc/instructions/%s" $name | quote }}, readOnly: true }
-            - name: capability-manifest
-              mountPath: /etc/sycophant/capability-manifest
-              readOnly: true
             - name: scheduling
               mountPath: /etc/sycophant/scheduling
               readOnly: true
@@ -267,9 +264,6 @@ spec:
         # readOnlyRootFilesystem. Never mounted by the serving container.
         - name: instructions-sync-scratch
           emptyDir: {}
-        - name: capability-manifest
-          configMap:
-            name: {{ include "sycophant.capabilityManifestConfigMapName" (dict "name" $name "workspace" $ws "context" $) }}
         - name: scheduling
           configMap:
             name: toolset-scheduling

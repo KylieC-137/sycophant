@@ -8,4 +8,5 @@ metadata:
     sycophant.md/lifecycle-marker: "true"
     app.kubernetes.io/part-of: sycophant
 data:
-  values: "{}"
+  image: ghcr.io/example/toolset@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  tool.x.description: Does x.

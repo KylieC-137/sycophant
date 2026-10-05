@@ -60,6 +60,26 @@ expect inference-markers provision-inference-singlelabel "'baseUrl' must be an h
 expect inference-markers provision-inference-emptyimage "non-empty 'server.image'"
 expect inference-markers reap-inference-deepseek ""
 expect inference-markers reap-inference-local ""
+expect toolset-markers provision-toolset-git ""
+expect toolset-markers provision-toolset-tagimage "'image' must"
+expect toolset-markers provision-toolset-bogus "unknown key 'tool.git-status.bogus'"
+expect toolset-markers provision-toolset-badtype "'tool.git-clone.arg.url.type' must"
+expect toolset-markers provision-toolset-deadline "'deadlineSeconds' must"
+expect toolset-markers provision-toolset-noenv "'tool.git-clone.arg.url.env'"
+expect toolset-markers provision-toolset-dotted "unknown key 'tool.git.status.description'"
+expect toolset-markers provision-toolset-notype "'tool.git-clone.arg.url.type'"
+expect toolset-markers provision-toolset-dottedarg "unknown key 'tool.git-clone.arg.u.rl."
+expect toolset-markers provision-toolset-required "'tool.git-clone.arg.url.required' must"
+expect toolset-markers reap-toolset-git ""
+expect toolset-markers reap-toolset-data "'image'"
+expect workspace-markers provision-workspace-hello-world ""
+expect workspace-markers provision-workspace-unlisted "'grant.ssh-credentials.demo-key.secret' grants a toolset not in 'toolsets'"
+expect workspace-markers provision-workspace-nosecret "'grant.ssh-credentials.demo-key.path' has no '.secret' beside it"
+expect workspace-markers provision-workspace-harnesscpu "unknown key 'harness.cpu'"
+expect workspace-markers reap-workspace-hello-world ""
+expect workspace-markers provision-workspace-undottedegress "'grant.ssh-credentials.demo-key.egress' must be a dotted hostname"
+expect workspace-markers provision-workspace-relativepath "'grant.ssh-credentials.demo-key.path' must be an absolute path"
+expect workspace-markers provision-workspace-badsecret "a workspace grant's 'secret' must be a Secret name"
 expect suspend-bad-keepalive suspend-tenant "0, 30, 60, 90"
 expect slice-markers-validate-data "provision-workspace-$(printf 'a%.0s' {1..43})" ""
 expect slice-markers-validate-data "provision-workspace-$(printf 'a%.0s' {1..44})" "at most 43"
@@ -70,7 +90,6 @@ expect slice-markers-validate-data provision-user-1f1e2d3c4b quote
 expect slice-markers-validate-data provision-user-2f1e2d3c4b quote
 expect slice-markers-validate-data provision-user-3f1e2d3c4b quote
 expect slice-markers-validate-data provision-user-0123456789 ""
-expect slice-markers-validate-data provision-workspace-two bogus
 expect slice-markers-validate-data suspend-tenant ""
 
 open="$(python3 - "$WORK/policy.yaml" <<'PY'

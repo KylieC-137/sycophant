@@ -7,7 +7,7 @@ metadata:
     sycophant.md/lifecycle-marker: "true"
     app.kubernetes.io/part-of: sycophant
 data:
-  values: "{}"
+  toolsets: stdlib
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -18,7 +18,7 @@ metadata:
     sycophant.md/lifecycle-marker: "true"
     app.kubernetes.io/part-of: sycophant
 data:
-  values: "{}"
+  toolsets: stdlib
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -29,7 +29,8 @@ metadata:
     sycophant.md/lifecycle-marker: "true"
     app.kubernetes.io/part-of: sycophant
 data:
-  values: "{}"
+  image: "ghcr.io/sycophant-md/git@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  tool.git-status.description: "Show the working tree status."
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -40,7 +41,8 @@ metadata:
     sycophant.md/lifecycle-marker: "true"
     app.kubernetes.io/part-of: sycophant
 data:
-  values: "{}"
+  image: "ghcr.io/sycophant-md/git@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  tool.git-status.description: "Show the working tree status."
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -85,18 +87,6 @@ metadata:
     app.kubernetes.io/part-of: sycophant
 data:
   user: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#a\u2028b"
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: provision-workspace-two
-  namespace: tenant-acme
-  labels:
-    sycophant.md/lifecycle-marker: "true"
-    app.kubernetes.io/part-of: sycophant
-data:
-  values: "workspaces: {two: {}}"
-  bogus: x
 ---
 apiVersion: v1
 kind: ConfigMap

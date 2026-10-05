@@ -67,17 +67,13 @@ component reads the value itself.
 A tool job's credential comes from a workspace grant instead, which names the Secret the same way:
 
 ```yaml
-workspaces:
-  research:
-    toolsets:
-      - name: git-ops
-        grants:
-          deploy-key:
-            secret: sycophant-ssh-key
-            path: /home/agent/.ssh/id_ed25519
+data:
+  toolsets: git-ops
+  grant.git-ops.deploy-key.secret: sycophant-ssh-key
+  grant.git-ops.deploy-key.path: /home/agent/.ssh/id_ed25519
 ```
 
-A toolset entry names no Secret at all. Keys under its `env` forward verbatim to the tool job as environment variables.
+A toolset marker names no Secret at all. Its `env.<NAME>` keys forward verbatim to the tool job as environment variables.
 
 ## Recipe 2: External Secrets Operator + AWS Secrets Manager
 

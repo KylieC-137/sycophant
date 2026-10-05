@@ -30,21 +30,21 @@ Trust contract:
 
 ### How it's wired
 
-Instructions content is chart-value driven, not a custom resource. The chart renders, per workspace from `.Values.workspaces` (no `lookup`), an `emptyDir` mounted read-only onto that workspace's harness at `/etc/instructions/<workspace>` plus an init container that fills it.
+Instructions content is workspace-marker driven, not a custom resource. The chart renders, per workspace from its workspace marker (no `lookup`), an `emptyDir` mounted read-only onto that workspace's harness at `/etc/instructions/<workspace>` plus an init container that fills it.
 
-For each workspace the harness pod runs an `instructions-sync` init container that pulls `<harness.instructions.bucket>/<workspace prefix>` from `<harness.instructions.endpoint>` into the `emptyDir`, using the read-only credential named by `harness.instructions.credentialName` (a Secret the operator provides). The workspace prefix is `workspaces.<ws>.instructions.prefix`, defaulting to `<namespace>/<workspace>`. The init container mounts the credential; the serving container does not. `emptyDir` (not `hostPath`, not a PV) keeps the tenant namespace PSA `restricted` and re-syncs a fresh tree on every pod start.
+For each workspace the harness pod runs an `instructions-sync` init container that pulls `<harness.instructions.bucket>/<namespace>/<workspace>` from `<harness.instructions.endpoint>` into the `emptyDir`, using the read-only credential named by `harness.instructions.credentialName` (a Secret the operator provides). The init container mounts the credential; the serving container does not. `emptyDir` (not `hostPath`, not a PV) keeps the tenant namespace PSA `restricted` and re-syncs a fresh tree on every pod start.
 
 ```
-<bucket>/<prefix>  →  init sync  →  emptyDir /etc/instructions/<ws>  →  agent
+<bucket>/<namespace>/<workspace>  →  init sync  →  emptyDir /etc/instructions/<ws>  →  agent
 ```
 
-Because delivery renders per-workspace from values with no `lookup`, the chart renders identically under `helm install` and a GitOps `helm template | kubectl apply` pipeline — neither strips a instructions.
+Because delivery renders per-workspace from the marker with no `lookup`, the chart renders identically under `helm install` and a GitOps `helm template | kubectl apply` pipeline — neither strips a instructions.
 
 **SeaweedFS ingress lock.** The object store is a shared cluster component (`charts/sycophant-objectstore`, installed once in `sycophant-system`), so it owns its own network posture. Its `objectstore` CiliumNetworkPolicy admits only harness pods (`app.kubernetes.io/component: harness`), in any tenant namespace via a `k8s:io.kubernetes.pod.namespace` Exists match, to the store's S3 API port (8333), and denies every other pod. It selects the store pod by `app.kubernetes.io/component: objectstorage` + `app.kubernetes.io/part-of: sycophant`. Its egress is default-deny with cluster DNS always open; with no `oidc.issuer` the store dials nothing external, and with an issuer set it gains exactly one external peer, the configured issuer, for discovery and JWKS. The tenant chart's harness egress policy is the tenant-side half: it lets the init container reach the store cross-namespace by component label plus the store namespace read from `harness.instructions.endpoint`, and adds that host to the DNS L7 allowlist.
 
 ### Authoring instructions
 
-Instructions are content, not a custom resource — author them per workspace by uploading the agent files to the workspace's object-storage prefix. With no custom prefix, content lives at the convention key `<namespace>/<workspace>` in `harness.instructions.bucket`. Upload the agent files there and the next pod start syncs them to `/etc/instructions/<workspace>`. To override the source for one workspace, set that workspace's `instructions.prefix` in `.Values.workspaces` to a custom bucket prefix.
+Instructions are content, not a custom resource — author them per workspace by uploading the agent files to the workspace's object-storage prefix. Content lives at the key `<namespace>/<workspace>` in `harness.instructions.bucket`. Upload the agent files there and the next pod start syncs them to `/etc/instructions/<workspace>`.
 
 ### ValidatingAdmissionPolicy on hostPath
 
