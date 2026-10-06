@@ -2,7 +2,7 @@
 //! only: the relay is the internet-facing pod, so no grant's Secret name, mount
 //! path, or egress domain is ever rendered into what it reads.
 //!
-//! Merged from the per-workspace `relay-toolset-grants-<workspace>` ConfigMaps
+//! Merged from the per-workspace `ws-<workspace>-relay-grants` ConfigMaps
 //! labelled `sycophant.md/type: relay-toolset-grants`.
 
 use std::collections::{BTreeMap, HashMap};

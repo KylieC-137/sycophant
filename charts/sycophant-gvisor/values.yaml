@@ -1,7 +1,7 @@
 # sycophant-gvisor — install once per cluster.
 #
 # No values required. The chart ships a single RuntimeClass named
-# `gvisor` with handler `runsc`. The name is referenced from the
-# sycophant-tenant chart's `runtime.className` default and from the
-# sycophant-cluster's Sandbox ValidatingAdmissionPolicy — both are
-# unparameterized, so this chart's RuntimeClass name is also fixed.
+# `gvisor` with handler `runsc`. The name is fixed in the sycophant-cluster
+# chart's runtime-class mutate, capability Job gate, and pod-hardening
+# ValidatingAdmissionPolicy, none of which is parameterized, so this chart's
+# RuntimeClass name is also fixed.

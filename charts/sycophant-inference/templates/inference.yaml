@@ -1,0 +1,220 @@
+{{- /*
+One Deployment plus one ClusterIP Service for a local model: the tenant's own
+in-cluster model server, from the provision command's `server.*` keys. The pod
+carries `component: inference`, which the gVisor mutate does not match, so it
+lands on the kubelet's default runtime and shares one page-cache copy of the
+weights per node. The container and Service serve on
+`sycophant.inferenceLocalPort`; the provision command declares no port.
+*/}}
+{{- $m := .Values.command }}
+{{- if hasKey $m "server.image" }}
+{{- $key := .Values.name }}
+{{- $port := include "sycophant.inferenceLocalPort" . }}
+{{- $delivery := index $m "server.weightsDelivery" | default "copy" }}
+{{- $weights := index $m "server.weights" }}
+{{- $weightsPath := index $m "server.weightsPath" }}
+{{- $chatTemplate := index $m "server.chatTemplate" }}
+{{- if $chatTemplate }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inf-{{ $key }}-chat-template
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: inference
+data:
+  template: |
+    {{- $chatTemplate | nindent 4 }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inf-{{ $key }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: inference
+    app.kubernetes.io/name: {{ $key }}
+spec:
+  replicas: 1
+  # Recreate (not RollingUpdate): a second replica loads a second
+  # multi-gigabyte copy of the weights before the first is torn down.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $key }}
+      app.kubernetes.io/part-of: sycophant
+  template:
+    metadata:
+      labels:
+        {{- include "sycophant.labels" $ | nindent 8 }}
+        app.kubernetes.io/component: inference
+        app.kubernetes.io/name: {{ $key }}
+    spec:
+      automountServiceAccountToken: false
+      {{- if ne (index $m "server.singleNodeException" | default "false") "true" }}
+      nodeSelector:
+        sycophant.md/workload: inference
+      tolerations:
+        - key: sycophant.md/workload
+          operator: Equal
+          value: inference
+          effect: NoSchedule
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if ne $delivery "mount" }}
+      # The kubelet pulls the weight image; this init container is that same
+      # image run as an exec so its baked GGUF lands in the emptyDir the server
+      # mounts. scratch has no shell, so the copy is exec-form /busybox cp with
+      # no interpolation of the operator's path.
+      initContainers:
+        - name: weights-copy
+          image: {{ $weights | quote }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          command: ["/busybox", "cp", {{ $weightsPath | quote }}, {{ printf "/weights-copy/%s" (base $weightsPath) | quote }}]
+          volumeMounts:
+            - name: weights
+              mountPath: /weights-copy
+      {{- end }}
+      containers:
+        - name: server
+          image: {{ index $m "server.image" | quote }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          command: [/app/llama-server]
+          args:
+            - -m
+            - {{ $weightsPath | quote }}
+            - -c
+            - {{ index $m "server.contextBudget" | default 65536 | quote }}
+            - -np
+            - {{ index $m "server.slots" | default 2 | quote }}
+            - -t
+            - {{ index $m "server.threads" | default 4 | quote }}
+            - -n
+            - {{ index $m "server.outputCap" | default 4096 | quote }}
+            {{- if hasKey $m "server.temp" }}
+            # Sampling temperature. 0 is greedy (argmax), so the model reproduces
+            # tool output verbatim instead of rewording it. hasKey (not truthiness)
+            # because 0 is a falsy value that must still render the flag.
+            - --temp
+            - {{ index $m "server.temp" | quote }}
+            {{- end }}
+            - --no-kv-unified
+            - --sse-ping-interval
+            - "30"
+            - --no-context-shift
+            - --no-webui
+            - --no-slots
+            # Render the model's Jinja chat template so OpenAI tool calls work;
+            # without it the server drops the tools array and never emits tool_calls.
+            - --jinja
+            {{- if $chatTemplate }}
+            - --chat-template-file
+            - /etc/sycophant/chat-template/template
+            {{- end }}
+            - --host
+            - 0.0.0.0
+            - --port
+            - {{ $port | quote }}
+          resources:
+            limits:
+              memory: {{ index $m "server.memory" | default "8Gi" | quote }}
+              cpu: {{ index $m "server.cpu" | default 4 | quote }}
+          volumeMounts:
+            {{- if eq $delivery "mount" }}
+            # The kubelet mounts the weight image read-only; subPath places the
+            # single GGUF at the path the engine reads with -m.
+            - name: weights
+              mountPath: {{ $weightsPath | quote }}
+              subPath: {{ $weightsPath | trimPrefix "/" | quote }}
+            {{- else }}
+            - name: weights
+              mountPath: {{ dir $weightsPath | quote }}
+              readOnly: true
+            {{- end }}
+            {{- if $chatTemplate }}
+            # Mounted outside the weights path so the template and weights
+            # volumes never overlap on either delivery mode; subPath is
+            # read-once at boot, not hot-reloaded.
+            - name: chat-template
+              mountPath: /etc/sycophant/chat-template/template
+              subPath: template
+              readOnly: true
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $port }}
+          # /health returns 503 {"message":"Loading model"} while the weights
+          # load and 200 {"status":"ok"} once ready, and is exempt from
+          # --api-key auth. The startupProbe holds liveness off until the load
+          # finishes; readiness gates the Service on the same signal.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        {{- if eq $delivery "mount" }}
+        - name: weights
+          image:
+            reference: {{ $weights | quote }}
+        {{- else }}
+        - name: weights
+          emptyDir:
+            sizeLimit: 16Gi
+        {{- end }}
+        {{- if $chatTemplate }}
+        - name: chat-template
+          configMap:
+            name: inf-{{ $key }}-chat-template
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inf-{{ $key }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: inference
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: {{ $port }}
+      targetPort: http
+  selector:
+    app.kubernetes.io/name: {{ $key }}
+    app.kubernetes.io/part-of: sycophant
+{{- end }}

@@ -4,7 +4,7 @@ metadata:
   name: well-formed-job-admits-and-stamps
 spec:
   description: |
-    A well-formed Job created under the `harness-<ws>` identity admits, and the
+    A well-formed Job created under the `ws-<ws>` identity admits, and the
     gate's mutate stamps the pod template with the isolation envelope, the
     constant component label, and the workspace parsed from the creating identity
     -- overwriting any workspace the creator carried.
@@ -20,7 +20,7 @@ spec:
 
     Live-cluster test, justified: the mutate keys on the authenticated creator
     identity, which no render can supply. Only a real `kubectl --as
-    system:serviceaccount:<ns>:harness-probe` create observes the stamp.
+    system:serviceaccount:<ns>:ws-probe` create observes the stamp.
 
     Mutation guard: without the mutate the runtimeClassName / component /
     readOnlyRootFilesystem assertions go empty; a mutate that trusts the carried
@@ -44,7 +44,7 @@ spec:
               apiVersion: v1
               kind: ServiceAccount
               metadata:
-                name: unprivileged-probe
+                name: ws-probe-unprivileged
                 namespace: ($tenant_ns)
               automountServiceAccountToken: false
     - name: seed-capability-grants
@@ -66,7 +66,7 @@ spec:
             content: |
               set -euo pipefail
               out=$(mktemp)
-              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-probe" -n "$TENANT_NS" -o json -f - > "$out"
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:ws-probe" -n "$TENANT_NS" -o json -f - > "$out"
               apiVersion: batch/v1
               kind: Job
               metadata:
@@ -79,7 +79,7 @@ spec:
                       sycophant.md/job-kind: tool
                   spec:
                     restartPolicy: Never
-                    serviceAccountName: unprivileged-probe
+                    serviceAccountName: ws-probe-unprivileged
                     volumes:
                       - name: scratch
                         emptyDir: {}

@@ -20,13 +20,14 @@ generate() {
   kyverno apply "$WORK/$1-policy.yaml" --resource "$HERE/$2.yaml" \
     -f "$HERE/values.yaml" -o "$WORK/$2-out" --remove-color >/dev/null 2>&1
 }
-for kind in tenant workspace user toolset inference; do
+for kind in tenant workspace user toolset inference channel; do
   render --show-only "templates/$kind-kpol.yaml" > "$WORK/$kind-policy.yaml"
   generate "$kind" "$kind"
 done
 generate inference reap-inference
 generate toolset reap-toolset
 generate workspace reap-workspace
+generate channel reap-channel
 
 mkdir -p "$WORK/bin"
 cat > "$WORK/bin/kubectl" <<'SH'
@@ -51,10 +52,11 @@ work = sys.argv[1]
 uid10 = "0a1b2c3d4e"
 cases = {
     "tenant": {"command": "provision-tenant", "command_ns": "sycophant-system", "release": None},
-    "workspace": {"command": "provision-workspace-one", "command_ns": "tenant-acme", "release": "workspace-one"},
+    "workspace": {"command": "provision-workspace-one", "command_ns": "tenant-acme", "release": "ws-one"},
     "user": {"command": "provision-user-0123456789", "command_ns": "tenant-acme", "release": "user-0123456789"},
-    "toolset": {"command": "provision-toolset-one", "command_ns": "tenant-acme", "release": "toolset-one"},
-    "inference": {"command": "provision-inference-local", "command_ns": "tenant-acme", "release": "inference-local"},
+    "toolset": {"command": "provision-toolset-one", "command_ns": "tenant-acme", "release": "ts-one"},
+    "inference": {"command": "provision-inference-local", "command_ns": "tenant-acme", "release": "inf-local"},
+    "channel": {"command": "provision-channel-app", "command_ns": "tenant-acme", "release": "ch-app"},
 }
 passed = failed = 0
 
@@ -209,14 +211,27 @@ if job and argv and not {"-f", "--values"} & set(argv) and "VALUES" not in env:
 else:
     bad(name, f"argv={' '.join(argv)}, env={env}")
 
-taking = [k for k in ("workspace", "user", "toolset", "inference")
+taking = [k for k in ("workspace", "user", "toolset", "inference", "channel")
           if (install_call(k) or ["--take-ownership"]).count("--take-ownership")]
 if taking:
     bad("capability installs never take ownership of another release's objects", f"--take-ownership on {taking}")
 else:
     ok("capability installs never take ownership of another release's objects")
 
-for kind, release in (("inference", "local"), ("toolset", "one"), ("workspace", "one")):
+for kind in cases:
+    argv = install_call(kind) or []
+    name = f"{kind}: install runs its own chart"
+    at = argv.index("--install") + 2 if "--install" in argv else len(argv)
+    chart = argv[at] if at < len(argv) else None
+    sets = [argv[i + 1] for i in range(len(argv) - 1) if argv[i] in ("--set", "--set-string")]
+    want = {"tenant": "namespace.create=false" in sets,
+            "user": not any(a.startswith("name=") for a in sets)}.get(kind, True)
+    if chart == f"/charts/sycophant-{kind}" and want:
+        ok(name)
+    else:
+        bad(name, f"chart {chart}, sets {sets}")
+
+for kind, release in (("inference", "local"), ("toolset", "one"), ("workspace", "one"), ("channel", "app")):
     command_data = yaml.safe_load(open(os.path.join(sys.argv[2], f"{kind}.yaml")))["data"]
     argv = install_call(kind, json.dumps(command_data))
     name = f"{kind}: install hands the command data and name to the chart"
@@ -226,12 +241,12 @@ for kind, release in (("inference", "local"), ("toolset", "one"), ("workspace", 
     files = [argv[i + 1] for i in range(len(argv) - 1) if argv[i] in ("-f", "--values")]
     loaded = [yaml.safe_load(open(f)) for f in files if os.path.exists(f)]
     sets = [argv[i + 1] for i in range(len(argv) - 1) if argv[i] in ("--set", "--set-string")]
-    if any((v or {}).get("command") == command_data for v in loaded) and f"render={kind}" in sets and f"name={release}" in sets:
+    if any((v or {}).get("command") == command_data for v in loaded) and f"name={release}" in sets:
         ok(name)
     else:
         bad(name, f"argv={' '.join(argv)}, values={loaded}")
 
-for kind, release in (("inference", "deepseek"), ("toolset", "one"), ("workspace", "one")):
+for kind, release, prefix in (("inference", "deepseek", "inf"), ("toolset", "one", "ts"), ("workspace", "one", "ws"), ("channel", "app", "ch")):
     docs = generated(f"reap-{kind}")
     command = f"reap-{kind}-{release}"
     name = f"uninstall-{kind}-{uid10}"
@@ -248,7 +263,7 @@ for kind, release in (("inference", "deepseek"), ("toolset", "one"), ("workspace
 
     if job:
         rc, calls = run_job(job, 0)
-        un_at = [i for i, a in enumerate(calls) if a[:2] == ["helm", "uninstall"] and f"{kind}-{release}" in a
+        un_at = [i for i, a in enumerate(calls) if a[:2] == ["helm", "uninstall"] and f"{prefix}-{release}" in a
                  and any(a[j] in ("-n", "--namespace") and a[j + 1] == "tenant-acme" for j in range(len(a) - 1))]
         del_at = [i for i, a in enumerate(calls) if deletes_command(a, command, "tenant-acme")]
         if rc == 0 and un_at and del_at and min(del_at) > max(un_at) and not any(a[0] == "helm" and "upgrade" in a for a in calls):

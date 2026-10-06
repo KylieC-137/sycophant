@@ -4,8 +4,8 @@ metadata:
   name: wrong-service-account-denies
 spec:
   description: |
-    A Job created under `harness-<ws>` whose pod template sets
-    `serviceAccountName` to any value other than `unprivileged-<ws>` is denied.
+    A Job created under `ws-<ws>` whose pod template sets
+    `serviceAccountName` to any value other than `ws-<ws>-unprivileged` is denied.
     Without the SA pin a subverted creator names a different SA and the created
     pod mounts that SA's token; the gate is the only thing binding the running
     identity to the zero-RBAC pod SA.
@@ -16,7 +16,7 @@ spec:
 
     Live-cluster test: the gate keys on the creating identity.
 
-    Mutation guard: removing the serviceAccountName == unprivileged-probe
+    Mutation guard: removing the serviceAccountName == ws-probe-unprivileged
     validate admits this Job.
   bindings:
     - name: tenant_ns
@@ -46,7 +46,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-probe" -n "$TENANT_NS" -f -
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:ws-probe" -n "$TENANT_NS" -f -
               apiVersion: batch/v1
               kind: Job
               metadata:

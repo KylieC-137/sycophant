@@ -17,11 +17,11 @@ tenant namespace comes from the tenant-namespace fixture with real perimeter lab
 | sa-token-audience/              | Apiserver enforces SA-token audience: one token, one controller      |
 | cluster-resources/              | Chart-shipped cluster-scoped resources (RuntimeClass, etc.) shape    |
 | gvisor-scope/                   | gVisor runtime scope pinned to toolsets only (capability-job); other components on runc |
-| conversation-log-mount/         | Only the harness may mount the `conversation-data-*` PVC (VAP, label-agnostic)   |
+| conversation-log-mount/         | Only the harness may mount the `ws-*-conversation` PVC (VAP, label-agnostic)   |
 | relay-access-grants/            | The deployed relay reconciles the chart-created relay-access-grants ConfigMap |
 | inference-workload/             | Applied shape of the in-cluster inference server and its fence |
 | namespace-egress-baseline/      | Namespace-wide egress default-deny floor; uncovered pods denied |
-| capability-job-gate/            | Identity-keyed Job CREATE gate: harness-<ws> Jobs forced into the envelope + secret allowlist or denied; the two per-workspace SAs |
+| capability-job-gate/            | Identity-keyed Job CREATE gate: ws-<ws> Jobs forced into the envelope + secret allowlist or denied; the two per-workspace SAs |
 
 ## Picking a bucket for a new test
 

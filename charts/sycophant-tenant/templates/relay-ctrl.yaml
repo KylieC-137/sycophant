@@ -1,4 +1,3 @@
-{{- if eq .Values.render "base" }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -137,4 +136,3 @@ spec:
   selector:
     app.kubernetes.io/name: relay-controller
     app.kubernetes.io/part-of: sycophant
-{{- end }}

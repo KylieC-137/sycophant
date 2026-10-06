@@ -22,7 +22,7 @@ spec:
               apiVersion: cilium.io/v2
               kind: CiliumNetworkPolicy
               metadata:
-                name: harness-egress-probe
+                name: ws-probe-egress
                 namespace: ($tenant_ns)
               spec:
                 # Relay-forward surface: relay-controller admitted to 9091 only.

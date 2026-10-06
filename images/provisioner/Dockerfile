@@ -1,8 +1,8 @@
-# In-cluster helm runner. Ships the helm binary and a baked copy of the
-# sycophant-tenant chart at /charts/sycophant-tenant, so a Job can run
-# `helm upgrade --install <tenant> /charts/sycophant-tenant` with no chart
+# In-cluster helm runner. Ships the helm binary and a baked copy of each
+# component chart at /charts/sycophant-<kind>, so a Job can run
+# `helm upgrade --install <release> /charts/sycophant-<kind>` with no chart
 # registry and no network fetch of the chart. Build context is the repo root
-# (the chart lives under charts/), e.g.
+# (the charts live under charts/), e.g.
 #   docker build -f images/provisioner/Dockerfile -t sycophant-provisioner:local .
 FROM alpine:3.21
 ARG TARGETARCH
@@ -17,4 +17,9 @@ RUN apk add --no-cache curl ca-certificates && \
     chmod +x /usr/local/bin/kubectl && \
     apk del curl
 COPY charts/sycophant-tenant /charts/sycophant-tenant
+COPY charts/sycophant-workspace /charts/sycophant-workspace
+COPY charts/sycophant-inference /charts/sycophant-inference
+COPY charts/sycophant-toolset /charts/sycophant-toolset
+COPY charts/sycophant-user /charts/sycophant-user
+COPY charts/sycophant-channel /charts/sycophant-channel
 USER 65532:65532

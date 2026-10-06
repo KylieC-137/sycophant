@@ -6,7 +6,7 @@ A toolset is a credentialed capability an agent workspace can call. The Harness 
 
 ## How It Works
 
-The Harness creates and dials every capability Job. There is no separate controller pod: the Harness builds its tool catalog from the watched `toolset-<name>` ConfigMaps of the toolsets its workspace binds, and spawns and dials Jobs itself. It creates two capability-job kinds over a set of predefined toolset images:
+The Harness creates and dials every capability Job. There is no separate controller pod: the Harness builds its tool catalog from the watched `ts-<name>` ConfigMaps of the toolsets its workspace binds, and spawns and dials Jobs itself. It creates two capability-job kinds over a set of predefined toolset images:
 
 1. **Inference job** — the remote model call. For a remote `baseUrl` the Harness spawns an `inference-runtime` Job, dials it, and streams the model's result events back. This is the LLM dispatch that used to be a separate pod; there is no separate LLM-dispatch controller.
 
@@ -20,7 +20,7 @@ The premise is that an LLM call, a subagent, and a tool call are one mechanism �
 
 Spawning a credentialed pod is the sharpest privilege in the namespace. Making the Harness the one pod that creates Jobs lets exactly one ServiceAccount hold `jobs:create`, so the internet-facing pod (Relay) holds none and the spawned pods hold none.
 
-- **One `jobs:create` holder** — the `harness-<workspace>` Role is the only holder of the `jobs` create verb in the tenant namespace. This is the load-bearing invariant.
+- **One `jobs:create` holder** — the `ws-<workspace>` Role is the only holder of the `jobs` create verb in the tenant namespace. This is the load-bearing invariant.
 - **Credential containment** — the Harness references Secrets by name in Job specs; kubelet mounts them into the ephemeral pod. The Harness never sees a token, an SSH key, or an API key, and holds no Secret RBAC.
 - **gVisor on the model call** — the model provider is untrusted, so its response stream is adversarial input. The code that parses it (SSE decode, tool-call extraction, content assembly) runs only inside the gVisor-contained inference job, never in the Harness. gVisor contains a parser compromise the old runc+seccomp posture never did.
 - **Per-provider egress pinning** — each inference job can egress only to the one provider it was spawned for, not the union of all configured providers.
@@ -46,14 +46,14 @@ Spawning a credentialed pod is the sharpest privilege in the namespace. Making t
                                     (pinned FQDN)                    (per-toolset FQDN)
 ```
 
-The Harness spawns the matching capability Job and dials it over a headless per-workspace Service (`capability-<workspace>`), whose per-pod DNS record is the pod's call id, so the Harness reaches each pod directly rather than a load-balanced VIP. The pod dequeues nothing — it serves the `Run` stream the Harness opens, executes, and streams result frames back on the same connection. It persists nothing — the conversation log lives on the [Harness](harness.md).
+The Harness spawns the matching capability Job and dials it over a headless per-workspace Service (`ws-<workspace>-capability`), whose per-pod DNS record is the pod's call id, so the Harness reaches each pod directly rather than a load-balanced VIP. The pod dequeues nothing — it serves the `Run` stream the Harness opens, executes, and streams result frames back on the same connection. It persists nothing — the conversation log lives on the [Harness](harness.md).
 
 ## Toolset Configuration
 
 Each toolset is one provision command, `provision-toolset-<name>`, applied with
 `syco toolset up -f <values.yaml>` and removed with
 `syco toolset down <name> --tenant <t>`. Its installer renders one
-`toolset-<name>` ConfigMap whose data is the provision command's data. The Harness watches
+`ts-<name>` ConfigMap whose data is the provision command's data. The Harness watches
 those ConfigMaps and lists the tools of each toolset named in its workspace's
 `toolsets`, with no restart. A toolset whose tool shadows a built-in Harness
 tool, or whose arg maps to `HOME` or a `TOOLSET_` env, is left out with a
@@ -139,7 +139,7 @@ namespace default-deny egress floor.
 ### The model configuration
 
 The turn destinations are not toolsets. Each model is its own inference
-provision command, `provision-inference-<key>`, which renders one `model-<key>` ConfigMap
+provision command, `provision-inference-<key>`, which renders one `inf-<key>` ConfigMap
 the harness watches. A key is the turn's `model` value; a key absent from the
 table or from the workspace's `models` list is rejected, never defaulted. Each
 provision command pins one provider endpoint and its credential;
@@ -156,7 +156,7 @@ credential volume and nothing registered to scrub. A local model (inference
 values with a `server` block,
 [`examples/inference/local.yaml`](../examples/inference/local.yaml))
 carries no `baseUrl` and takes no job at all: the harness dials its warm
-`inference-<key>` Service directly on the fixed port 8080.
+`inf-<key>` Service directly on the fixed port 8080.
 
 ## The Model Call
 
@@ -175,7 +175,7 @@ The neutral message vocabulary (`ContentBlock`, `Message`, `ToolCall`, `ToolDefi
 
 ## Per-Model Egress
 
-Each model gets its own CiliumNetworkPolicy, `inference-egress-<model-key>`,
+Each model gets its own CiliumNetworkPolicy, `inf-<model-key>`,
 keyed on the `sycophant.md/model: <model-key>` and `sycophant.md/job-kind:
 inference` pod labels the harness stamps on the inference job. The chart renders
 it for the model at install time. No controller authors policy, no in-namespace
@@ -209,7 +209,7 @@ One held connection per call carries the assignment, the result frames, and any 
 
 ## RBAC
 
-The `harness-<workspace>` Role can create Jobs, and holds no other verb on any
+The `ws-<workspace>` Role can create Jobs, and holds no other verb on any
 resource. It reads no CRDs: the tool catalog arrives as a mounted ConfigMap. It
 has **zero access to Secrets** — credential Secrets are kubelet-mounted into the
 capability-job pods and never seen by the Harness.
@@ -224,16 +224,16 @@ rules:
 This is the only `jobs:create` grant in the tenant namespace; the Relay grants
 no `jobs` verb. `create` on Jobs is safe only because the identity-keyed
 capability-job admission gate pins the resulting pod to the zero-RBAC
-`unprivileged-<workspace>` ServiceAccount and forces the isolation envelope on
+`ws-<workspace>-unprivileged` ServiceAccount and forces the isolation envelope on
 the same admission event.
 
 ## Security Model
 
-- The `harness-<workspace>` Role holds the sole `jobs:create` in the namespace; a compromised Relay cannot spawn a credentialed pod.
+- The `ws-<workspace>` Role holds the sole `jobs:create` in the namespace; a compromised Relay cannot spawn a credentialed pod.
 - The Harness has zero Secret RBAC. Credentials exist only in ephemeral capability-job pods, placed there by kubelet. A resolved grant is delivered as a file and never as an environment variable: env leaks through `/proc/<pid>/environ`, child process inheritance, and logs. The Job spec carries only a reference — the credential value never appears in a Job spec, a gRPC message, or Harness memory.
 - A tool job holds at most one credential, selected per call from the closed set its workspace binds, so a hijacked job holds one credential that works against one destination.
 - Both capability-job kinds run under gVisor, gated solely by the `capability-job` component label. The adversarial provider-stream parser is contained.
-- The capability-job pod runs as the zero-RBAC `unprivileged-<workspace>` ServiceAccount with no automounted token, so a subverted tool inherits neither a verb nor a bearer token. The Harness dialed the pod and owns the connection, so a subverted pod cannot initiate a call back into the Harness.
+- The capability-job pod runs as the zero-RBAC `ws-<workspace>-unprivileged` ServiceAccount with no automounted token, so a subverted tool inherits neither a verb nor a bearer token. The Harness dialed the pod and owns the connection, so a subverted pod cannot initiate a call back into the Harness.
 - Each inference job's egress is pinned to its own provider's FQDN by a static per-profile CNP layered on the fail-closed namespace default-deny egress floor. There is no shared-component union egress policy.
 - Tool arg values flow to the toolset dispatcher as env vars, never argv; the dispatcher's `"$VAR"` expansion is the only string-to-shell crossing, and the model never authors a shell command.
 - Secret values (raw, base64, URL-encoded) are scrubbed from capability-job output before it crosses the gRPC boundary.

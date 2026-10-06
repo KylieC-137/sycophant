@@ -1,0 +1,100 @@
+{{/*
+Per-workspace one-shot init Job. Renders for the workspace its provision command
+installs; emits a plain batch/v1 Job (NOT a Helm hook) that:
+  1. Mounts the workspace PVC at /workspace. This mount is the PVC's first
+     consumer, so it also binds the PVC at install time (the StorageClass is
+     WaitForFirstConsumer).
+  2. Runs framework git init + baseline .gitignore + initial commit under a
+     local-only identity. Idempotent via [ ! -d .git ].
+
+Workspace *content* (intake files, etc.) is written into the PVC by the
+operator's deploy tooling — a transient, namespace-local writer pod that
+mounts this same PVC — NOT mounted into this Job from the host. So nothing
+this Job (or the chart) touches is cluster-scoped: the tenant lives entirely
+inside its namespace and `delete namespace` leaves nothing behind.
+
+Static Job name per workspace. Job.spec.template is immutable, so a chart
+change to this template needs the prior (completed) Job gone first; the
+ttlSecondsAfterFinished below reaps it within a day.
+
+Image: toolset-git (alpine + git). No RBAC: the Job only reads/writes the
+PVC, never the apiserver. Reuses the per-workspace ServiceAccount with
+automountServiceAccountToken=false.
+*/}}
+{{- $name := .Values.name }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ws-{{ $name }}-init
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: workspace-init
+    app.kubernetes.io/name: {{ $name }}
+    sycophant.md/workspace: {{ $name }}
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        {{- include "sycophant.labels" $ | nindent 8 }}
+        app.kubernetes.io/component: workspace-init
+        app.kubernetes.io/name: {{ $name }}
+        sycophant.md/workspace: {{ $name }}
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: ws-{{ $name }}-init
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: init
+          image: "{{ $.Values.workspaceInit.image }}:{{ $.Values.workspaceInit.tag }}"
+          imagePullPolicy: {{ $.Values.workspaceInit.pullPolicy }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          env:
+            - { name: WORKSPACE_ROOT,       value: /workspace }
+            - { name: WORKSPACE_NAME,       value: {{ $name | quote }} }
+            - { name: HOME,                 value: /tmp }
+            - { name: GIT_AUTHOR_NAME,      value: sycophant }
+            - { name: GIT_AUTHOR_EMAIL,     value: noreply@invalid }
+            - { name: GIT_COMMITTER_NAME,   value: sycophant }
+            - { name: GIT_COMMITTER_EMAIL,  value: noreply@invalid }
+          command: [sh, -c]
+          args:
+            - |
+              set -eux
+              cd "$WORKSPACE_ROOT"
+              # Safe-directory bypass: PVC files may carry surprising
+              # ownership (k3d UID mapping, fsGroup interactions). The init
+              # Job runs as UID 1000 with a fresh $HOME; this config is
+              # scoped to the Job's own session.
+              git config --global --add safe.directory "$WORKSPACE_ROOT"
+              if [ ! -d .git ]; then
+                git init -q -b main
+                grep -qxF '.preview-cache/' .gitignore 2>/dev/null \
+                  || printf '.preview-cache/\n' >> .gitignore
+                git add -A
+                git -c commit.gpgsign=false commit -q -m "sycophant: initial workspace state"
+              fi
+          volumeMounts:
+            - { name: workspace, mountPath: /workspace }
+            - { name: tmp,       mountPath: /tmp }
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: ws-{{ $name }}-data
+        - name: tmp
+          emptyDir: {}

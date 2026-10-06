@@ -9,7 +9,7 @@ Kyverno rule rejecting the request).
 | Test                                  | What it proves                                                                |
 |---------------------------------------|-------------------------------------------------------------------------------|
 | provision-write-scope/                | provision-write creates Secrets but `get`s only relay-registered-keys and adapter-state, and writes only in its bound namespace |
-| provision-identity-rolebinding/       | The tenant chart binds exactly the listed `users` to ClusterRole/provision-identity, nothing when unset, and rejects a subject with a quote, backslash, control character, or U+2028 |
+| provision-identity-rolebinding/       | The user chart rejects a subject with a quote, backslash, control character, or U+2028 |
 | provision-identity-clusterrole-minimal/ | The provision-identity ClusterRole has no rules and no aggregation |
 | relay-ctrl-grants-and-key-rbac/   | The chart-rendered relay-controller Role grants exactly its grants and key verbs |
 | relay-ctrl-no-secret-updates/     | relay's Secret writes are name-scoped to relay-registered-keys, and it can delete none |

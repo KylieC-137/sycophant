@@ -20,11 +20,17 @@ lint-rust: ## rustfmt + clippy, warnings are errors
 	cargo clippy --workspace -- -D warnings
 
 # The default idp keeps the always-on apiserver-trust render valid, so lint the
-# same shape. The Kyverno policies always render; helm lint has no cluster
+# same shape. A component chart is linted with the name and minimal command its
+# installer always sets. The Kyverno policies always render; helm lint has no cluster
 # capabilities, so it logs the CRD-absent guard but still passes.
 .PHONY: lint-k8s
 lint-k8s: ## helm lint + zero-match sweep gates
 	helm lint charts/sycophant-tenant
+	helm lint charts/sycophant-workspace --set name=lint
+	helm lint charts/sycophant-inference --set name=lint --set command.baseUrl=https://lint.example
+	helm lint charts/sycophant-toolset --set name=lint
+	helm lint charts/sycophant-user
+	helm lint charts/sycophant-channel --set name=lint --set command.loginServer=https://lint.example
 	helm lint charts/sycophant-cluster
 	helm lint charts/sycophant-commands
 	@for g in $(SWEEP_GATES); do echo "== $$g =="; bash "$$g" || exit 1; done

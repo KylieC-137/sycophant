@@ -44,8 +44,8 @@ impl Scope {
         Ok(s)
     }
 
-    pub(crate) fn tenant_chart_dir(&self) -> PathBuf {
-        self.root.join("charts").join("sycophant-tenant")
+    pub(crate) fn chart_dir(&self, name: &str) -> PathBuf {
+        self.root.join("charts").join(name)
     }
     pub(crate) fn commands_chart_dir(&self) -> PathBuf {
         self.root.join("charts").join("sycophant-commands")
@@ -99,7 +99,7 @@ mod tests {
     fn chart_dirs_are_global() {
         let s = global();
         assert_eq!(
-            s.tenant_chart_dir(),
+            s.chart_dir("sycophant-tenant"),
             PathBuf::from("/home/user/.config/sycophant/charts/sycophant-tenant")
         );
         assert_eq!(

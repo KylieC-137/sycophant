@@ -50,14 +50,14 @@ spec:
               set -e
               kubectl create namespace "$TENANT_NS"
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+              rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-workspace" \
                 --show-only templates/toolset-grant-cnp.yaml \
                 -n "$TENANT_NS" \
-                --set render=workspace --set name=demo --set-json "command=$GRANT_COMMAND")
+                --set name=demo --set-json "command=$GRANT_COMMAND")
 
               # A grant that declares only a secret opens no network hole, so it
               # renders no policy at all.
-              printf '%s' "$rendered" | grep -q 'toolset-grant-demo-notion-sshkey' \
+              printf '%s' "$rendered" | grep -q 'ws-demo-grant-notion-sshkey' \
                 && { echo "a secret-only grant must render no CiliumNetworkPolicy"; printf '%s\n' "$rendered" >&2; exit 1; }
 
               # Every kube-dns rule must carry its own L7 allowlist. Counting the
@@ -78,7 +78,7 @@ spec:
               apiVersion: cilium.io/v2
               kind: CiliumNetworkPolicy
               metadata:
-                name: toolset-grant-demo-notion-reader
+                name: ws-demo-grant-notion-reader
                 namespace: ($tenant_ns)
               spec:
                 # Compound: workspace AND toolset AND grant, so a grant name

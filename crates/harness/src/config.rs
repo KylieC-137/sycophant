@@ -51,12 +51,13 @@ impl HarnessConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(100);
 
-        // Max silence between inference-job events before a turn is failed as
-        // wedged. Must exceed the inference job's heartbeat (10s) with margin.
+        // Max silence between inference events before a turn is failed as
+        // wedged. A local model's prompt read and thinking send no frames, so
+        // this must outlast a slow CPU model, not just the job's 10s heartbeat.
         let idle_gap_secs = std::env::var("IDLE_GAP_SECONDS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(45);
+            .unwrap_or(600);
 
         let namespace =
             std::env::var("TOOLSET_NAMESPACE").unwrap_or_else(|_| "default".to_string());

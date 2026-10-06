@@ -1,7 +1,7 @@
 # An in-cluster llama.cpp model. The `server` block makes it local: the harness
-# dials its inference-local Service on the fixed port 8080, so it carries no
+# dials its inf-local Service on the fixed port 8080, so it carries no
 # baseUrl. llama.cpp mmaps the GGUF, so memory must exceed the model on disk
-# plus the KV cache and runtime (MiniCPM5-2B Q4_K_M is ~1.62 GB). copy is the
+# plus the KV cache and runtime (Qwen3.5-2B Q4_K_M is ~1.28 GB). copy is the
 # delivery that needs no kubelet image-volume support. singleNodeException drops
 # the workload node selector and toleration for a one-node cluster. temp 0 is
 # greedy decoding.
@@ -17,8 +17,8 @@ inference:
     weightsDelivery: copy
     singleNodeException: true
     memory: 2560Mi
-    cpu: 2
-    threads: 2
+    cpu: 4
+    threads: 4
     contextBudget: 8192
     slots: 1
     outputCap: 512

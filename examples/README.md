@@ -12,6 +12,7 @@ files override earlier ones, and `--set` overrides both.
 | toolset | `toolsets/<name>/values.yaml`, beside each image's `tools.yaml` |
 | workspace | [`workspaces/hello-world.yaml`](workspaces/hello-world.yaml) |
 | user | [`users/alice.yaml`](users/alice.yaml) |
+| channel | [`channels/app.yaml`](channels/app.yaml) |
 
 [`instructions/simple/`](instructions/simple/) is an instructions tree for a
 workspace.
@@ -42,6 +43,7 @@ syco toolset up -f examples/toolsets/stdlib/values.yaml -f stdlib-image.yaml
 printf 'FAKE-ED25519-PRIVATE-KEY-DO-NOT-USE' | syco tenant secret set demo-ssh-key --ns tenant-e2e-test
 syco workspace up -f examples/workspaces/hello-world.yaml
 syco user up -f examples/users/alice.yaml --set "user.subject=<issuer>#<sub>"
+syco channel up -f examples/channels/app.yaml
 ```
 
 Re-run any `up` after editing its values to upgrade that part in place. Remove
@@ -56,8 +58,8 @@ the mounted demo key. Then:
 
 ```sh
 syco tenant audit hello-world --ns tenant-e2e-test
-kubectl logs -n tenant-e2e-test deployment/hello-world -c harness | grep -c 'FAKE-ED25519-PRIVATE-KEY'   # 0
-kubectl logs -n tenant-e2e-test deployment/hello-world -c harness | grep -c '\[REDACTED:demo-ssh-key\]' # >= 1
+kubectl logs -n tenant-e2e-test deployment/ws-hello-world -c harness | grep -c 'FAKE-ED25519-PRIVATE-KEY'   # 0
+kubectl logs -n tenant-e2e-test deployment/ws-hello-world -c harness | grep -c '\[REDACTED:demo-ssh-key\]' # >= 1
 ```
 
 The second count proves the tool read the key and the scrubber replaced it.

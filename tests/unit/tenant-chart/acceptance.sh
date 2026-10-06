@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Offline: renders the tenant chart's slices and checks what each one emits.
+# Offline: renders the tenant charts and checks what each one emits.
 # No cluster.
 #
 #   bash tests/unit/tenant-chart/acceptance.sh
@@ -7,7 +7,6 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
-CHART="$ROOT/charts/sycophant-tenant"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -16,40 +15,39 @@ LOCAL='{"format":"openai","model":"liquid/lfm2.5-8b-a1b","server.image":"llama-s
 REMOTE='{"format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","image":"inference-runtime:local","secret":"llm-openrouter"}'
 TOOLSET='{"image":"ghcr.io/sycophant-md/git@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","keepalive":"false","tool.git-status.description":"Show the working tree status.","tool.git-commit.description":"Commit staged changes.","tool.git-commit.arg.message.type":"string","tool.git-commit.arg.message.required":"true","tool.git-commit.arg.message.env":"MESSAGE"}'
 WORKSPACE='{"toolsets":"git,ssh","models":"a,b","storage":"5Gi","grant.ssh.demo.secret":"demo-key","grant.ssh.demo.path":"/home/agent/.ssh/id","grant.ssh.demo.egress":"github.com"}'
-CHANNEL=(--set headscale.enabled=true --set headscale.serverUrl=http://localhost:8080
-  --set-json 'channels={"app":{"kind":"app","loginServer":"http://headscale:8080"}}')
+CHANNEL='{"kind":"app","loginServer":"http://headscale:8080","headscale.enabled":"true","headscale.serverUrl":"http://localhost:8080"}'
 
 render() {
-  local out="$1"; shift
-  helm template t "$CHART" -n tenant-acme --set namespace.create=false "$@" \
+  local out="$1" chart="$2"; shift 2
+  helm template t "$ROOT/charts/sycophant-$chart" -n tenant-acme "$@" \
     > "$WORK/$out.yaml" 2> "$WORK/$out.err"
   echo $? > "$WORK/$out.rc"
 }
-render base "${CHANNEL[@]}" --set render=base
-render channel "${CHANNEL[@]}" --set render=channel
-render bare --set render=base
-render local --set render=inference --set name=local --set-json "command=$LOCAL"
-render remote --set render=inference --set name=deepseek --set-json "command=$REMOTE"
-render toolset --set render=toolset --set name=git --set-json "command=$TOOLSET"
-render workspace --set render=workspace --set name=one --set-json "command=$WORKSPACE"
-render wsbase --set render=workspace --set name=one --set-json 'command={}'
-render upgrade --set render=base --is-upgrade
-render channel-off --set render=channel
-render acme "${CHANNEL[@]}" --set render=channel \
-  --set headscale.acme.enabled=true --set headscale.acme.email=op@example.com
-render bogus --set render=channel \
-  --set-json 'channels={"app":{"kind":"carrier-pigeon","loginServer":"http://headscale:8080"}}'
+render bare tenant --set namespace.create=false
+render upgrade tenant --set namespace.create=false --is-upgrade
+render channel channel --set name=app --set-json "command=$CHANNEL"
+render headscale-off channel --set name=app --set-json 'command={"kind":"app","loginServer":"https://hs.example.test"}'
+render acme channel --set name=app --set-json "command=$(printf '%s' "$CHANNEL" \
+  | jq -c '. + {"headscale.acme.enabled":"true","headscale.acme.email":"op@example.com"}')"
+render no-magic channel --set name=app --set-json "command=$(printf '%s' "$CHANNEL" \
+  | jq -c '. + {"headscale.magicDns":"false"}')"
+render local inference --set name=local --set-json "command=$LOCAL"
+render remote inference --set name=deepseek --set-json "command=$REMOTE"
+render toolset toolset --set name=git --set-json "command=$TOOLSET"
+render workspace workspace --set name=one --set-json "command=$WORKSPACE"
+render wsbase workspace --set name=one --set-json 'command={}'
+render user user --set-json 'users=["https://issuer.example#alice"]'
 for m in override:'{"server.weightsPath":"/opt/m.gguf","server.contextBudget":"8192","server.slots":"1","server.outputCap":"512","server.threads":"2","server.memory":"4Gi","server.cpu":"2"}' \
          mount:'{"server.weightsDelivery":"mount"}' \
          tpl-copy:'{"server.chatTemplate":"TEMPLATE-BODY"}' \
          tpl-mount:'{"server.weightsDelivery":"mount","server.chatTemplate":"TEMPLATE-BODY"}' \
          single-true:'{"server.singleNodeException":"true"}' \
          single-false:'{"server.singleNodeException":"false"}'; do
-  render "local-${m%%:*}" --set render=inference --set name=local --set-json "command=$(printf '%s' "$LOCAL" | jq -c ". + ${m#*:}")"
+  render "local-${m%%:*}" inference --set name=local --set-json "command=$(printf '%s' "$LOCAL" | jq -c ". + ${m#*:}")"
 done
 
 python3 - "$WORK" "$REMOTE" "$TOOLSET" "$WORKSPACE" <<'PY'
-import json, sys, yaml
+import hashlib, json, sys, yaml
 
 work, remote, toolset, workspace = sys.argv[1], json.loads(sys.argv[2]), json.loads(sys.argv[3]), json.loads(sys.argv[4])
 passed = failed = 0
@@ -74,7 +72,10 @@ def check(name, out, fn):
     if docs is None:
         bad(name, err)
         return
-    why = fn(docs)
+    try:
+        why = fn(docs)
+    except Exception as e:
+        why = f"{type(e).__name__}: {e}"
     if why:
         bad(name, why)
     else:
@@ -115,22 +116,30 @@ def channel_objects(docs):
 def model_cm(docs, key):
     for d in docs:
         labels = d["metadata"].get("labels") or {}
-        if d["kind"] == "ConfigMap" and d["metadata"]["name"] == f"model-{key}" \
+        if d["kind"] == "ConfigMap" and d["metadata"]["name"] == f"inf-{key}" \
                 and labels.get("sycophant.md/type") == "model" and labels.get("app.kubernetes.io/name") == key:
             return d
     return None
 
-check("base renders no adapter or headscale object", "base",
-      lambda docs: channel_objects(docs))
+BASE = ["CiliumNetworkPolicy/default-deny-egress", "CiliumNetworkPolicy/install-wait-egress",
+        "CiliumNetworkPolicy/relay-egress", "CiliumNetworkPolicy/relay-ingress",
+        "ConfigMap/relay-access-grants", "ConfigMap/toolset-scheduling",
+        "Deployment/relay-controller", "Job/install-wait",
+        "Role/install-wait", "Role/relay-controller",
+        "RoleBinding/install-wait", "RoleBinding/relay-controller",
+        "Service/relay-controller", "ServiceAccount/install-wait", "ServiceAccount/relay-controller"]
+check("base chart renders only the tenant's shared objects", "bare",
+      lambda docs: None if objects(docs) == BASE else f"want {BASE}, got {objects(docs)}")
 
-def base_no_inference(docs):
-    hits = [f"{d['kind']}/{d['metadata']['name']}" for d in docs
-            if "inference" in ((d["metadata"].get("labels") or {}).get("app.kubernetes.io/component"),
-                               (d.get("spec") or {}).get("template", {}).get("metadata", {}).get("labels", {}).get("app.kubernetes.io/component"),
-                               ((d.get("spec") or {}).get("endpointSelector") or {}).get("matchLabels", {}).get("app.kubernetes.io/component"))
-            or d["metadata"]["name"].startswith(("inference-", "model-"))]
-    return hits
-check("base renders no inference object", "base", base_no_inference)
+def user_binding(docs):
+    subject = "https://issuer.example#alice"
+    name = f"RoleBinding/user-{hashlib.sha256(subject.encode()).hexdigest()[:10]}"
+    if objects(docs) != [name]:
+        return f"want only {name}, got {objects(docs)}"
+    rb = docs[0]
+    got = ([(s["kind"], s["name"]) for s in rb.get("subjects") or []], rb["roleRef"]["kind"], rb["roleRef"]["name"])
+    return got != ([("User", subject)], "ClusterRole", "provision-identity") and f"binding {got}"
+check("user chart binds each identity to provision-identity in its own RoleBinding", "user", user_binding)
 
 check("channel renders the adapter and headscale", "channel",
       lambda docs: None if all(get(docs, k, n) for k, n in [
@@ -160,13 +169,6 @@ def admits_transport(docs):
         return None
     return f"no 9091 transport rule in relay-ingress {rules}"
 check("base with no channels admits the transport adapter on 9091", "bare", admits_transport)
-
-check("a channel render with no channels renders no adapter", "channel-off",
-      lambda docs: [f"{d['kind']}/{d['metadata']['name']}" for d in docs
-                    for labels in ((d["metadata"].get("labels") or {}),
-                                   (d.get("spec") or {}).get("template", {}).get("metadata", {}).get("labels") or {})
-                    if labels.get("app.kubernetes.io/component") == "adapter"
-                    or "sycophant.md/adapter-class" in labels])
 
 def relay_fence(docs):
     relay = pod(get(docs, "Deployment", "relay-controller"))["metadata"]["labels"]
@@ -235,17 +237,11 @@ def adapter_class(docs):
     if not pols or any(not p["spec"].get("egress") or p["spec"].get("ingress")
                        or "all" in json.dumps([r.get("toEntities") for r in p["spec"]["egress"]]) for p in pols):
         return f"want only fail-closed egress policies selecting the adapter, got {[p['spec'] for p in pols]}"
-    every = [p for out in ("base", "channel", "bare", "wsbase") for p in load(out)[0]
+    every = [p for out in ("channel", "bare", "wsbase") for p in load(out)[0]
              if p["kind"] in ("CiliumNetworkPolicy", "NetworkPolicy")]
     keyed = [p["metadata"]["name"] for p in every if "sycophant.md/channel" in json.dumps(p["spec"])]
     return keyed and f"policies keyed on the channel label: {keyed}"
 check("app adapter is transport class and policies key on the class", "channel", adapter_class)
-
-def unknown_kind(_):
-    err = open(f"{work}/bogus.err").read()
-    if load("bogus")[0] is not None or "kind" not in err:
-        return f"want a failed render naming the kind, got {err!r}"
-check("unknown channel kind fails the render", ([], None), unknown_kind)
 
 def headscale(_):
     def hosts(out):
@@ -258,12 +254,20 @@ def headscale(_):
         fqdn = sorted(n.get("matchName") or "pattern" for r in eg for n in r.get("toFQDNs") or [])
         return p["spec"]["endpointSelector"]["matchLabels"].get("app.kubernetes.io/component"), dns, fqdn
     cp, acme = "controlplane.tailscale.com", "acme-v02.api.letsencrypt.org"
-    got = {o: hosts(o) for o in ("channel", "acme", "channel-off")}
+    got = {o: hosts(o) for o in ("channel", "acme", "headscale-off")}
     want = {"channel": ("headscale", [cp], [cp]),
             "acme": ("headscale", [acme, cp], [acme, cp]),
-            "channel-off": None}
+            "headscale-off": None}
     return None if got == want else f"want {want}, got {got}"
 check("headscale egress reaches only its control endpoints", ([], None), headscale)
+
+def magic_dns(_):
+    def value(out):
+        cm = get(load(out)[0] or [], "ConfigMap", "headscale-config")
+        return cm and yaml.safe_load(cm["data"]["config.yaml"])["dns"]["magic_dns"]
+    got = {o: value(o) for o in ("channel", "no-magic")}
+    return None if got == {"channel": True, "no-magic": False} else f"magic_dns {got}"
+check("headscale magic_dns defaults on and turns off with \"false\"", ([], None), magic_dns)
 
 def workspace_init_unselected(docs):
     sel = [d["metadata"]["name"] for d in docs
@@ -289,21 +293,22 @@ def grants_install_only(_):
 check("relay-access-grants renders on install only, kept", ([], None), grants_install_only)
 
 def harness_reaches_inference(docs):
-    p = get(docs, "CiliumNetworkPolicy", "harness-egress-one")
+    p = get(docs, "CiliumNetworkPolicy", "ws-one-egress")
     if p is None:
-        return "harness-egress-one missing"
+        return "ws-one-egress missing"
     eg = p["spec"].get("egress") or []
     warm = any(e.get("matchLabels") == {"app.kubernetes.io/component": "inference", "app.kubernetes.io/part-of": "sycophant"}
                for r in eg for e in r.get("toEndpoints") or [])
     dns = [n for r in eg for t in r.get("toPorts") or [] for n in (t.get("rules") or {}).get("dns") or []]
-    want = {"matchPattern": "inference-*.tenant-acme.svc.cluster.local"}
-    return None if warm and want in dns else f"warm={warm} dns={dns}"
+    want = [{"matchPattern": "inf-*.tenant-acme.svc.cluster.local"},
+            {"matchPattern": "*.ws-one-capability.tenant-acme.svc.cluster.local"}]
+    return None if warm and all(w in dns for w in want) else f"warm={warm} dns={dns}"
 check("harness egress reaches the inference pods and resolves their Services", "wsbase", harness_reaches_inference)
 
 def harness_dials_tool_pods(docs):
-    p = get(docs, "CiliumNetworkPolicy", "harness-egress-one")
+    p = get(docs, "CiliumNetworkPolicy", "ws-one-egress")
     if p is None:
-        return "harness-egress-one missing"
+        return "ws-one-egress missing"
     ingress = [r for r in p["spec"].get("ingress") or [] if 9090 in ports(r)]
     dials = any(9090 in ports(r) and any((e.get("matchLabels") or {}).get("app.kubernetes.io/component") == "capability-job"
                                          for e in r.get("toEndpoints") or [])
@@ -312,23 +317,23 @@ def harness_dials_tool_pods(docs):
 check("harness admits no ingress on 9090 and dials capability-job pods on 9090", "wsbase", harness_dials_tool_pods)
 
 def local_server(docs):
-    want = ["CiliumNetworkPolicy/inference-local", "ConfigMap/model-local", "Deployment/inference-local", "Service/inference-local"]
+    want = ["CiliumNetworkPolicy/inf-local", "ConfigMap/inf-local", "Deployment/inf-local", "Service/inf-local"]
     if objects(docs) != want or not model_cm(docs, "local"):
         return f"want {want}, got {objects(docs)}"
-    svc = get(docs, "Service", "inference-local")["spec"]
-    labels = pod(get(docs, "Deployment", "inference-local"))["metadata"]["labels"]
+    svc = get(docs, "Service", "inf-local")["spec"]
+    labels = pod(get(docs, "Deployment", "inf-local"))["metadata"]["labels"]
     if svc.get("type") != "ClusterIP" or not selects(svc.get("selector"), labels):
         return f"Service {svc} does not select pod labels {labels}"
 check("local command renders the model server and its model ConfigMap, no provider egress", "local", local_server)
 
 check("remote command renders only its model ConfigMap and provider egress", "remote",
-      lambda docs: None if objects(docs) == ["CiliumNetworkPolicy/inference-egress-deepseek", "ConfigMap/model-deepseek"]
+      lambda docs: None if objects(docs) == ["CiliumNetworkPolicy/inf-deepseek", "ConfigMap/inf-deepseek"]
       and (model_cm(docs, "deepseek") or {}).get("data") == remote
       else f"got {objects(docs)} {[d.get('data') for d in docs if d['kind'] == 'ConfigMap']}")
 
 def toolset_cm(docs):
-    if objects(docs) != ["ConfigMap/toolset-git"]:
-        return f"want only ConfigMap/toolset-git, got {objects(docs)}"
+    if objects(docs) != ["ConfigMap/ts-git"]:
+        return f"want only ConfigMap/ts-git, got {objects(docs)}"
     d = docs[0]
     labels = d["metadata"].get("labels") or {}
     if (labels.get("sycophant.md/type"), labels.get("app.kubernetes.io/name")) != ("toolset", "git"):
@@ -337,7 +342,7 @@ def toolset_cm(docs):
 check("toolset command renders only its toolset ConfigMap carrying the command data", "toolset", toolset_cm)
 
 def harness_env(docs):
-    return {e["name"]: e.get("value") for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "one"
+    return {e["name"]: e.get("value") for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "ws-one"
             for c in pod(d)["spec"]["containers"] if c["name"] == "harness" for e in c.get("env") or []}
 
 def command_env(docs):
@@ -350,41 +355,61 @@ check("workspace command toolsets, models and grants reach its harness env", "wo
 
 def no_stdlib_default(docs):
     env = harness_env(docs)
-    cm = get(docs, "ConfigMap", "capability-grants-one")
-    if not get(docs, "Deployment", "one") or env.get("TOOLSETS", "") != "" or cm is None or cm.get("data"):
-        return f"TOOLSETS {env.get('TOOLSETS')!r}, capability-grants-one {cm and cm.get('data')}"
+    cm = get(docs, "ConfigMap", "ws-one-capability-grants")
+    if not get(docs, "Deployment", "ws-one") or env.get("TOOLSETS", "") != "" or cm is None or cm.get("data"):
+        return f"TOOLSETS {env.get('TOOLSETS')!r}, ws-one-capability-grants {cm and cm.get('data')}"
 check("a workspace command naming no toolsets lists none and approves no Secret", "wsbase", no_stdlib_default)
 
 def command_grant_objects(docs):
-    cm = get(docs, "ConfigMap", "capability-grants-one") or {"metadata": {}}
+    cm = get(docs, "ConfigMap", "ws-one-capability-grants") or {"metadata": {}}
     if (cm.get("data"), (cm["metadata"].get("labels") or {}).get("sycophant.md/type")) != ({"demo-key": "ssh"}, "capability-grants"):
-        return f"capability-grants-one {cm}"
+        return f"ws-one-capability-grants {cm}"
     sel = {"sycophant.md/workspace": "one", "sycophant.md/toolset": "ssh", "sycophant.md/grant": "demo"}
-    fqdns = [n.get("matchName") for p in cnps(docs)
+    fqdns = [(p["metadata"]["name"], n.get("matchName")) for p in cnps(docs)
              if selects(sel, (p["spec"].get("endpointSelector") or {}).get("matchLabels") or {})
              for r in p["spec"].get("egress") or [] for n in r.get("toFQDNs") or []]
-    if fqdns != ["github.com"]:
+    if fqdns != [("ws-one-grant-ssh-demo", "github.com")]:
         return f"grant egress toFQDNs {fqdns}"
-    relay = get(docs, "ConfigMap", "relay-toolset-grants-one")
+    relay = get(docs, "ConfigMap", "ws-one-relay-grants")
     names = yaml.safe_load(((relay or {}).get("data") or {}).get("grants.yaml") or "null")
     want = {"one": ["git", {"name": "ssh", "grants": {"demo": {}}}]}
-    return None if names == want else f"relay-toolset-grants-one {names}"
+    return None if names == want else f"ws-one-relay-grants {names}"
 check("a workspace command grant renders its Secret approval, its egress and its relay grant name", "workspace", command_grant_objects)
 
 def command_harness_storage(docs):
-    d = get(docs, "Deployment", "one")
+    d = get(docs, "Deployment", "ws-one")
     if d is None:
-        return "Deployment/one missing"
+        return "Deployment/ws-one missing"
     sync = " ".join(a for c in pod(d)["spec"].get("initContainers") or [] if c["name"] == "instructions-sync"
                     for a in c.get("args") or [])
-    pvc = get(docs, "PersistentVolumeClaim", "workspace-data-one")
+    pvc = get(docs, "PersistentVolumeClaim", "ws-one-data")
     size = (pvc or {}).get("spec", {}).get("resources", {}).get("requests", {}).get("storage")
     if "/tenant-acme/one\"" not in sync or size != "5Gi":
-        return f"sync {sync!r}, workspace-data-one {size}"
+        return f"sync {sync!r}, ws-one-data {size}"
 check("a workspace command syncs instructions from <namespace>/<workspace> and sizes its storage", "workspace", command_harness_storage)
 
+WORKSPACE_OBJECTS = sorted([
+    "CiliumNetworkPolicy/ws-one-egress", "CiliumNetworkPolicy/ws-one-grant-ssh-demo", "CiliumNetworkPolicy/ws-one-job-ingress",
+    "ConfigMap/ws-one-capability-grants", "ConfigMap/ws-one-relay-grants", "Deployment/ws-one", "Job/ws-one-init",
+    "PersistentVolumeClaim/ws-one-conversation", "PersistentVolumeClaim/ws-one-data", "Role/ws-one", "RoleBinding/ws-one",
+    "Service/ws-one", "Service/ws-one-capability",
+    "ServiceAccount/ws-one", "ServiceAccount/ws-one-init", "ServiceAccount/ws-one-unprivileged"])
+
+def workspace_references(docs):
+    if objects(docs) != WORKSPACE_OBJECTS:
+        return f"want {WORKSPACE_OBJECTS}, got {objects(docs)}"
+    harness, init = pod(get(docs, "Deployment", "ws-one"))["spec"], pod(get(docs, "Job", "ws-one-init"))["spec"]
+    rb = get(docs, "RoleBinding", "ws-one")
+    got = (harness.get("serviceAccountName"), init.get("serviceAccountName"),
+           sorted(v["persistentVolumeClaim"]["claimName"] for s in (harness, init) for v in s.get("volumes") or [] if "persistentVolumeClaim" in v),
+           rb["roleRef"]["name"], [s["name"] for s in rb.get("subjects") or []],
+           {e["name"]: e.get("value") for c in harness["containers"] for e in c.get("env") or []}.get("CAPABILITY_SERVICE_NAME"))
+    want = ("ws-one", "ws-one-init", ["ws-one-conversation", "ws-one-data"], "ws-one", ["ws-one"], "ws-one-capability")
+    return None if got == want else f"want {want}, got {got}"
+check("a workspace renders every object under its release name and references them by those names", "workspace", workspace_references)
+
 def engine_caps(docs):
-    d = get(docs, "Deployment", "inference-local")
+    d = get(docs, "Deployment", "inf-local")
     av = argv(d)
     got = {f: pair(av, f) for f in ("-m", "-c", "-np", "-t", "-n", "--sse-ping-interval")}
     want = {"-m": "/opt/m.gguf", "-c": "8192", "-np": "1", "-t": "2", "-n": "512", "--sse-ping-interval": "30"}
@@ -402,7 +427,7 @@ def fetchers(spec):
     return [w for w in words if w.rsplit("/", 1)[-1] in FETCH]
 
 def copy_delivery(docs):
-    d = get(docs, "Deployment", "inference-local")
+    d = get(docs, "Deployment", "inf-local")
     spec = pod(d)["spec"]
     inits = spec.get("initContainers") or []
     server = next(c for c in spec["containers"] if c["name"] == "server")
@@ -423,7 +448,7 @@ def copy_delivery(docs):
 check("copy is the default weight delivery", "local", copy_delivery)
 
 def mount_delivery(docs):
-    spec = pod(get(docs, "Deployment", "inference-local"))["spec"]
+    spec = pod(get(docs, "Deployment", "inf-local"))["spec"]
     images = [v for v in spec["volumes"] if "image" in v]
     server = next(c for c in spec["containers"] if c["name"] == "server")
     if [v["image"]["reference"] for v in images] != ["ghcr.io/example/weights:1"]:
@@ -435,11 +460,11 @@ check("mount delivery uses an image volume and no copy step", "local-mount", mou
 
 def plumbing(out):
     docs = load(out)[0]
-    spec = pod(get(docs, "Deployment", "inference-local"))["spec"]
+    spec = pod(get(docs, "Deployment", "inf-local"))["spec"]
     server = next(c for c in spec["containers"] if c["name"] == "server")
-    av = argv(get(docs, "Deployment", "inference-local"))
+    av = argv(get(docs, "Deployment", "inf-local"))
     return (
-        ((get(docs, "ConfigMap", "inference-local-chat-template") or {}).get("data") or {}).get("template"),
+        ((get(docs, "ConfigMap", "inf-local-chat-template") or {}).get("data") or {}).get("template"),
         [v for v in spec["volumes"] if v["name"] == "chat-template"],
         [m for m in server["volumeMounts"] if m["name"] == "chat-template"],
         pair(av, "--chat-template-file"),
@@ -448,7 +473,7 @@ def plumbing(out):
 def chat_template(_):
     want = (
         "TEMPLATE-BODY\n",
-        [{"name": "chat-template", "configMap": {"name": "inference-local-chat-template"}}],
+        [{"name": "chat-template", "configMap": {"name": "inf-local-chat-template"}}],
         [{"name": "chat-template", "mountPath": "/etc/sycophant/chat-template/template", "subPath": "template", "readOnly": True}],
         "/etc/sycophant/chat-template/template",
     )
@@ -458,7 +483,7 @@ def chat_template(_):
 check("chat template renders all four parts on both deliveries, none when unset", ([], None), chat_template)
 
 def placement(out):
-    spec = pod(get(load(out)[0], "Deployment", "inference-local"))["spec"]
+    spec = pod(get(load(out)[0], "Deployment", "inf-local"))["spec"]
     return spec.get("nodeSelector"), spec.get("tolerations")
 
 def node_separation(_):

@@ -67,7 +67,7 @@ spec:
               apiVersion: v1
               kind: ConfigMap
               metadata:
-                name: capability-grants-research
+                name: ws-research-capability-grants
                 namespace: ($tenant_ns)
                 labels:
                   app.kubernetes.io/part-of: sycophant
@@ -79,7 +79,7 @@ spec:
               apiVersion: v1
               kind: ConfigMap
               metadata:
-                name: capability-grants-research
+                name: ws-research-capability-grants
                 namespace: ($tenant_ns)
     - name: in-namespace-sa-cannot-update-the-configmap
       try:
@@ -88,7 +88,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl patch configmap capability-grants-research -n "$TENANT_NS" --type=merge \
+              kubectl patch configmap ws-research-capability-grants -n "$TENANT_NS" --type=merge \
                 -p '{"data":{"attacker-secret":"notion"}}' \
                 --as="system:serviceaccount:${TENANT_NS}:attacker"
             check:
@@ -101,7 +101,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl delete configmap capability-grants-research -n "$TENANT_NS" \
+              kubectl delete configmap ws-research-capability-grants -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:attacker"
             check:
               ($error != null): true
@@ -117,7 +117,7 @@ spec:
               apiVersion: v1
               kind: ConfigMap
               metadata:
-                name: capability-grants-shadow
+                name: ws-shadow-capability-grants
                 labels:
                   sycophant.md/type: capability-grants
               data:

@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use proto_common::tool_result_frame::Frame;
 use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
+use shared::auth::WORKSPACE_PREFIX;
 use shared::scheduling::SchedulingConfig;
 use shared::toolset::{CapabilityGrant, ToolsetConfig, WORKSPACE_MOUNT_PATH};
 use tokio::sync::{mpsc, Mutex, Notify, RwLock};
@@ -181,7 +182,7 @@ impl DispatchState {
         scheduling: SchedulingConfig,
         toolset_config: Arc<RwLock<ToolsetConfig>>,
     ) -> Arc<Self> {
-        let workspace_pvc = format!("workspace-data-{workspace}");
+        let workspace_pvc = format!("{WORKSPACE_PREFIX}{workspace}-data");
         Arc::new(Self {
             pending_calls: RwLock::new(HashMap::new()),
             call_notify: Notify::new(),
@@ -799,11 +800,11 @@ async fn dial_and_run(
 }
 
 /// The in-cluster base URL of a warm local model's ClusterIP Service. Pure: the
-/// harness dials `inference-<key>` directly, so it derives the address from the
+/// harness dials `inf-<key>` directly, so it derives the address from the
 /// model key, the namespace, and the fixed local port with no apiserver read.
 /// Mirrors [`pod_dial_name`] for the local (no-job) path.
 fn local_service_base_url(key: &str, namespace: &str) -> String {
-    format!("http://inference-{key}.{namespace}.svc.cluster.local:{LOCAL_INFERENCE_PORT}/v1")
+    format!("http://inf-{key}.{namespace}.svc.cluster.local:{LOCAL_INFERENCE_PORT}/v1")
 }
 
 /// Parse a configured wire-format string into a provider [`Format`] by its serde

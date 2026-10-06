@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "The workspace name the provision command carries as its name suffix. The installer sets it from the command name."
+    },
+    "command": {
+      "type": "object",
+      "description": "The workspace provision command's flat data, verbatim. The installer sets it from the command.",
+      "additionalProperties": { "type": "string" }
+    },
+    "storageClass": {
+      "type": "string",
+      "description": "StorageClass for the workspace PVCs. Empty uses the cluster default StorageClass."
+    },
+    "harness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "tag"],
+      "properties": {
+        "image": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        },
+        "instructions": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Object-storage delivery of instruction content. The harness init container syncs each workspace's prefix from this endpoint/bucket using the named read-only credential; the serving container mounts the result read-only and holds no credential.",
+          "properties": {
+            "endpoint": { "type": "string", "description": "Cross-namespace Service address (host:port) of the shared cluster object store the sync init container reaches. The harness egress netpol reads the store namespace from this host." },
+            "bucket": { "type": "string", "description": "Bucket holding every workspace's instruction tree." },
+            "credentialName": { "type": "string", "description": "Name of the Secret carrying the read-only, prefix-scoped sync credential, which the operator creates in the tenant namespace. Mounted into the init container only." },
+            "syncImage": { "type": "string", "description": "Image for the object-storage sync init container (carries the sync client)." }
+          }
+        }
+      }
+    },
+    "workspaceInit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "tag"],
+      "properties": {
+        "image": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
+      }
+    }
+  }
+}

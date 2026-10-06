@@ -29,6 +29,7 @@ fn main() {
             sub: cli::UserSub::Up(c),
         }) => commands::command::up("user", &c.values),
         Command::Inference(cmd) => component("inference", cmd),
+        Command::Channel(cmd) => component("channel", cmd),
     };
 
     if let Err(e) = result {

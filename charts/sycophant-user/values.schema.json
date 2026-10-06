@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "users": {
+      "type": "array",
+      "description": "Full issuer-prefixed identity subjects `<issuer>#<sub>`, operator-supplied, one per identity granted this tenant. The chart renders one RoleBinding per identity granting that user the provision-identity ClusterRole in this namespace. Empty renders no binding. The prefix is enforced: cluster-protect-security selects tenant-scoped callers by it, so a subject without one would hold the provision-identity verbs while sitting outside the policy's reach. Neither the issuer nor the sub may carry a quote, backslash, control character, or Unicode line or paragraph separator, matching the user command's admission rule.",
+      "items": { "type": "string", "pattern": "^https?://[^#\"\\\\\\p{Cc}\\x{2028}\\x{2029}]+#[^\"\\\\\\p{Cc}\\x{2028}\\x{2029}]+$" }
+    }
+  }
+}

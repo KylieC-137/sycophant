@@ -3,12 +3,12 @@ kind: Test
 metadata:
   name: workspace-sa-no-verbs
 spec:
-  description: The <ws>-workspace-init ServiceAccount can perform no API verb.
+  description: The ws-<ws>-init ServiceAccount can perform no API verb.
   bindings:
     - name: tenant_ns
       value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
     - name: ws_sa
-      value: chainsaw-ws-workspace-init
+      value: ws-chainsaw-init
   steps:
     - name: setup-tenant-ns
       try:
@@ -41,7 +41,7 @@ spec:
                 --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
             check:
               ($error == null): true
-              (contains($stdout, 'chainsaw-ws-workspace-init')): true
+              (contains($stdout, 'ws-chainsaw-init')): true
     - name: cannot-get-secrets-in-tenant-ns
       try:
         - script:

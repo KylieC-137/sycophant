@@ -14,7 +14,7 @@ and `tenant-resource-protection/` (which is per-tenant).
 | suspend-command-scales-to-zero/          | The suspend mutate scales the tenant Deployments to zero               |
 | background-controller-holds-namespace-create/ | The Kyverno bg-controller role grants create on Namespaces + ResourceQuotas |
 | provision-tenant-command-materializes-installer/ | LIVE: an admitted tenant provision command materializes the uid-named SA+Job+RoleBinding installer set; the Job succeeds; the Job deletes the command |
-| workspace-sa-name-forms/                | Every rendered `sycophant.md/type=workspace-sa` SA is named `harness-<ws>`, `unprivileged-<ws>`, or `<ws>-workspace-init` (in sync with WORKSPACE_SA_PREFIXES) |
+| workspace-sa-name-forms/                | Every rendered `sycophant.md/type=workspace-sa` SA is named `ws-<ws>`, `ws-<ws>-unprivileged`, or `ws-<ws>-init` (in sync with WORKSPACE_PREFIX and UNPRIVILEGED_SA_SUFFIX) |
 
 Belongs here: chainsaw assertions on the shape or render-time naming of
 resources shipped by the charts (sycophant-cluster, sycophant-gvisor,

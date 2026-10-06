@@ -1,7 +1,7 @@
 //! Toolset config and tool-call validation. `CapabilityGrant` pairs one Secret
 //! with one egress destination, `ToolsetConfig`/`ToolsetEntry` carry each
 //! toolset's image, runtime shape and tools (merged live from the per-toolset
-//! `toolset-<name>` ConfigMaps the harness watches), and `validate_call_input`
+//! `ts-<name>` ConfigMaps the harness watches), and `validate_call_input`
 //! checks an LLM's arguments against a tool's `ArgDecl`s.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -74,7 +74,7 @@ impl TryFrom<RawGrant> for CapabilityGrant {
 }
 
 /// The live toolset table, keyed by the `app.kubernetes.io/name` label of each
-/// `toolset-<name>` ConfigMap labelled `sycophant.md/type: toolset`.
+/// `ts-<name>` ConfigMap labelled `sycophant.md/type: toolset`.
 #[derive(Clone, Default)]
 pub struct ToolsetConfig {
     map: HashMap<String, ToolsetEntry>,

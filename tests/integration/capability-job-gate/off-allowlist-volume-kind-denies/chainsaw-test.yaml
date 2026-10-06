@@ -4,7 +4,7 @@ metadata:
   name: off-allowlist-volume-kind-denies
 spec:
   description: |
-    A Job created under `harness-<ws>` whose pod template declares a volume of a
+    A Job created under `ws-<ws>` whose pod template declares a volume of a
     kind outside the six-kind safe set (configMap, secret, projected, emptyDir,
     downwardAPI, the workspace persistentVolumeClaim) is denied. The creator
     submits a `csi` volume -- the secrets-store side channel the volume-kind
@@ -45,7 +45,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-probe" -n "$TENANT_NS" -f -
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:ws-probe" -n "$TENANT_NS" -f -
               apiVersion: batch/v1
               kind: Job
               metadata:
@@ -57,7 +57,7 @@ spec:
                       sycophant.md/job-kind: tool
                   spec:
                     restartPolicy: Never
-                    serviceAccountName: unprivileged-probe
+                    serviceAccountName: ws-probe-unprivileged
                     volumes:
                       - name: side-channel
                         csi:

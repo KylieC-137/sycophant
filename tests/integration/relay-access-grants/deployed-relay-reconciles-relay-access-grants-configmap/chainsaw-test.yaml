@@ -29,8 +29,8 @@ spec:
                 --show-only templates/relay-ctrl.yaml \
                 --show-only templates/relay-ctrl-rbac.yaml \
                 | kubectl apply -n "$NS" -f -
-              helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n "$NS" \
-                --set render=workspace --set name=probe \
+              helm template probe "$REPO_ROOT/charts/sycophant-workspace" -n "$NS" \
+                --set name=probe \
                 --set-json 'command={"toolsets":"stdlib"}' \
                 --show-only templates/relay-toolset-grants-cm.yaml \
                 | kubectl apply -n "$NS" -f -

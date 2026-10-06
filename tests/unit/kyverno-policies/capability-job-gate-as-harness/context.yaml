@@ -7,7 +7,7 @@ spec:
     - apiVersion: v1
       kind: ConfigMap
       metadata:
-        name: model-deepseek
+        name: inf-deepseek
         namespace: tenant-offline
         labels:
           sycophant.md/type: model

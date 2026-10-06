@@ -52,10 +52,10 @@ spec:
               kubectl create namespace "$TENANT_NS"
               REPO_ROOT=$(git rev-parse --show-toplevel)
               COMMAND=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
-              helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+              helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-inference" \
                 --show-only templates/inference.yaml \
                 -n "$TENANT_NS" \
-                --set render=inference --set name=local \
+                --set name=local \
                 --set-json "command=$COMMAND" \
                 | kubectl apply -f -
     - name: assert-inference-pod-shape
@@ -107,10 +107,10 @@ spec:
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
               COMMAND=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
-              out=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+              out=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-inference" \
                 --show-only templates/inference.yaml \
                 -n "$TENANT_NS" \
-                --set render=inference --set name=local \
+                --set name=local \
                 --set-json "command=$COMMAND")
 
               pod=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \

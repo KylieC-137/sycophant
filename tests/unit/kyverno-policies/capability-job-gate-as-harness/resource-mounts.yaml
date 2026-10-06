@@ -10,11 +10,11 @@ spec:
         sycophant.md/job-kind: tool
     spec:
       restartPolicy: Never
-      serviceAccountName: unprivileged-research
+      serviceAccountName: ws-research-unprivileged
       volumes:
         - name: workspace
           persistentVolumeClaim:
-            claimName: workspace-data-research
+            claimName: ws-research-data
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9
@@ -35,11 +35,11 @@ spec:
         sycophant.md/workspace: other
     spec:
       restartPolicy: Never
-      serviceAccountName: unprivileged-research
+      serviceAccountName: ws-research-unprivileged
       volumes:
         - name: workspace
           persistentVolumeClaim:
-            claimName: workspace-data-other
+            claimName: ws-other-data
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9
@@ -59,11 +59,11 @@ spec:
         sycophant.md/job-kind: tool
     spec:
       restartPolicy: Never
-      serviceAccountName: unprivileged-research
+      serviceAccountName: ws-research-unprivileged
       volumes:
         - name: history
           persistentVolumeClaim:
-            claimName: conversation-data-research
+            claimName: ws-research-conversation
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9
@@ -83,7 +83,7 @@ spec:
         sycophant.md/job-kind: tool
     spec:
       restartPolicy: Never
-      serviceAccountName: unprivileged-research
+      serviceAccountName: ws-research-unprivileged
       volumes:
         - name: bindings
           configMap:
@@ -107,7 +107,7 @@ spec:
         sycophant.md/job-kind: tool
     spec:
       restartPolicy: Never
-      serviceAccountName: unprivileged-research
+      serviceAccountName: ws-research-unprivileged
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9
@@ -130,7 +130,7 @@ spec:
         sycophant.md/job-kind: tool
     spec:
       restartPolicy: Never
-      serviceAccountName: unprivileged-research
+      serviceAccountName: ws-research-unprivileged
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9

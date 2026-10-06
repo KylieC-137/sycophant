@@ -15,8 +15,8 @@ spec:
               set -euo pipefail
               REPO_ROOT=$(git rev-parse --show-toplevel)
               render=$(mktemp)
-              helm template t "$REPO_ROOT/charts/sycophant-tenant" -n tenant-1 \
-                --set render=workspace --set name=research \
+              helm template t "$REPO_ROOT/charts/sycophant-workspace" -n tenant-1 \
+                --set name=research \
                 --set-string 'harness.instructions.endpoint=seaweedfs.sycophant-system.svc.cluster.local:8333' \
                 > "$render"
               python3 - "$render" <<'PY'
@@ -26,8 +26,8 @@ spec:
               STORE_NS = HOST.split(".")[1]   # chart derives store ns from the endpoint host
 
               cnps = [d for d in docs if d.get("kind") == "CiliumNetworkPolicy"
-                      and (d.get("metadata") or {}).get("name") == "harness-egress-research"]
-              assert len(cnps) == 1, f"expected one harness-egress-research CNP, got {len(cnps)}"
+                      and (d.get("metadata") or {}).get("name") == "ws-research-egress"]
+              assert len(cnps) == 1, f"expected one ws-research-egress CNP, got {len(cnps)}"
               egress = ((cnps[0].get("spec") or {}).get("egress")) or []
 
               dns = []

@@ -16,8 +16,7 @@ installed BEFORE Kyverno (Kyverno's startup sanity check refuses to come Ready
 without its CRDs). The hobbyist script installs it; DevOps users install it
 manually before installing Kyverno.
 
-`sycophant-tenant` is NOT bundled — that's per-tenant, provisioned separately
-with `syco tenant up`, possibly multiple times.
+The per-tenant charts are NOT bundled; each tenant's components are provisioned separately.
 
 ## Prerequisites
 

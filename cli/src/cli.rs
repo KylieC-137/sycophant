@@ -24,6 +24,8 @@ pub(crate) enum Command {
     User(UserCmd),
     /// Install or remove one model through its provision and reap commands
     Inference(ComponentCmd),
+    /// Install or remove one channel through its provision and reap commands
+    Channel(ComponentCmd),
 }
 
 // --- setup / destroy (cluster — no --ns) ---
@@ -202,7 +204,7 @@ impl Values {
     }
 }
 
-// --- components (toolset, workspace, inference) ---
+// --- components (toolset, workspace, inference, channel) ---
 
 #[derive(Args)]
 pub(crate) struct ComponentCmd {

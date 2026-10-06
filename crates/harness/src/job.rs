@@ -365,7 +365,7 @@ pub(crate) fn build_tool_job(
                     // unprivileged SA so the pod presents the toolset-audience
                     // projected token, not the namespace default SA token, and
                     // carries no RBAC of its own.
-                    service_account_name: Some(format!("unprivileged-{workspace_name}")),
+                    service_account_name: Some(shared::auth::unprivileged_sa(workspace_name)),
                     automount_service_account_token: Some(false),
                     security_context: Some(PodSecurityContext {
                         run_as_non_root: Some(true),
@@ -608,7 +608,7 @@ pub(crate) fn build_inference_job(
                     // Run as the workspace unprivileged SA the gate pins; the pod
                     // authenticates no outbound sycophant call, so it mounts no
                     // projected token.
-                    service_account_name: Some(format!("unprivileged-{workspace_name}")),
+                    service_account_name: Some(shared::auth::unprivileged_sa(workspace_name)),
                     automount_service_account_token: Some(false),
                     security_context: Some(PodSecurityContext {
                         run_as_non_root: Some(true),
@@ -673,20 +673,20 @@ mod tests {
             "test-ns",
             "capability-test",
             "test",
-            "workspace-data-test",
+            "ws-test-data",
             &SchedulingConfig::default(),
             None,
         )
     }
 
-    /// The harness-created capability-job pod runs as `unprivileged-<workspace>`, the
+    /// The harness-created capability-job pod runs as `ws-<workspace>-unprivileged`, the
     /// zero-RBAC run identity the gate pins.
     #[test]
     fn harness_tool_job_runs_as_unprivileged_workspace_sa() {
         let job = test_job();
         assert_eq!(
             pod_spec(&job).service_account_name.as_deref(),
-            Some("unprivileged-test"),
+            Some("ws-test-unprivileged"),
         );
     }
 
@@ -716,7 +716,7 @@ mod tests {
             // The former dispatch-addr slot now carries the headless Service.
             "capability-test",
             "test",
-            "workspace-data-test",
+            "ws-test-data",
             &SchedulingConfig::default(),
             Some(("git", &grant)),
         );
@@ -830,7 +830,7 @@ mod tests {
             "the model label must be the resolver key the egress policy selects on",
         );
         // The key is not the provider model id. Stamping `config.model()` here
-        // would label the pod for a model no inference-egress CNP is named for.
+        // would label the pod for a model no inference egress CNP is named for.
         assert_ne!(
             labels.get("sycophant.md/model").map(String::as_str),
             Some("deepseek/deepseek-v4-flash"),
@@ -846,7 +846,7 @@ mod tests {
         let spec = pod_spec(&test_inference_job(None)).clone();
         assert_eq!(
             spec.service_account_name.as_deref(),
-            Some("unprivileged-test"),
+            Some("ws-test-unprivileged"),
         );
         assert_eq!(spec.automount_service_account_token, Some(false));
     }

@@ -74,10 +74,13 @@ spec:
             content: |
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
-                --set-string channels.app.kind=app \
-                --set-string channels.app.loginServer=https://hs.example.test 2>&1) \
-                || { echo "tenant chart must render with an app channel"; printf '%s\n' "$out" >&2; exit 1; }
+              base=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns 2>&1) \
+                || { echo "tenant chart must render offline"; printf '%s\n' "$base" >&2; exit 1; }
+              channel=$(helm template channel "$REPO_ROOT/charts/sycophant-channel" -n probe-ns \
+                --set-string name=app --set-string command.kind=app \
+                --set-string command.loginServer=https://hs.example.test 2>&1) \
+                || { echo "channel chart must render with an app channel"; printf '%s\n' "$channel" >&2; exit 1; }
+              out=$(printf '%s\n---\n%s\n' "$base" "$channel")
 
               # Every rule of every Role bound to relay-controller: no spawn powers.
               roles=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \

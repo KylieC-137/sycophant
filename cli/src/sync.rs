@@ -7,14 +7,19 @@ use crate::assets;
 use crate::scope::Scope;
 
 pub(crate) fn extract_assets(scope: &Scope) -> Result<(), String> {
-    for (dir, embedded) in [
-        (scope.cluster_chart_dir(), &assets::CLUSTER_CHART),
-        (scope.tenant_chart_dir(), &assets::TENANT_CHART),
-        (scope.gvisor_chart_dir(), &assets::GVISOR_CHART),
-        (scope.dex_chart_dir(), &assets::DEX_CHART),
-        (scope.kyverno_crds_chart_dir(), &assets::KYVERNO_CRDS_CHART),
+    for (name, embedded) in [
+        ("sycophant-cluster", &assets::CLUSTER_CHART),
+        ("sycophant-tenant", &assets::TENANT_CHART),
+        ("sycophant-workspace", &assets::WORKSPACE_CHART),
+        ("sycophant-inference", &assets::INFERENCE_CHART),
+        ("sycophant-toolset", &assets::TOOLSET_CHART),
+        ("sycophant-user", &assets::USER_CHART),
+        ("sycophant-channel", &assets::CHANNEL_CHART),
+        ("sycophant-gvisor", &assets::GVISOR_CHART),
+        ("sycophant-dex", &assets::DEX_CHART),
+        ("kyverno-crds", &assets::KYVERNO_CRDS_CHART),
     ] {
-        extract(&dir, embedded)?;
+        extract(&scope.chart_dir(name), embedded)?;
     }
 
     fs::write(scope.version_file(), assets::version())

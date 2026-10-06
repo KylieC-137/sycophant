@@ -1,0 +1,5 @@
+apiVersion: v2
+name: sycophant-user
+description: One provision-identity RoleBinding per bound identity, installed from a user provision command.
+version: 0.1.0
+appVersion: "0.1.0"

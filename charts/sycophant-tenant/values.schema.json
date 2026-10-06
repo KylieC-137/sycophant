@@ -3,35 +3,12 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "render": {
-      "type": "string",
-      "enum": ["base", "workspace", "user", "toolset", "channel", "inference"],
-      "description": "Which slice of the chart this release renders; see values.yaml."
-    },
-    "name": {
-      "type": "string",
-      "description": "The component name a capability provision command carries as its name suffix. The installer sets it from the command name."
-    },
-    "command": {
-      "type": "object",
-      "description": "A capability provision command's flat data, verbatim. The installer sets it from the command.",
-      "additionalProperties": { "type": "string" }
-    },
-    "users": {
-      "type": "array",
-      "description": "Full issuer-prefixed identity subjects `<issuer>#<sub>`, operator-supplied, one per identity granted this tenant. When non-empty, the chart renders a RoleBinding granting those users the provision-identity ClusterRole in this namespace. Empty renders no binding. The prefix is enforced: cluster-protect-security selects tenant-scoped callers by it, so a subject without one would hold the provision-identity verbs while sitting outside the policy's reach. Neither the issuer nor the sub may carry a quote, backslash, control character, or Unicode line or paragraph separator, matching the user command's admission rule.",
-      "items": { "type": "string", "pattern": "^https?://[^#\"\\\\\\p{Cc}\\x{2028}\\x{2029}]+#[^\"\\\\\\p{Cc}\\x{2028}\\x{2029}]+$" }
-    },
     "namespace": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "create": { "type": "boolean" }
       }
-    },
-    "storageClass": {
-      "type": "string",
-      "description": "StorageClass for all tenant PVCs. Empty uses the cluster default StorageClass."
     },
     "relay": {
       "type": "object",
@@ -46,30 +23,6 @@
         }
       }
     },
-    "harness": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["image", "tag"],
-      "properties": {
-        "image": { "type": "string" },
-        "tag": { "type": "string" },
-        "pullPolicy": {
-          "type": "string",
-          "enum": ["Always", "IfNotPresent", "Never"]
-        },
-        "instructions": {
-          "type": "object",
-          "additionalProperties": false,
-          "description": "Object-storage delivery of instruction content. The harness init container syncs each workspace's prefix from this endpoint/bucket using the named read-only credential; the serving container mounts the result read-only and holds no credential.",
-          "properties": {
-            "endpoint": { "type": "string", "description": "Cross-namespace Service address (host:port) of the shared cluster object store the sync init container reaches. The harness egress netpol reads the store namespace from this host." },
-            "bucket": { "type": "string", "description": "Bucket holding every workspace's instruction tree." },
-            "credentialName": { "type": "string", "description": "Name of the Secret carrying the read-only, prefix-scoped sync credential, which the operator creates in the tenant namespace. Mounted into the init container only." },
-            "syncImage": { "type": "string", "description": "Image for the object-storage sync init container (carries the sync client)." }
-          }
-        }
-      }
-    },
     "installWait": {
       "type": "object",
       "additionalProperties": false,
@@ -80,80 +33,6 @@
         "pullPolicy": {
           "type": "string",
           "enum": ["Always", "IfNotPresent", "Never"]
-        }
-      }
-    },
-    "workspaceInit": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["image", "tag"],
-      "properties": {
-        "image": { "type": "string" },
-        "tag": { "type": "string" },
-        "pullPolicy": {
-          "type": "string",
-          "enum": ["Always", "IfNotPresent", "Never"]
-        }
-      }
-    },
-    "headscale": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": { "type": "boolean" },
-        "image": { "type": "string" },
-        "tag": { "type": "string" },
-        "pullPolicy": {
-          "type": "string",
-          "enum": ["Always", "IfNotPresent", "Never"]
-        },
-        "serverUrl": {
-          "type": "string",
-          "description": "Public URL clients use to reach headscale. Required when enabled=true."
-        },
-        "magicDns": { "type": "boolean" },
-        "baseDomain": { "type": "string" },
-        "acme": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "enabled": { "type": "boolean" },
-            "email": {
-              "type": "string",
-              "description": "Email registered with Let's Encrypt. Required when acme.enabled=true."
-            }
-          }
-        }
-      }
-    },
-    "channels": {
-      "type": "object",
-      "description": "Channel instances this tenant serves. The map key is the instance name and becomes the pod's sycophant.md/channel label; presence in the map is the enable signal.",
-      "additionalProperties": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["kind"],
-        "properties": {
-          "kind": {
-            "type": "string",
-            "enum": ["app"],
-            "description": "Channel kind. Only \"app\" is supported."
-          },
-          "image": { "type": "string" },
-          "tag": { "type": "string" },
-          "pullPolicy": {
-            "type": "string",
-            "enum": ["Always", "IfNotPresent", "Never"]
-          },
-          "loginServer": {
-            "type": "string",
-            "description": "Headscale URL the adapter joins. Required."
-          },
-          "hostname": { "type": "string" },
-          "authKeySecret": {
-            "type": "string",
-            "description": "Pre-existing Secret with key `authkey` (headscale pre-auth key)."
-          }
         }
       }
     }

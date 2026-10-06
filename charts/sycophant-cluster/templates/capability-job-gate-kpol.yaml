@@ -1,6 +1,6 @@
 {{- if include "sycophant.renderKyverno" . }}
 # Identity-keyed admission gate on Job CREATE. Keys on the creator's
-# authenticated username (system:serviceaccount:<ns>:harness-<workspace>). On
+# authenticated username (system:serviceaccount:<ns>:ws-<workspace>). On
 # that event it mutates the Job's pod template into the hardened isolation
 # envelope, stamps the security labels from the identity, and validates the
 # result -- denying the Job on a missing envelope element, an off-allowlist
@@ -168,16 +168,16 @@ spec:
     - name: grants
       expression: >-
         resource.get("v1", "configmaps", request.namespace,
-          "capability-grants-" + variables.workspace).?data.orValue({})
+          "ws-" + variables.workspace + "-capability-grants").?data.orValue({})
     # An inference Job may also reference the one Secret named by the `secret`
-    # key of its own model's ConfigMap, `model-<key>`, where `<key>` is the
+    # key of its own model's ConfigMap, `inf-<key>`, where `<key>` is the
     # Job's model label. Only that model's install writes the ConfigMap.
     - name: modelSecret
       expression: >-
         object.spec.template.metadata.?labels["sycophant.md/job-kind"].orValue("") == "inference"
           && object.spec.template.metadata.?labels["sycophant.md/model"].orValue("") != ""
           ? resource.get("v1", "configmaps", request.namespace,
-              "model-" + object.spec.template.metadata.labels["sycophant.md/model"]).?data.secret.orValue("")
+              "inf-" + object.spec.template.metadata.labels["sycophant.md/model"]).?data.secret.orValue("")
           : ""
     - name: allowed
       expression: >-
@@ -209,19 +209,19 @@ spec:
         capability-job pod volumes must be one of configMap, secret, projected,
         emptyDir, downwardAPI, or persistentVolumeClaim.
     # The workspace's data PVC is the only claim a tool job mounts, and its name
-    # is fixed by the chart as `workspace-data-<workspace>`. Deriving the
+    # is fixed by the chart as `ws-<workspace>-data`. Deriving the
     # approved name from the creating identity rather than reading it from a
     # ConfigMap leaves no name to drift and no context source to go missing.
-    # Naming the claim outright is what keeps `conversation-data-<workspace>`
+    # Naming the claim outright is what keeps `ws-<workspace>-conversation`
     # out: the harness's conversation history must never be reachable from the
     # untrusted runtime, which could otherwise forge it.
     - expression: >-
         variables.volumes.all(v,
           !has(v.persistentVolumeClaim)
-            || v.persistentVolumeClaim.claimName == "workspace-data-" + variables.workspace)
+            || v.persistentVolumeClaim.claimName == "ws-" + variables.workspace + "-data")
       message: >-
         capability-job may mount only its own workspace's data PVC; every
-        persistentVolumeClaim.claimName must be workspace-data-<workspace>.
+        persistentVolumeClaim.claimName must be ws-<workspace>-data.
     # The harness mounts no ConfigMap into a tool job, so the approved set is
     # empty and every reference is denied. Covers the same sites the Secret
     # allowlist covers, because each is a way to read a ConfigMap's contents:
@@ -238,7 +238,7 @@ spec:
         capability-job must not reference a ConfigMap: none is approved for a
         tool job, so any reference names data the job has no business reading.
     - expression: >-
-        variables.pod.?serviceAccountName.orValue("") == "unprivileged-" + variables.workspace
+        variables.pod.?serviceAccountName.orValue("") == "ws-" + variables.workspace + "-unprivileged"
       message: >-
         capability-job pod template must set serviceAccountName to the workspace's
         unprivileged pod ServiceAccount.

@@ -1,0 +1,50 @@
+# The workspace provision command's name suffix and flat data, set by the
+# installer. The command carries `toolsets` and `models` (comma lists),
+# `storage`, and `grant.<toolset>.<grant>.<secret|path|egress>`.
+name: ""
+command: {}
+
+# PVC storage class for the workspace PVCs (workspace data and conversation
+# history). Empty/absent uses the cluster's default
+# StorageClass. Set this on clusters that have no default StorageClass
+# (otherwise PVCs hang Pending and nothing starts).
+storageClass: ""
+
+# Container images. Pre-1.0: defaults are LOCAL builds (tag: local,
+# pullPolicy: Never). No images are published yet — build them and load
+# them onto your nodes (e.g. `k3d image import`), or override these to
+# your own registry refs to pull instead.
+
+# Harness -- agent runtime. Watches the toolset and model ConfigMaps and
+# dispatches tool and LLM calls in-process. Stateless.
+harness:
+  image: sycophant-harness
+  tag: local
+  pullPolicy: Never
+  instructions:
+    # Object-storage delivery of instruction content. At
+    # pod start the harness init container syncs this workspace's prefix from
+    # <bucket>/<namespace>/<workspace> at <endpoint> into an emptyDir the serving
+    # container mounts read-only. The read-only, prefix-scoped credential
+    # (credentialName, a Secret the operator provides) is mounted into the
+    # init container ONLY; the serving container holds no credential.
+    #
+    # The store is one shared cluster component in the operator-owned system
+    # namespace (charts/sycophant-objectstore), not a per-tenant instance. The
+    # endpoint is its cross-namespace Service address; the harness egress netpol
+    # reads the namespace from this host to admit the store pod. The store-side
+    # ingress lock (harness-only) lives in the objectstore chart, so the tenant
+    # side carries only the harness egress permission.
+    endpoint: seaweedfs.sycophant-system.svc.cluster.local:8333
+    bucket: sycophant-instructions
+    credentialName: instructions-reader
+    # The init container's `rclone sync` mirrors the prefix into the emptyDir.
+    syncImage: rclone/rclone:1.75.1
+
+# workspace-init: per-workspace one-shot Job that seeds the workspace PVC
+# (git init + baseline). Runs the toolset-runtime entrypoint baked into
+# toolset-git.
+workspaceInit:
+  image: toolset-git
+  tag: local
+  pullPolicy: Never

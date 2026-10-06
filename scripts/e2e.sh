@@ -87,7 +87,7 @@ RCLONE_IMAGE="rclone/rclone:1.75.1"
 SUDO_PENDING_SENTINEL="/tmp/sycophant-e2e-sudo-pending"
 # The in-cluster inference model key, examples/inference/local.yaml. Its
 # `server` block makes the chart render the llama.cpp Deployment, its Service and
-# its ingress fence (CNP inference-<key>). Every local model serves on the fixed
+# its ingress fence (CNP inf-<key>). Every local model serves on the fixed
 # port 8080.
 INFERENCE_PROFILE="local"
 INFERENCE_PORT="8080"
@@ -351,14 +351,14 @@ step_1_build() {
 
   docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" images/kubectl/ -t sycophant-kubectl:local >/dev/null
 
-  # provisioner bakes the tenant chart, so its build context is the repo root.
+  # provisioner bakes the component charts, so its build context is the repo root.
   docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" -f images/provisioner/Dockerfile "$REPO_ROOT" -t sycophant-provisioner:local >/dev/null
 
   # llama-server is a third-party engine: pulled by digest from trusted upstream,
   # never built here. --platform pins one arch so k3d import gets a single-arch
   # manifest, not a multi-arch index with absent per-platform blobs.
-  # Operator places this GGUF here; source: https://huggingface.co/bartowski/MiniCPM5-2B-GGUF (MiniCPM5-2B-Q4_K_M.gguf)
-  local GGUF_PATH="${GGUF_PATH:-${HOME}/.cache/sycophant/weights/MiniCPM5-2B-Q4_K_M.gguf}"
+  # Operator places this GGUF here; source: https://huggingface.co/unsloth/Qwen3.5-2B-GGUF (Qwen3.5-2B-Q4_K_M.gguf)
+  local GGUF_PATH="${GGUF_PATH:-${HOME}/.cache/sycophant/weights/Qwen3.5-2B-Q4_K_M.gguf}"
   # The inference container limit must clear the mmap'd model plus its KV cache
   # and runtime, or llama.cpp OOMKills mid-load (exit 137). The model default
   # lives here; the limit is server.memory in examples/inference/local.yaml.
@@ -670,8 +670,8 @@ POD
   local model
   for model in "$REMOTE_MODEL" "$INFERENCE_PROFILE"; do
     "$SYCO" inference up -f "$REPO_ROOT/examples/inference/${model}.yaml"
-    kubectl get configmap "model-${model}" -n "$NAMESPACE" >/dev/null 2>&1 \
-      || { warn "model ConfigMap model-${model} missing after its install"; exit 1; }
+    kubectl get configmap "inf-${model}" -n "$NAMESPACE" >/dev/null 2>&1 \
+      || { warn "model ConfigMap inf-${model} missing after its install"; exit 1; }
   done
   ok "syco inference up: ${REMOTE_MODEL} and ${INFERENCE_PROFILE} model provision commands installed"
 
@@ -685,25 +685,26 @@ POD
     write_toolset_image "$name" "$img"
     "$SYCO" toolset up -f "$REPO_ROOT/examples/toolsets/${name}/values.yaml" \
       -f "$VALUES_DIR/toolset-${name}-image.yaml"
-    [ -n "$(kubectl get configmap "toolset-${name}" -n "$NAMESPACE" \
+    [ -n "$(kubectl get configmap "ts-${name}" -n "$NAMESPACE" \
       -o 'jsonpath={.data.image}' 2>/dev/null)" ] \
-      || { warn "toolset ConfigMap toolset-${name} missing or has no image after its install"; exit 1; }
+      || { warn "toolset ConfigMap ts-${name} missing or has no image after its install"; exit 1; }
   done
   ok "syco toolset up: stdlib, workspace-ro and ssh-credentials toolset provision commands installed"
 
   # The workspace and its bound user are one provision command each.
   "$SYCO" workspace up -f "$REPO_ROOT/examples/workspaces/hello-world.yaml"
-  kubectl get deploy hello-world -n "$NAMESPACE" >/dev/null 2>&1 \
+  kubectl get deploy ws-hello-world -n "$NAMESPACE" >/dev/null 2>&1 \
     || { warn "hello-world harness Deployment missing after its install"; exit 1; }
   "$SYCO" user up -f "$REPO_ROOT/examples/users/alice.yaml" \
     --set "user.subject=${APISERVER_OIDC_ISSUER}#${TENANT_A_USER_SUB}"
   ok "syco workspace up and syco user up: hello-world and its bound user installed"
 
-  # The app channel installs host-side after the base: its adapter needs a
-  # pre-auth key minted from the tenant's own headscale.
-  helm upgrade --install channel-app "$REPO_ROOT/charts/sycophant-tenant" -n "$NAMESPACE" \
-    --set render=channel -f "$REPO_ROOT/docs/e2e/channel-values.yaml" >/dev/null
-  ok "app channel slice installed"
+  # The app channel is one provision command, after the base: its adapter needs
+  # a pre-auth key minted from the tenant's own headscale.
+  "$SYCO" channel up -f "$REPO_ROOT/examples/channels/app.yaml"
+  kubectl get deploy headscale -n "$NAMESPACE" >/dev/null 2>&1 \
+    || { warn "headscale Deployment missing after the channel install"; exit 1; }
+  ok "syco channel up: headscale and the app channel installed"
   step_3_headscale_authkey
 
   # Grant rows are runtime data, not chart config: the operator writes them
@@ -731,9 +732,9 @@ EOF
   # `relay-ingress` is the ONE object carrying every relay ingress rule; its
   # whole-object absence is the only way the relay fails open, so the run
   # hard-fails on it.
-  # inference-egress-<remote> is the vendor model's job egress hole;
-  # inference-local is the in-cluster model pod's own ingress+DNS fence.
-  for cnp in "inference-egress-${REMOTE_MODEL}" "inference-${INFERENCE_PROFILE}" relay-ingress; do
+  # inf-<remote> is the vendor model's job egress hole;
+  # inf-<profile> is the in-cluster model pod's own ingress+DNS fence.
+  for cnp in "inf-${REMOTE_MODEL}" "inf-${INFERENCE_PROFILE}" relay-ingress; do
     if kubectl get ciliumnetworkpolicy "$cnp" -n "$NAMESPACE" >/dev/null 2>&1; then
       ok "CNP present: $cnp"
     else
@@ -748,9 +749,9 @@ EOF
   # the pod and emits a FailedCreate event citing the policy. So assert the
   # inference pod was admitted (a Pod object exists) and that no ReplicaSet in
   # the namespace reports an admission denial.
-  wait_for "inference-${INFERENCE_PROFILE} pod admitted" 60 \
+  wait_for "inf-${INFERENCE_PROFILE} pod admitted" 60 \
     "kubectl get pod -n '$NAMESPACE' -l app.kubernetes.io/component=inference,app.kubernetes.io/name=${INFERENCE_PROFILE} -o name 2>/dev/null | grep -q ." \
-    || { warn "no pod for inference-${INFERENCE_PROFILE} — the ReplicaSet could not create one (admission?)"; \
+    || { warn "no pod for inf-${INFERENCE_PROFILE} — the ReplicaSet could not create one (admission?)"; \
          kubectl get events -n "$NAMESPACE" --field-selector reason=FailedCreate 2>/dev/null | tail -5 >&2; exit 1; }
   if kubectl get events -n "$NAMESPACE" --field-selector reason=FailedCreate 2>/dev/null \
        | grep -qiE 'denied|policy|automountServiceAccountToken'; then
@@ -799,7 +800,7 @@ step_4_verify() {
   # the Deployment becoming Available rather than a specific pod name,
   # since the pod name now carries a ReplicaSet suffix.
   kubectl wait -n "$NAMESPACE" --for=condition=Available --timeout=180s \
-    deployment/hello-world >/dev/null
+    deployment/ws-hello-world >/dev/null
   ok "hello-world workspace Ready"
 
   # The in-cluster inference server must reach Available and stay healthy: the
@@ -807,7 +808,7 @@ step_4_verify() {
   # workload — the copy init container writes the multi-gigabyte GGUF into the
   # emptyDir, then the server memory-maps it on CPU — so the timeout is generous.
   kubectl wait -n "$NAMESPACE" --for=condition=Available --timeout=600s \
-    "deployment/inference-${INFERENCE_PROFILE}" >/dev/null
+    "deployment/inf-${INFERENCE_PROFILE}" >/dev/null
   ok "in-cluster inference server (${INFERENCE_PROFILE}) Available"
 
   # Workspace-init Job must COMPLETE: it binds the workspace PVC (first
@@ -938,7 +939,7 @@ step_5_flutter_macos() {
   printf '  Server:           %s\n' "$TAILNET_RELAY_ADDR"
   printf '  Workspace:        hello-world\n'
   printf '  Grant code:       %s\n' "$code"
-  printf '  In-cluster model: %s  (a turn requesting this model routes to the inference-%s Service)\n' "$INFERENCE_PROFILE" "$INFERENCE_PROFILE"
+  printf '  In-cluster model: %s  (a turn requesting this model routes to the inf-%s Service)\n' "$INFERENCE_PROFILE" "$INFERENCE_PROFILE"
   printf '\033[1;35m===============================================\033[0m\n'
   printf 'The tailnet was joined automatically for this run.\n'
   printf 'If the app opens at the chat screen with stale credentials, tap Sign Out first.\n'
@@ -963,7 +964,7 @@ step_5_backend_only() {
   printf '    Namespace:       %s\n' "$NAMESPACE" >&2
   printf '    Client:          %s\n' "$CLIENT_NAME" >&2
   printf '    Grant code:      %s\n' "$code" >&2
-  printf '    In-cluster model:%s  (routes to the inference-%s Service)\n' "$INFERENCE_PROFILE" "$INFERENCE_PROFILE" >&2
+  printf '    In-cluster model:%s  (routes to the inf-%s Service)\n' "$INFERENCE_PROFILE" "$INFERENCE_PROFILE" >&2
 
   pause "From the other machine, point the app at ${addr}, enroll with the code
    above. If the app was enrolled against a prior run, sign out first: this run
@@ -1039,7 +1040,7 @@ step_6_security() {
 
   # Scan for real API-key prefixes in two sinks:
   #   1. harness stdout (kubectl logs)
-  #   2. conversation log files on the harness's conversation-data PVC
+  #   2. conversation log files on the harness's ws-<ws>-conversation PVC
   # Patterns match a prefix + length floor — `sk-ant-` + 50+ base64 chars
   # for Anthropic, `sk-` + 40+ for generic OpenAI-style. The length floor
   # avoids false positives on the bare strings "sk-" or "sk-ant-" appearing
@@ -1047,16 +1048,16 @@ step_6_security() {
   local key_regex='sk-ant-[A-Za-z0-9_-]{50,}|sk-[A-Za-z0-9_-]{40,}'
 
   local harness_hits
-  harness_hits="$(kubectl logs -n "$NAMESPACE" deployment/hello-world -c harness --tail=10000 2>/dev/null \
+  harness_hits="$(kubectl logs -n "$NAMESPACE" deployment/ws-hello-world -c harness --tail=10000 2>/dev/null \
                         | grep -cE "$key_regex" || true)"
 
   # The conversation log is on the harness's OWN RWO PVC
-  # (conversation-data-<ws> at /var/lib/harness/conversations). A separate
+  # (ws-<ws>-conversation at /var/lib/harness/conversations). A separate
   # pod can't mount an RWO PVC, and the harness image is FROM scratch (no
   # shell), so attach an ephemeral busybox to the harness pod sharing its
   # PID namespace and read the dir via /proc/1/root. (Fallback if a hardened
   # node blocks /proc/1/root via ptrace_scope: scale the harness to 0,
-  # mount conversation-data-<ws> RO in a probe pod, grep, then scale back to 1.)
+  # mount ws-<ws>-conversation RO in a probe pod, grep, then scale back to 1.)
   local tb_pod scrub_c patch
   tb_pod="$(kubectl get pod -n "$NAMESPACE" \
     -l app.kubernetes.io/component=harness,sycophant.md/workspace=hello-world \
@@ -1167,7 +1168,7 @@ step_6_security() {
   # just one of them.
   local workspace_sas sa
   workspace_sas="$(kubectl get serviceaccounts -n "$NAMESPACE" -l sycophant.md/type=workspace-sa -o name)"
-  for sa in harness-hello-world unprivileged-hello-world hello-world-workspace-init; do
+  for sa in ws-hello-world ws-hello-world-unprivileged ws-hello-world-init; do
     if ! printf '%s\n' "$workspace_sas" | grep -qx "serviceaccount/${sa}"; then
       warn "${sa} ServiceAccount missing"
       return 1
@@ -1281,7 +1282,7 @@ step_6_adapter_port_fence() {
 # timings and cgroup; they are informational and never fail the run.
 step_6_inference_fence() {
   step "In-cluster inference fence (${INFERENCE_PROFILE})"
-  local svc="inference-${INFERENCE_PROFILE}.${NAMESPACE}.svc.cluster.local"
+  local svc="inf-${INFERENCE_PROFILE}.${NAMESPACE}.svc.cluster.local"
 
   # --- L3/L4: reachable only by the harness, which dials the warm Service ---
   inference_l4_probe() {
@@ -1317,7 +1318,7 @@ step_6_inference_fence() {
   # --- L7: the HTTP allowlist closes every route but the two completions ---
   # One labelled pod probes /metrics, /slots and a completion, printing a status
   # line per route plus the server's response so the host can parse it. The pod
-  # carries the harness label, so harness-egress grants it egress to the
+  # carries the harness label, so ws-<ws>-egress grants it egress to the
   # inference endpoint and DNS for the Service FQDN.
   kubectl delete pod inference-l7-probe -n "$NAMESPACE" --ignore-not-found --wait=true >/dev/null 2>&1
   kubectl apply -n "$NAMESPACE" -f - >/dev/null <<POD
@@ -1408,7 +1409,7 @@ POD
   local prompt_ms rate mem
   prompt_ms="$(printf '%s' "$out" | sed -n 's/.*"prompt_ms":\([0-9.]*\).*/\1/p' | head -1)"
   rate="$(printf '%s' "$out" | sed -n 's/.*"predicted_per_second":\([0-9.]*\).*/\1/p' | head -1)"
-  mem="$(kubectl exec -n "$NAMESPACE" "deploy/inference-${INFERENCE_PROFILE}" -- \
+  mem="$(kubectl exec -n "$NAMESPACE" "deploy/inf-${INFERENCE_PROFILE}" -- \
     cat /sys/fs/cgroup/memory.peak 2>/dev/null | tr -d '[:space:]' || true)"
   printf '   inference metrics: first-token(prefill)=%sms  sustained=%s tok/s  mem-peak=%s bytes\n' \
     "${prompt_ms:-n/a}" "${rate:-n/a}" "${mem:-n/a}"
@@ -1857,7 +1858,7 @@ verify_user_isolation() {
 
   # No login-time mint: authentication created no RoleBinding, and the only
   # binding naming the user identity is the user provision command's
-  # provision-identity-<hash> binding.
+  # user-<hash> binding.
   local rb_after
   rb_after="$(kubectl get rolebindings -n "$NAMESPACE" -o name 2>/dev/null | sort)"
   [ "$rb_before" = "$rb_after" ] \
@@ -1869,7 +1870,7 @@ d = json.load(sys.stdin); ident = os.environ["IDENT"]
 print("\n".join(rb["metadata"]["name"] for rb in d["items"]
       if any(s.get("kind") == "User" and s.get("name") == ident
              for s in rb.get("subjects") or [])))')"
-  local user_rb; user_rb="provision-identity-$(handle_of "$user_identity")"
+  local user_rb; user_rb="user-$(handle_of "$user_identity")"
   [ "$rb_naming" = "$user_rb" ] \
     || { warn "user identity ${user_identity} is named by RoleBinding(s) other than ${user_rb}: ${rb_naming:-none}"; exit 1; }
   ok "no per-identity binding minted at login; the user provision command's ${user_rb} binding is the only grant"
@@ -2012,7 +2013,7 @@ harness_identity() {
     "$(kubectl get pods -n "$LIFECYCLE_TENANT_NS" \
       -l "app.kubernetes.io/component=harness,sycophant.md/workspace=${LIFECYCLE_WORKSPACE}" \
       -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)" \
-    "$(kubectl get deploy "$LIFECYCLE_WORKSPACE" -n "$LIFECYCLE_TENANT_NS" \
+    "$(kubectl get deploy "ws-$LIFECYCLE_WORKSPACE" -n "$LIFECYCLE_TENANT_NS" \
       -o jsonpath='{.metadata.generation}' 2>/dev/null)"
 }
 
@@ -2136,13 +2137,13 @@ YAML
   ok "the workspace and user installers deleted their provision commands"
 
   wait_for "workspace helm release deployed" 120 \
-    "release_deployed 'workspace-${LIFECYCLE_WORKSPACE}' '$LIFECYCLE_TENANT_NS'"
-  kubectl get deploy "$LIFECYCLE_WORKSPACE" -n "$LIFECYCLE_TENANT_NS" >/dev/null 2>&1 \
+    "release_deployed 'ws-${LIFECYCLE_WORKSPACE}' '$LIFECYCLE_TENANT_NS'"
+  kubectl get deploy "ws-$LIFECYCLE_WORKSPACE" -n "$LIFECYCLE_TENANT_NS" >/dev/null 2>&1 \
     || { warn "workspace harness Deployment was not created"; exit 1; }
-  kubectl get configmap "relay-toolset-grants-${LIFECYCLE_WORKSPACE}" -n "$LIFECYCLE_TENANT_NS" \
+  kubectl get configmap "ws-${LIFECYCLE_WORKSPACE}-relay-grants" -n "$LIFECYCLE_TENANT_NS" \
     -o jsonpath='{.metadata.labels.sycophant\.md/type}' 2>/dev/null | grep -qx relay-toolset-grants \
     || { warn "per-workspace relay-toolset-grants ConfigMap missing or unlabeled"; exit 1; }
-  ok "workspace release deployed; per-workspace object set installed in render=workspace mode"
+  ok "workspace release deployed; per-workspace object set installed from the workspace chart"
 
   # The harness's one init container, instructions-sync, rclone-syncs the
   # instructions prefix; a clean exit proves the store sync end to end.
@@ -2163,13 +2164,13 @@ YAML
 
   wait_for "user helm release deployed" 120 \
     "release_deployed 'user-${user_handle}' '$LIFECYCLE_TENANT_NS'"
-  kubectl get rolebinding "provision-identity-${user_handle}" -n "$LIFECYCLE_TENANT_NS" \
+  kubectl get rolebinding "user-${user_handle}" -n "$LIFECYCLE_TENANT_NS" \
     -o jsonpath='{.roleRef.kind}/{.roleRef.name}' 2>/dev/null | grep -qx ClusterRole/provision-identity \
     || { warn "per-user provision-identity RoleBinding missing or wrong roleRef"; exit 1; }
-  kubectl get rolebinding "provision-identity-${user_handle}" -n "$LIFECYCLE_TENANT_NS" \
+  kubectl get rolebinding "user-${user_handle}" -n "$LIFECYCLE_TENANT_NS" \
     -o jsonpath='{.subjects[0].kind}/{.subjects[0].name}' 2>/dev/null | grep -qFx "User/${LIFECYCLE_USER}" \
     || { warn "per-user provision-identity RoleBinding does not bind ${LIFECYCLE_USER}"; exit 1; }
-  ok "user release deployed; per-user provision-identity RoleBinding binds the identity in render=user mode"
+  ok "user release deployed; per-user provision-identity RoleBinding binds the identity from the user chart"
 
   # Two toolsets, one provision command each. The harness merges each per-toolset
   # ConfigMap by watch, so its pod and Deployment generation must not change.
@@ -2185,16 +2186,16 @@ YAML
       && { warn "toolset provision command ${ts} survived a successful install"; exit 1; }
 
     wait_for "toolset ${ts} helm release deployed" 120 \
-      "release_deployed 'toolset-${ts}' '$LIFECYCLE_TENANT_NS'"
-    kubectl get configmap "toolset-${ts}" -n "$LIFECYCLE_TENANT_NS" \
+      "release_deployed 'ts-${ts}' '$LIFECYCLE_TENANT_NS'"
+    kubectl get configmap "ts-${ts}" -n "$LIFECYCLE_TENANT_NS" \
       -o jsonpath='{.metadata.labels.sycophant\.md/type}' 2>/dev/null | grep -qx toolset \
       || { warn "per-toolset ConfigMap for ${ts} missing or not labelled sycophant.md/type=toolset"; exit 1; }
-    kubectl get configmap "toolset-${ts}" -n "$LIFECYCLE_TENANT_NS" \
+    kubectl get configmap "ts-${ts}" -n "$LIFECYCLE_TENANT_NS" \
       -o "jsonpath={.data.image}" 2>/dev/null | grep -qFx "$(lifecycle_toolset_image "$ts")" \
       || { warn "per-toolset ConfigMap for ${ts} does not carry the provision command's data"; exit 1; }
 
     wait_for "harness merged toolset set=${n} by watch" 120 \
-      "kubectl logs deploy/${LIFECYCLE_WORKSPACE} -n ${LIFECYCLE_TENANT_NS} -c harness --tail=200 2>/dev/null | grep -E 'toolset delivery applied.*\"configmaps\":${n},' -q"
+      "kubectl logs deploy/ws-${LIFECYCLE_WORKSPACE} -n ${LIFECYCLE_TENANT_NS} -c harness --tail=200 2>/dev/null | grep -E 'toolset delivery applied.*\"configmaps\":${n},' -q"
     local harness_after; harness_after="$(harness_identity)"
     [ "$harness_before" = "$harness_after" ] \
       || { warn "harness pod or Deployment generation changed on toolset add (${harness_before} -> ${harness_after})"; exit 1; }

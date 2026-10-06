@@ -1,0 +1,19 @@
+{{- /*
+One model's ConfigMap, `inf-<name>`: the inference provision command's flat data
+verbatim. The harness watches the `sycophant.md/type: model` label set and keys
+each model by its `app.kubernetes.io/name`, so a change takes effect on the next
+turn without a restart.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inf-{{ .Values.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    sycophant.md/type: model
+    app.kubernetes.io/name: {{ .Values.name | quote }}
+data:
+  {{- range $k, $v := .Values.command }}
+  {{ $k | quote }}: {{ $v | quote }}
+  {{- end }}

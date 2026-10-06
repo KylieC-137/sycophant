@@ -84,6 +84,28 @@ want = ("provision-user-b212e3ad41", "tenant-acme", {"user": "https://dex.exampl
 check("user command named by the subject's sha256 handle", summary("user-provision") == want,
       f"got: {summary('user-provision')}")
 
+want = ("provision-channel-app", "tenant-acme", {
+    "storageClass": "local-path",
+    "kind": "app",
+    "image": "tailscale/tailscale",
+    "tag": "v1.80.0",
+    "pullPolicy": "Always",
+    "loginServer": "http://headscale:8080",
+    "hostname": "relay",
+    "authKeySecret": "relay-tsnet-authkey",
+    "headscale.enabled": "true",
+    "headscale.image": "headscale/headscale",
+    "headscale.tag": "0.28.0",
+    "headscale.pullPolicy": "Always",
+    "headscale.serverUrl": "http://localhost:8080",
+    "headscale.magicDns": "true",
+    "headscale.baseDomain": "ts.local",
+    "headscale.acme.enabled": "false",
+    "headscale.acme.email": "ops@example.com",
+})
+check("channel values flatten to command data", summary("channel-provision") == want,
+      f"got: {summary('channel-provision')}")
+
 results, names = [], []
 for out, d in sorted(rendered.items()):
     kind, verb = out.split("-")[:2]
@@ -159,10 +181,21 @@ expect workspace-commands provision-workspace-undottedegress "'grant.ssh-credent
 expect workspace-commands provision-workspace-relativepath "'grant.ssh-credentials.demo-key.path' must be an absolute path"
 expect workspace-commands provision-workspace-badsecret "a workspace grant's 'secret' must be a Secret name"
 expect suspend-bad-keepalive suspend-tenant "0, 30, 60, 90"
-expect slice-commands-validate-data "provision-workspace-$(printf 'a%.0s' {1..43})" ""
-expect slice-commands-validate-data "provision-workspace-$(printf 'a%.0s' {1..44})" "at most 43"
-expect slice-commands-validate-data "provision-toolset-$(printf 'a%.0s' {1..45})" ""
-expect slice-commands-validate-data "provision-toolset-$(printf 'a%.0s' {1..46})" "at most 45"
+expect slice-commands-validate-data "provision-workspace-$(printf 'a%.0s' {1..49})" ""
+expect slice-commands-validate-data "provision-workspace-$(printf 'a%.0s' {1..50})" "at most 49"
+expect slice-commands-validate-data "provision-toolset-$(printf 'a%.0s' {1..50})" ""
+expect slice-commands-validate-data "provision-toolset-$(printf 'a%.0s' {1..51})" "at most 50"
+expect slice-commands-validate-data "provision-inference-$(printf 'a%.0s' {1..49})" ""
+expect slice-commands-validate-data "provision-inference-$(printf 'a%.0s' {1..50})" "at most 49"
+expect slice-commands-validate-data "provision-channel-$(printf 'a%.0s' {1..50})" ""
+expect slice-commands-validate-data "provision-channel-$(printf 'a%.0s' {1..51})" "at most 50"
+expect slice-commands-validate-data provision-channel-yes "'headscale.enabled' must be \"true\" or \"false\""
+expect slice-commands-validate-data provision-channel-magicdns "'headscale.magicDns' must be \"true\" or \"false\""
+expect slice-commands-validate-data provision-channel-kind "'kind' app"
+expect slice-commands-validate-data provision-channel-nologin "non-empty 'loginServer'"
+expect slice-commands-validate-data provision-channel-emptylogin "non-empty 'loginServer'"
+expect slice-commands-validate-data provision-channel-noserverurl "non-empty 'headscale.serverUrl'"
+expect slice-commands-validate-data provision-channel-noacmeemail "non-empty 'headscale.acme.email'"
 expect slice-commands-validate-data provision-user-0f1e2d3c4 handle
 expect slice-commands-validate-data provision-user-1f1e2d3c4b quote
 expect slice-commands-validate-data provision-user-2f1e2d3c4b quote

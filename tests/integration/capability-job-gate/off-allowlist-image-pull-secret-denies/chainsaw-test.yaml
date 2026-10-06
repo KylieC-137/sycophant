@@ -4,9 +4,9 @@ metadata:
   name: off-allowlist-image-pull-secret-denies
 spec:
   description: |
-    A Job created under `harness-<ws>` that references, on
+    A Job created under `ws-<ws>` that references, on
     `imagePullSecrets[].name`, a Secret name absent from the workspace's
-    `capability-grants-<ws>` allowlist is denied. The off-allowlist name is the
+    `ws-<ws>-capability-grants` allowlist is denied. The off-allowlist name is the
     only secret reference; every other field is well-formed, so the secret-name
     check over the imagePullSecrets surface is the only reason to deny. With that
     surface unchecked the Job admits and this test goes red.
@@ -44,7 +44,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-probe" -n "$TENANT_NS" -f -
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:ws-probe" -n "$TENANT_NS" -f -
               apiVersion: batch/v1
               kind: Job
               metadata:
@@ -56,7 +56,7 @@ spec:
                       sycophant.md/job-kind: tool
                   spec:
                     restartPolicy: Never
-                    serviceAccountName: unprivileged-probe
+                    serviceAccountName: ws-probe-unprivileged
                     imagePullSecrets:
                       - name: not-approved
                     containers:

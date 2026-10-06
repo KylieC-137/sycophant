@@ -1,0 +1,5 @@
+apiVersion: v2
+name: sycophant-inference
+description: One model's ConfigMap and its server or egress policy, installed from an inference provision command.
+version: 0.1.0
+appVersion: "0.1.0"

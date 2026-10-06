@@ -6,9 +6,9 @@ spec:
   description: |
     The secret-name allowlist is keyed on the creating identity's workspace, not
     on the referenced name globally. Workspace `other` has approved `other-secret`
-    in its own `capability-grants-other`. Workspace `probe`, creating a Job
-    under `harness-probe`, references `other-secret`. Because the gate reads
-    `capability-grants-probe` -- selected from the unforgeable creator identity
+    in its own `ws-other-capability-grants`. Workspace `probe`, creating a Job
+    under `ws-probe`, references `other-secret`. Because the gate reads
+    `ws-probe-capability-grants` -- selected from the unforgeable creator identity
     -- `other-secret` is off probe's allowlist and the Job is denied. Workspace
     W's Job may mount only W's approved names.
 
@@ -51,7 +51,7 @@ spec:
               apiVersion: v1
               kind: ConfigMap
               metadata:
-                name: capability-grants-other
+                name: ws-other-capability-grants
                 namespace: ($tenant_ns)
                 labels:
                   app.kubernetes.io/part-of: sycophant
@@ -65,7 +65,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-probe" -n "$TENANT_NS" -f -
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:ws-probe" -n "$TENANT_NS" -f -
               apiVersion: batch/v1
               kind: Job
               metadata:
@@ -77,7 +77,7 @@ spec:
                       sycophant.md/job-kind: tool
                   spec:
                     restartPolicy: Never
-                    serviceAccountName: unprivileged-probe
+                    serviceAccountName: ws-probe-unprivileged
                     volumes:
                       - name: creds
                         secret:

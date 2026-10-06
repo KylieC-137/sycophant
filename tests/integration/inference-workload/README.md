@@ -2,7 +2,7 @@
 
 Applied shape of the in-cluster inference workload: one always-on server per
 local inference provision command, fenced to its tenant. Each case renders
-`render=inference` from the local provision command fixture
+the `sycophant-inference` chart from the local provision command fixture
 `fixtures/model-inference-local.json`, merged with the case's `server.*` keys.
 Render-only checks live in `tests/unit/tenant-chart/`.
 

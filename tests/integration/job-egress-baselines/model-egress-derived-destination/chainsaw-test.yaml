@@ -23,7 +23,7 @@ spec:
         from a half-done implementation that left a stray DNS rule behind.
 
     The hole is opened for the inference job alone. Every rendered
-    `inference-egress-{key}` CNP selects its pod by exactly three labels
+    `inf-{key}` CNP selects its pod by exactly three labels
     together — `sycophant.md/model:{key}`, `sycophant.md/job-kind: inference`,
     and `app.kubernetes.io/part-of: sycophant` — and by nothing wider. A model
     is tenant-wide, so the provider hole is per-model and identical across
@@ -52,10 +52,10 @@ spec:
               set -e
               kubectl create namespace "$TENANT_NS"
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+              rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-inference" \
                 --show-only templates/inference-egress-cnp.yaml \
                 -n "$TENANT_NS" \
-                --set render=inference --set name=deepseek-v4-flash \
+                --set name=deepseek-v4-flash \
                 --set-json 'command={"image":"inference-runtime:local","format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","secret":"sycophant-llm-openrouter"}')
               printf '%s' "$rendered" | kubectl apply -f -
         - assert:
@@ -63,7 +63,7 @@ spec:
               apiVersion: cilium.io/v2
               kind: CiliumNetworkPolicy
               metadata:
-                name: inference-egress-deepseek-v4-flash
+                name: inf-deepseek-v4-flash
                 namespace: ($domain_ns)
               spec:
                 # The hole is opened for the inference job by exactly three
@@ -110,10 +110,10 @@ spec:
               set -e
               kubectl create namespace "$TENANT_NS"
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+              rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-inference" \
                 --show-only templates/inference-egress-cnp.yaml \
                 -n "$TENANT_NS" \
-                --set render=inference --set name=ipdirect \
+                --set name=ipdirect \
                 --set-json 'command={"image":"inference-runtime:local","format":"openai","model":"m","baseUrl":"http://10.42.0.9:8080/v1"}')
               printf '%s' "$rendered" | kubectl apply -f -
         - assert:
@@ -121,7 +121,7 @@ spec:
               apiVersion: cilium.io/v2
               kind: CiliumNetworkPolicy
               metadata:
-                name: inference-egress-ipdirect
+                name: inf-ipdirect
                 namespace: ($ip_ns)
               spec:
                 endpointSelector:
@@ -161,9 +161,9 @@ spec:
               # provider hole; a capability-job pod that carries no model label
               # (a tool job, or an inference job the harness never stamped)
               # matches no inference-egress rule at all.
-              egress=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
+              egress=$(helm template probe "$REPO_ROOT/charts/sycophant-inference" -n probe-ns \
                 --show-only templates/inference-egress-cnp.yaml \
-                --set render=inference --set name=deepseek-v4-flash \
+                --set name=deepseek-v4-flash \
                 --set-json 'command={"image":"inference-runtime:local","format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","secret":"s"}')
               selectors=$(printf '%s\n' "$egress" | grep -c 'sycophant.md/model:')
               endpoint_selectors=$(printf '%s\n' "$egress" | grep -cE '^\s+endpointSelector:')

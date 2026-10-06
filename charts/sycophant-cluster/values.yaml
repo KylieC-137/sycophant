@@ -27,14 +27,14 @@ idp:
   #   -----END CERTIFICATE-----
 
 # The installer a provision command triggers. An admitted provision command
-# stamps a single-shot Job that runs the tenant chart baked into this image
-# against the new tenant namespace. image/tag name the installer image;
-# chartPath is where the tenant chart lives inside it.
+# stamps a single-shot Job that runs its kind's chart baked into this image
+# against the tenant namespace. image/tag name the installer image; chartsDir is
+# the directory inside it holding one sycophant-<kind> chart per kind.
 provisioner:
   image: sycophant-provisioner
   tag: local
   pullPolicy: IfNotPresent
-  chartPath: /charts/sycophant-tenant
+  chartsDir: /charts
 
 # How often the cleanup DeletingPolicies sweep for suspended tenants past their
 # keepalive TTL and for installer leftovers to reap. Standard 5-field cron;

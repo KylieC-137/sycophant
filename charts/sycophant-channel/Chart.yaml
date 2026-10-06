@@ -1,0 +1,5 @@
+apiVersion: v2
+name: sycophant-channel
+description: The app channel adapter and optional headscale, installed per channel provision command.
+version: 0.1.0
+appVersion: "0.1.0"

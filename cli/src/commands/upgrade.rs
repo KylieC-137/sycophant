@@ -94,6 +94,18 @@ const KYVERNO_POLICIES: &[(&str, &str)] = &[
         "generatingpolicies.policies.kyverno.io",
         "uninstall-inference",
     ),
+    (
+        "generatingpolicies.policies.kyverno.io",
+        "provision-channel",
+    ),
+    (
+        "generatingpolicies.policies.kyverno.io",
+        "provision-channel-grant",
+    ),
+    (
+        "generatingpolicies.policies.kyverno.io",
+        "uninstall-channel",
+    ),
 ];
 
 pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
@@ -129,6 +141,7 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
             "reap-user",
             "reap-toolset",
             "reap-inference",
+            "reap-channel",
         ]
         .iter()
         .all(|name| {

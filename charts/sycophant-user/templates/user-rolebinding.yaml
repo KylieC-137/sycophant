@@ -1,0 +1,24 @@
+{{- range .Values.users }}
+# Per-user tenant membership, one RoleBinding per identity. Each subject is a
+# User named <issuer>#<sub> exactly as the apiserver presents it, never a Group;
+# the roleRef is the minimal provision-identity ClusterRole, never
+# provision-write. The name carries a hash of the subject because an
+# issuer-prefixed identity is not a DNS-safe name.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: user-{{ . | sha256sum | trunc 10 }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: provision-identity
+subjects:
+  - kind: User
+    name: {{ . | quote }}
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: provision-identity
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

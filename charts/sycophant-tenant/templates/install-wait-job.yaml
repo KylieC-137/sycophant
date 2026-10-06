@@ -1,10 +1,8 @@
-{{- if eq .Values.render "base" }}
 {{/*
-Post-install/upgrade Job that blocks `helm install` until every sycophant
-workload Deployment in the release namespace (relay, per-workspace harness,
-and headscale when enabled) reaches `Available`. Closes the webhook-race gap
-so consumers can `kubectl apply` user CRs immediately after helm install exits
-without retry loops. Avoids cluster-scoped RBAC.
+Post-install/upgrade Job that holds the tenant release's install or upgrade
+until every `app.kubernetes.io/part-of=sycophant` Deployment in the namespace
+reaches `Available` (on a fresh install, relay-controller). Avoids
+cluster-scoped RBAC.
 All four resources share helm hook-weight 5. Weight > 0 ensures the Job
 runs after default-weight-0 chart resources (the workloads themselves).
 */}}
@@ -125,4 +123,3 @@ spec:
         - name: tmp
           emptyDir: {}
         {{- include "sycophant.projectedKubeApiToken.volume" . | nindent 8 }}
-{{- end }}

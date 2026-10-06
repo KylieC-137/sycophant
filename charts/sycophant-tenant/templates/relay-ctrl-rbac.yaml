@@ -1,4 +1,3 @@
-{{- if eq .Values.render "base" }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -60,4 +59,3 @@ roleRef:
   kind: Role
   name: relay-controller
   apiGroup: rbac.authorization.k8s.io
-{{- end }}

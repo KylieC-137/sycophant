@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-workspace-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  name: provision-workspace-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   namespace: tenant-acme
   labels:
     sycophant.md/command: "true"
@@ -12,7 +12,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-workspace-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  name: provision-workspace-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   namespace: tenant-acme
   labels:
     sycophant.md/command: "true"
@@ -23,7 +23,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-toolset-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  name: provision-toolset-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   namespace: tenant-acme
   labels:
     sycophant.md/command: "true"
@@ -35,7 +35,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: provision-toolset-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  name: provision-toolset-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   namespace: tenant-acme
   labels:
     sycophant.md/command: "true"
@@ -87,3 +87,159 @@ metadata:
     app.kubernetes.io/part-of: sycophant
 data:
   user: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#a\u2028b"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-inference-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  format: openai
+  model: deepseek/deepseek-v4-flash
+  baseUrl: https://openrouter.ai/api/v1
+  image: inference-runtime:local
+  secret: llm-openrouter
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-inference-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  format: openai
+  model: deepseek/deepseek-v4-flash
+  baseUrl: https://openrouter.ai/api/v1
+  image: inference-runtime:local
+  secret: llm-openrouter
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-channel-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  kind: app
+  loginServer: http://headscale:8080
+  headscale.enabled: "true"
+  headscale.serverUrl: http://localhost:8080
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-channel-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  kind: app
+  loginServer: http://headscale:8080
+  headscale.enabled: "true"
+  headscale.serverUrl: http://localhost:8080
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-channel-yes
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  kind: app
+  loginServer: http://headscale:8080
+  headscale.enabled: "yes"
+  headscale.serverUrl: http://localhost:8080
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-channel-kind
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  kind: slack
+  loginServer: http://headscale:8080
+  headscale.enabled: "true"
+  headscale.serverUrl: http://localhost:8080
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-channel-nologin
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  kind: app
+  headscale.enabled: "true"
+  headscale.serverUrl: http://localhost:8080
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-channel-emptylogin
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  kind: app
+  loginServer: ""
+  headscale.enabled: "true"
+  headscale.serverUrl: http://localhost:8080
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-channel-magicdns
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  kind: app
+  loginServer: http://headscale:8080
+  headscale.enabled: "true"
+  headscale.serverUrl: http://localhost:8080
+  headscale.magicDns: "yes"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-channel-noserverurl
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  kind: app
+  loginServer: http://headscale:8080
+  headscale.enabled: "true"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-channel-noacmeemail
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  kind: app
+  loginServer: http://headscale:8080
+  headscale.enabled: "true"
+  headscale.serverUrl: https://hs.example.com
+  headscale.acme.enabled: "true"

@@ -8,6 +8,16 @@ pub(crate) static CLUSTER_CHART: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-cluster");
 pub(crate) static TENANT_CHART: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-tenant");
+pub(crate) static WORKSPACE_CHART: Dir<'static> =
+    include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-workspace");
+pub(crate) static INFERENCE_CHART: Dir<'static> =
+    include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-inference");
+pub(crate) static TOOLSET_CHART: Dir<'static> =
+    include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-toolset");
+pub(crate) static USER_CHART: Dir<'static> =
+    include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-user");
+pub(crate) static CHANNEL_CHART: Dir<'static> =
+    include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-channel");
 /// Provision, reap and suspend command templates, rendered by `syco <kind> up`
 /// and `down` and never installed.
 pub(crate) static COMMANDS_CHART: Dir<'static> =

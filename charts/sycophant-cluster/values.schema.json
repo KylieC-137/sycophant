@@ -32,12 +32,12 @@
     "provisioner": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["image", "tag", "pullPolicy", "chartPath"],
+      "required": ["image", "tag", "pullPolicy", "chartsDir"],
       "properties": {
         "image": { "type": "string", "minLength": 1 },
         "tag": { "type": "string", "minLength": 1 },
         "pullPolicy": { "type": "string", "minLength": 1 },
-        "chartPath": { "type": "string", "minLength": 1 }
+        "chartsDir": { "type": "string", "minLength": 1 }
       }
     },
     "reap": {

@@ -6,7 +6,7 @@
 //! directly; a remote model is reached through a per-call inference-runtime job
 //! the harness creates. An absent name is refused, never defaulted.
 //!
-//! Each model is one `model-<key>` ConfigMap labelled `sycophant.md/type:
+//! Each model is one `inf-<key>` ConfigMap labelled `sycophant.md/type:
 //! model`, its data the operator's flat provision command fields. The harness
 //! watches the label set and rebuilds the table on every change, so a model
 //! added, changed or removed takes effect on the next turn without a restart.
@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use k8s_openapi::api::core::v1::ConfigMap;
 
-/// The one port every local model's `inference-<key>` Service serves on.
+/// The one port every local model's `inf-<key>` Service serves on.
 pub(crate) const LOCAL_INFERENCE_PORT: u16 = 8080;
 
 /// One model the harness can dial, keyed in `ModelTable` by the value an
@@ -23,7 +23,7 @@ pub(crate) const LOCAL_INFERENCE_PORT: u16 = 8080;
 /// `model` the provider-side model id.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ModelConfig {
-    /// A warm in-cluster model served by the `inference-<key>` ClusterIP
+    /// A warm in-cluster model served by the `inf-<key>` ClusterIP
     /// Service on [`LOCAL_INFERENCE_PORT`]. The harness dials the Service
     /// directly; no per-call job is created.
     Local { format: String, model: String },
@@ -120,7 +120,7 @@ pub(crate) mod tests {
     pub(crate) fn model_cm(key: &str, data: &[(&str, &str)]) -> ConfigMap {
         ConfigMap {
             metadata: ObjectMeta {
-                name: Some(format!("model-{key}")),
+                name: Some(format!("inf-{key}")),
                 labels: Some(BTreeMap::from([
                     ("sycophant.md/type".to_string(), "model".to_string()),
                     ("app.kubernetes.io/name".to_string(), key.to_string()),
@@ -204,6 +204,6 @@ pub(crate) mod tests {
         assert!(table.get("deepseek").is_some());
         assert_eq!(table.get("broken"), None);
         assert_eq!(errors.len(), 1, "{errors:?}");
-        assert!(errors[0].contains("model-broken"), "{errors:?}");
+        assert!(errors[0].contains("inf-broken"), "{errors:?}");
     }
 }

@@ -31,10 +31,10 @@ spec:
               kubectl create namespace "$TENANT_NS"
               REPO_ROOT=$(git rev-parse --show-toplevel)
               COMMAND=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
-              rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
+              rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-inference" \
                 --show-only templates/inference-cnp.yaml \
                 -n "$TENANT_NS" \
-                --set render=inference --set name=local \
+                --set name=local \
                 --set-json "command=$COMMAND")
 
               # Every kube-dns rule carries its own L7 allowlist. Counting the
@@ -55,7 +55,7 @@ spec:
               apiVersion: cilium.io/v2
               kind: CiliumNetworkPolicy
               metadata:
-                name: inference-local
+                name: inf-local
                 namespace: ($tenant_ns)
               spec:
                 endpointSelector:

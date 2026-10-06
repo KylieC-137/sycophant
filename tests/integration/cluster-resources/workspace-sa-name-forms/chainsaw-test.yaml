@@ -3,7 +3,7 @@ kind: Test
 metadata:
   name: workspace-sa-name-forms
 spec:
-  description: Every workspace-sa ServiceAccount is named harness-<ws>, unprivileged-<ws>, or <ws>-workspace-init.
+  description: Every workspace-sa ServiceAccount is named ws-<ws>, ws-<ws>-unprivileged, or ws-<ws>-init.
   bindings:
     - name: ws
       value: demo
@@ -21,8 +21,8 @@ spec:
             content: |
               set -e
               REPO_ROOT=$(git rev-parse --show-toplevel)
-              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns \
-                --set render=workspace --set name="$WS" --set-json "command=$WORKSPACE_COMMAND")
+              out=$(helm template probe "$REPO_ROOT/charts/sycophant-workspace" -n probe-ns \
+                --set name="$WS" --set-json "command=$WORKSPACE_COMMAND")
 
               # name|type for every ServiceAccount in the render.
               sas=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
@@ -33,18 +33,18 @@ spec:
               printf '%s\n' "$sas" | awk -F'|' -v ws="$WS" '
                 $2 == "workspace-sa" {
                   n=$1; seen++
-                  if (n == "harness-" ws)            has_harness=1
-                  else if (n == "unprivileged-" ws)  has_unpriv=1
-                  else if (n == ws "-workspace-init") has_init=1
+                  if (n == "ws-" ws)                   has_harness=1
+                  else if (n == "ws-" ws "-unprivileged") has_unpriv=1
+                  else if (n == "ws-" ws "-init")      has_init=1
                   else { print "unexpected workspace-sa name: " n > "/dev/stderr"; bad=1 }
                 }
                 END {
                   if (bad) exit 1
                   if (!(has_harness && has_unpriv && has_init)) {
-                    print "missing one of harness-" ws ", unprivileged-" ws ", " ws "-workspace-init" > "/dev/stderr"
+                    print "missing one of ws-" ws ", ws-" ws "-unprivileged, ws-" ws "-init" > "/dev/stderr"
                     exit 1
                   }
                   if (seen != 3) { print "expected exactly 3 workspace-sa, saw " seen > "/dev/stderr"; exit 1 }
                 }' \
-                || { echo "workspace-sa names drifted from the documented forms (sync with WORKSPACE_SA_PREFIXES in crates/shared/src/auth.rs)"; printf '%s\n' "$sas" >&2; exit 1; }
+                || { echo "workspace-sa names drifted from the documented forms (sync with WORKSPACE_PREFIX and UNPRIVILEGED_SA_SUFFIX in crates/shared/src/auth.rs)"; printf '%s\n' "$sas" >&2; exit 1; }
               true

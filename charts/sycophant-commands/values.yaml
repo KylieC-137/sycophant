@@ -37,3 +37,24 @@
 # user:
 #   tenant: acme
 #   subject: "https://dex.example.com/dex#alice"
+
+# channel:
+#   name: app
+#   tenant: acme
+#   kind: app               # only app today
+#   loginServer: http://headscale:8080
+#   image: tailscale/tailscale
+#   tag: stable
+#   pullPolicy: IfNotPresent
+#   hostname: relay
+#   authKeySecret: relay-tsnet-authkey
+#   storageClass: ""        # the headscale data PVC
+#   headscale:
+#     enabled: true
+#     serverUrl: http://localhost:8080
+#     image: headscale/headscale
+#     tag: "0.28.0"
+#     pullPolicy: IfNotPresent
+#     magicDns: true
+#     baseDomain: ts.local
+#     acme: {}              # enabled, email

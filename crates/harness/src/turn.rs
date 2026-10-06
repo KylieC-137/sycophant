@@ -173,13 +173,13 @@ pub(crate) fn stream_items_for(event: &TurnEvent, state: &mut EmitState) -> Vec<
     }
 }
 
-/// Default idle-gap: the maximum silence between inference-job events
+/// Default idle-gap: the maximum silence between inference events
 /// (deltas / heartbeats / Complete) before a turn is treated as wedged.
-/// Sized well above the inference job's 10s heartbeat so a slow-but-alive turn is
-/// never reaped, while a genuinely silent (connected-but-hung) inference job trips
-/// it. Used by the sub-agent path; the orchestrator loop takes its gap from
-/// config via `LoopMode`.
-pub(crate) const DEFAULT_IDLE_GAP: Duration = Duration::from_secs(45);
+/// A local model's prompt read and thinking send no frames, so it is sized to
+/// outlast a slow CPU model while a genuinely hung source still trips it. Used
+/// by the sub-agent path; the orchestrator loop takes its gap from config via
+/// `LoopMode`.
+pub(crate) const DEFAULT_IDLE_GAP: Duration = Duration::from_secs(600);
 
 #[derive(Debug)]
 pub(crate) struct TurnResult {

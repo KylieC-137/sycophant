@@ -1,6 +1,6 @@
 # The whole control-plane surface a user holds inside a bound tenant
-# namespace. Bound per namespace by the sycophant-tenant chart's
-# provision-identity RoleBinding, never via a ClusterRoleBinding, so RBAC's
+# namespace. Bound per namespace by the sycophant-user chart's
+# provision-identity RoleBindings, never via a ClusterRoleBinding, so RBAC's
 # namespacing rules confine any grant here to that one namespace.
 #
 # One reusable ClusterRole bound per namespace, not one Role per tenant,

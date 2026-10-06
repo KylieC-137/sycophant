@@ -27,6 +27,7 @@ keeps every provisioned namespace out of the reserved ones.
 {{- define "sycophant.userProvisionCommandName" -}}provision-user{{- end -}}
 {{- define "sycophant.toolsetProvisionCommandName" -}}provision-toolset{{- end -}}
 {{- define "sycophant.inferenceProvisionCommandName" -}}provision-inference{{- end -}}
+{{- define "sycophant.channelProvisionCommandName" -}}provision-channel{{- end -}}
 {{- define "sycophant.suspendCommandName" -}}suspend-tenant{{- end -}}
 {{- define "sycophant.reapAfterAnnotation" -}}sycophant.md/reap-after{{- end -}}
 {{- define "sycophant.tenantNsPrefix" -}}tenant-{{- end -}}
@@ -37,7 +38,7 @@ validate so the two cannot drift onto different notions of "the workspace".
 
 `parseServiceAccount` pulls NS/NAME out of `system:serviceaccount:NS:NAME`.
 The match conditions are the gate: the creator must be a ServiceAccount in the
-namespace it is writing to, and its name must be `harness-<workspace>`. A Job
+namespace it is writing to, and its name must be `ws-<workspace>`. A Job
 from any other identity is not this gate's business and falls through to the
 rest of admission.
 */}}
@@ -47,11 +48,11 @@ matchConditions:
     expression: >-
       request.userInfo.username.startsWith("system:serviceaccount:")
         && parseServiceAccount(request.userInfo.username).Namespace == request.namespace
-        && parseServiceAccount(request.userInfo.username).Name.startsWith("harness-")
+        && parseServiceAccount(request.userInfo.username).Name.startsWith("ws-")
 variables:
   - name: workspace
     expression: >-
-      parseServiceAccount(request.userInfo.username).Name.substring(8)
+      parseServiceAccount(request.userInfo.username).Name.substring(3)
   - name: pod
     expression: "object.spec.template.spec"
   - name: containers
@@ -102,7 +103,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- /*
 One single-shot install per provision command. The stack policy stamps a
 ServiceAccount and a Job in sycophant-system; the Job runs `helm upgrade
---install` against the tenant chart baked into the installer image, presenting
+--install` against its kind's chart baked into the installer image, presenting
 the ServiceAccount's projected token. The ServiceAccount lives outside the
 tenant namespace, so it stays an external caller to the tenant-scoped write
 protections and needs no exemption from them.
@@ -118,14 +119,15 @@ Every generated object is named `provision-<kind>-<uid10>`, from the provision
 command's uid, so a re-created command never collides with an earlier run's
 Job, even within its TTL.
 
-The tenant provision command lives in sycophant-system and installs the base
-release from chart defaults. Every other provision command is
+The tenant provision command lives in sycophant-system and installs the
+sycophant-tenant release from chart defaults. Every other provision command is
 `provision-<kind>-<name>` in the tenant namespace it targets, so the tenant is
-the command's own namespace, and installs one `<kind>-<name>` release with
-render=<kind>. render and namespace.create=false are forced on the command line
-so a provision command cannot change the slice it renders or manage the
-namespace. Only the tenant install takes ownership of existing objects; a
-capability install refuses a name another release holds.
+the command's own namespace, and installs one release from the
+`sycophant-<kind>` chart, named by sycophant.releasePrefix: `ws-<name>`,
+`ts-<name>`, `inf-<name>`, `ch-<name>` or `user-<handle>`. Only the tenant chart can render the Namespace, and
+its install forces namespace.create=false so a provision command cannot manage
+it. Only the tenant install takes ownership of existing objects; a capability
+install refuses a name another release holds.
 
 Provision commands are one-shot: once helm succeeds the Job deletes its
 command. A failed install exits first and leaves the command in place. The
@@ -272,6 +274,11 @@ spec:
                         fieldPath: metadata.namespace
 {{- end -}}
 
+{{- /* The release name prefix a capability install uses for its kind. */ -}}
+{{- define "sycophant.releasePrefix" -}}
+{{- get (dict "workspace" "ws" "toolset" "ts" "inference" "inf" "user" "user" "channel" "ch") . -}}
+{{- end -}}
+
 {{- /* The install script for one kind; see sycophant.provisionInstaller. */ -}}
 {{- define "sycophant.provisionInstallScript" -}}
 {{- $ctx := .ctx -}}
@@ -283,9 +290,8 @@ for i in $(seq 1 60); do
   kubectl get namespace "$TENANT" >/dev/null 2>&1 && break
   sleep 2
 done
-helm upgrade --install "$TENANT" {{ $ctx.Values.provisioner.chartPath }} \
+helm upgrade --install "$TENANT" {{ $ctx.Values.provisioner.chartsDir }}/sycophant-tenant \
   --namespace "$TENANT" \
-  --set render=base \
   --set namespace.create=false \
   --take-ownership \
   --timeout 10m
@@ -303,11 +309,11 @@ printf 'users:\n  - "%s"\n' "$SUBJECT" > /tmp/values.yaml
 printf '{"command":%s}' "$(kubectl get configmap "$COMMAND" \
   -n "$TENANT" -o 'jsonpath={.data}')" > /tmp/values.yaml
 {{- end }}
-helm upgrade --install "{{ $kind }}-$NAME" {{ $ctx.Values.provisioner.chartPath }} \
+helm upgrade --install "{{ include "sycophant.releasePrefix" $kind }}-$NAME" {{ $ctx.Values.provisioner.chartsDir }}/sycophant-{{ $kind }} \
   --namespace "$TENANT" \
-  --set render={{ $kind }} \
+{{- if ne $kind "user" }}
   --set-string name="$NAME" \
-  --set namespace.create=false \
+{{- end }}
   -f /tmp/values.yaml \
   --timeout 10m
 kubectl delete configmap "$COMMAND" -n "$TENANT"
@@ -387,7 +393,7 @@ roleRef:
 {{- define "sycophant.provisionUninstallScript" -}}
 set -eu
 NAME="${COMMAND#reap-{{ .kind }}-}"
-helm uninstall "{{ .kind }}-$NAME" -n "$TENANT" --timeout 10m
+helm uninstall "{{ include "sycophant.releasePrefix" .kind }}-$NAME" -n "$TENANT" --timeout 10m
 kubectl delete configmap "$COMMAND" -n "$TENANT"
 {{- end -}}
 
@@ -396,10 +402,10 @@ One single-shot uninstall per reap command `reap-<kind>-<name>` in a tenant
 namespace. The ServiceAccount and Job `uninstall-<kind>-<uid10>` live in
 sycophant-system; the RoleBinding of the same name binds them to
 ClusterRole/provision-write in the reap command's namespace, which exists already.
-The Job runs `helm uninstall <kind>-<name>` and then deletes the reap command; a
-failed uninstall exits first and leaves the command in place. The ServiceAccount
-and RoleBinding carry component `uninstall-<kind>` and the reap-after
-annotation, so `reap-<kind>` sweeps them.
+The Job uninstalls the release the provision command installed and then
+deletes the reap command; a failed uninstall exits first and leaves the command
+in place. The ServiceAccount and RoleBinding carry component `uninstall-<kind>`
+and the reap-after annotation, so `reap-<kind>` sweeps them.
 */ -}}
 {{- define "sycophant.provisionUninstaller" -}}
 {{- $ctx := .ctx -}}

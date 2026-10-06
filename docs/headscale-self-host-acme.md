@@ -44,35 +44,48 @@ ISP sanity check: from a phone on cellular data (NOT your home WiFi), browse to 
 
 ## Deploy with ACME enabled
 
-Headscale and the app channel are the tenant chart's `render=channel` slice, installed host-side into a provisioned tenant namespace. Write their values to `channel-values.yaml`:
+Headscale and the app channel are the `sycophant-channel` chart, installed into a provisioned tenant by `syco channel up`. Write their values to `channel.yaml` (the settings are listed in [`charts/sycophant-commands/values.yaml`](../charts/sycophant-commands/values.yaml)):
 
 ```yaml
-namespace:
-  create: false
-headscale:
-  enabled: true
-  serverUrl: https://hs.<domain>
-  acme:
+channel:
+  name: app
+  tenant: <name>
+  kind: app
+  loginServer: https://hs.<domain>
+  headscale:
     enabled: true
-    email: you@<domain>
-channels:
-  app:
-    kind: app
-    loginServer: https://hs.<domain>
+    serverUrl: https://hs.<domain>
+    acme:
+      enabled: true
+      email: you@<domain>
 ```
 
-Then install the slice, or re-run the same command to apply a change:
+Then install it, or re-run the same command to apply a change. It prompts for the operator password:
 
 ```sh
-helm upgrade --install channel-app "$SYCO_CONFIG_DIR/charts/sycophant-tenant" \
-  -n tenant-<name> --set render=channel -f channel-values.yaml
+syco channel up -f channel.yaml
 ```
 
 The chart will:
 - Configure headscale's `tls_letsencrypt_*` keys
 - Switch the headscale Service to expose ports `:443` (HTTPS API) and `:80` (HTTP-01 challenge), in addition to `:9090` (metrics)
 - Add `CAP_NET_BIND_SERVICE` to the headscale container so non-root can bind privileged ports
-- Re-roll headscale, and the app adapter when `channels.app.loginServer` changes, to use the new URL
+- Re-roll headscale, and the app adapter when `loginServer` changes, to use the new URL
+
+## Hand the app adapter its pre-auth key
+
+The adapter joins the tailnet with a pre-auth key read from the Secret named by `authKeySecret` (default `relay-tsnet-authkey`), key `authkey`. Once headscale is Available, mint one for a headscale user and pipe it straight into that Secret:
+
+```sh
+kubectl exec -n tenant-<name> deploy/headscale -- headscale users create relay
+USER_ID=$(kubectl exec -n tenant-<name> deploy/headscale -- \
+  headscale users list -o json | jq '.[] | select(.name=="relay") | .id')
+kubectl exec -n tenant-<name> deploy/headscale -- \
+  headscale preauthkeys create -u "$USER_ID" -e 24h | tail -1 | tr -d '\r\n' \
+  | kubectl create secret generic relay-tsnet-authkey -n tenant-<name> \
+      --from-file=authkey=/dev/stdin --dry-run=client -o yaml \
+  | kubectl apply -n tenant-<name> -f -
+```
 
 ## Bridge to your Mac (sudo port-forward)
 
@@ -143,11 +156,11 @@ Paste that string into the Flutter app's sign-in screen (along with the workspac
 
 ## Gotchas
 
-- **Port-forward dies on every headscale rollout.** Whenever the headscale pod rolls (a channel slice upgrade that changes its config, cert refresh, etc.), the existing port-forward terminates with a stale-pod error. Restart the `sudo kubectl port-forward` command after any change that touches headscale.
-- **The tailnet node takes ~10s to register after pod roll.** After a channel slice upgrade that changes the app channel, the `adapter-app` pod restarts and its `tailscale` container re-registers with headscale. `headscale nodes list` will show no node for ~10 seconds; logs will show the registration handshake. Wait it out.
+- **Port-forward dies on every headscale rollout.** Whenever the headscale pod rolls (a channel upgrade that changes its config, cert refresh, etc.), the existing port-forward terminates with a stale-pod error. Restart the `sudo kubectl port-forward` command after any change that touches headscale.
+- **The tailnet node takes ~10s to register after pod roll.** After a channel upgrade that changes the app channel, the `adapter-app` pod restarts and its `tailscale` container re-registers with headscale. `headscale nodes list` will show no node for ~10 seconds; logs will show the registration handshake. Wait it out.
 - **Tailscale Mac CLI logout drops your existing tailnet.** `sudo tailscale logout` followed by `sudo tailscale up --login-server=...` switches your Mac off whatever Tailscale account it was on. If you have a personal hosted Tailscale tailnet you use for other things, log back into it when done testing here. The Tailscale Mac GUI may support multiple accounts simultaneously; the CLI's account model is single-tenant.
 - **Cloudflare DNS proxy must stay off.** If you (or someone else managing the zone) flips on the orange-cloud Proxied mode after initial setup, the next ACME renewal will fail. The cert will expire after 90 days. Periodic verification: `curl -v https://hs.<domain>/health` should report a Let's Encrypt-issued cert, not a Cloudflare-managed one.
-- **First ACME issuance can take a minute.** If you `curl https://hs.<domain>/health` immediately after installing the channel slice, you may get a TLS handshake failure for ~30s while autocert negotiates the challenge. Wait and retry.
+- **First ACME issuance can take a minute.** If you `curl https://hs.<domain>/health` immediately after installing the channel chart, you may get a TLS handshake failure for ~30s while autocert negotiates the challenge. Wait and retry.
 - **headscale 0.28+ needs numeric user ID for preauthkeys.** Don't pass a username to `headscale preauthkeys create -u …`. Look up the ID from `headscale users list -o json` first.
 
 ## What doesn't work (and why)

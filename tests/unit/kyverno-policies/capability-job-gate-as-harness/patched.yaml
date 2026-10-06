@@ -26,7 +26,7 @@ spec:
               type: RuntimeDefault
       restartPolicy: Never
       runtimeClassName: gvisor
-      serviceAccountName: unprivileged-research
+      serviceAccountName: ws-research-unprivileged
 ---
 apiVersion: batch/v1
 kind: Job
@@ -56,4 +56,4 @@ spec:
               type: RuntimeDefault
       restartPolicy: Never
       runtimeClassName: gvisor
-      serviceAccountName: unprivileged-research
+      serviceAccountName: ws-research-unprivileged

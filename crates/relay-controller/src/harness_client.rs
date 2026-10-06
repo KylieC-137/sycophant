@@ -7,12 +7,12 @@
 //! (HTTP/2 multiplexed) across subsequent calls.
 //!
 //! Each per-workspace harness runs as a Service named
-//! `harness-{workspace}` per the chart. The token presented is
+//! `ws-{workspace}` per the chart. The token presented is
 //! audience `relay.harness.sycophant.md`; harness pins this
 //! on TokenReview to verify the caller.
 
 use harness_proto::harness_control_client::HarnessControlClient;
-use shared::auth::{SaTokenInterceptor, RELAY_HARNESS_TOKEN_PATH};
+use shared::auth::{SaTokenInterceptor, RELAY_HARNESS_TOKEN_PATH, WORKSPACE_PREFIX};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -57,7 +57,8 @@ impl HarnessClientPool {
         // admit relay-ctrl alone here. Keep in step with `RELAY_FORWARD_PORT`
         // in the harness and the harness Service port.
         Self::from_service_template(format!(
-            "http://harness-{{workspace}}.{namespace}.svc.cluster.local:9091"
+            "http://{}{{workspace}}.{namespace}.svc.cluster.local:9091",
+            WORKSPACE_PREFIX
         ))
     }
 
@@ -108,7 +109,7 @@ mod tests {
         let pool = HarnessClientPool::new("sycophant");
         assert_eq!(
             pool.addr_for("hello-world"),
-            "http://harness-hello-world.sycophant.svc.cluster.local:9091"
+            "http://ws-hello-world.sycophant.svc.cluster.local:9091"
         );
     }
 

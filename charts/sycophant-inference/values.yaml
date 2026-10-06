@@ -1,0 +1,4 @@
+# The inference provision command's name suffix and flat data, set by the
+# installer. A `server.image` key makes the model local.
+name: ""
+command: {}

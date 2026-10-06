@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "The inference name the provision command carries as its name suffix. The installer sets it from the command name."
+    },
+    "command": {
+      "type": "object",
+      "description": "The inference provision command's flat data, verbatim. The installer sets it from the command.",
+      "additionalProperties": { "type": "string" }
+    }
+  }
+}

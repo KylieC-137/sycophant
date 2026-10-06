@@ -4,7 +4,7 @@ metadata:
   name: bad-job-kind-denies
 spec:
   description: |
-    A Job created under `harness-<ws>` whose pod template carries a
+    A Job created under `ws-<ws>` whose pod template carries a
     `sycophant.md/job-kind` value that is neither `tool` nor `inference` is
     denied. job-kind drives additive per-kind egress; a value outside the known
     set must not admit.
@@ -46,7 +46,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-probe" -n "$TENANT_NS" -f -
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:ws-probe" -n "$TENANT_NS" -f -
               apiVersion: batch/v1
               kind: Job
               metadata:
@@ -58,7 +58,7 @@ spec:
                       sycophant.md/job-kind: malware
                   spec:
                     restartPolicy: Never
-                    serviceAccountName: unprivileged-probe
+                    serviceAccountName: ws-probe-unprivileged
                     containers:
                       - name: probe
                         image: registry.k8s.io/pause:3.9

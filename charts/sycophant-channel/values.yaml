@@ -1,0 +1,4 @@
+# The channel provision command's name suffix and flat data, set by the
+# installer. The command carries the channel's adapter and headscale settings.
+name: ""
+command: {}

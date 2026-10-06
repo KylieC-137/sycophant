@@ -1,0 +1,4 @@
+# The toolset provision command's name suffix and flat data, set by the
+# installer. The command carries the toolset's tool definitions.
+name: ""
+command: {}

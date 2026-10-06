@@ -1,4 +1,3 @@
-{{- if eq .Values.render "base" }}
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -80,7 +79,7 @@ spec:
     # Per-workspace harness relay-forward surface (9091): the gateway
     # forwards external WatchTools / CallTool calls into the workspace's
     # harness. This is the harness's relay-only port, split off the pod-facing
-    # dispatch port (9090). The per-workspace harness-egress-<ws> CNP
+    # dispatch port (9090). The per-workspace ws-<ws>-egress CNP
     # authorises the reverse (harness ingress admitting relay-controller to 9091).
     # Workspace scoping is enforced at the application layer (caller's signed
     # envelope + channel binding) and by the harness's per-workspace ingress.
@@ -92,4 +91,3 @@ spec:
         - ports:
             - port: "9091"
               protocol: TCP
-{{- end }}

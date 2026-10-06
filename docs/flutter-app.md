@@ -46,25 +46,23 @@ If `adb install` fails with `INSTALL_FAILED_USER_RESTRICTED`, enable "Install vi
 
 Trust flow:
 
-1. Operator (you) deploys headscale plus the app channel with ACME enabled, as the tenant chart's `render=channel` slice, installed host-side into the provisioned tenant namespace:
+1. Operator (you) deploys headscale plus the app channel with ACME enabled, as the `sycophant-channel` chart, installed into the provisioned tenant by `syco channel up`:
    ```yaml
-   # channel-values.yaml
-   namespace:
-     create: false
-   headscale:
-     enabled: true
-     serverUrl: https://hs.yourdomain.com
-     acme:
+   # channel.yaml
+   channel:
+     name: app
+     tenant: hello-world
+     kind: app
+     loginServer: https://hs.yourdomain.com
+     headscale:
        enabled: true
-       email: you@yourdomain.com
-   channels:
-     app:
-       kind: app
-       loginServer: https://hs.yourdomain.com
+       serverUrl: https://hs.yourdomain.com
+       acme:
+         enabled: true
+         email: you@yourdomain.com
    ```
    ```sh
-   helm upgrade --install channel-app ~/.config/sycophant/charts/sycophant-tenant \
-     -n tenant-hello-world --set render=channel -f channel-values.yaml
+   syco channel up -f channel.yaml
    ```
    Re-run it after editing the channel values to apply the change.
 2. On the phone, install the official Tailscale Android client (Play Store or `sideload-via-adb` an F-Droid build); set "Use an alternate server" to `https://hs.yourdomain.com`; log in via auth-key minted from headscale.

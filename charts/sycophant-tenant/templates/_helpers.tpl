@@ -4,42 +4,6 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/part-of: sycophant
 {{- end -}}
 
-{{- define "sycophant.workspaceLabels" -}}
-{{ include "sycophant.labels" .context }}
-app.kubernetes.io/component: harness
-app.kubernetes.io/name: {{ .name }}
-{{- end -}}
-
-{{- /*
-A workspace provision command's `grant.<toolset>.<grant>.<secret|path|egress>`
-keys, grouped as YAML: toolset, then grant, then field. Takes the provision
-command data.
-*/}}
-{{- define "sycophant.commandGrants" -}}
-{{- $grants := dict -}}
-{{- range $k, $v := . -}}
-{{- if hasPrefix "grant." $k -}}
-{{- $parts := splitList "." $k -}}
-{{- $toolset := index $parts 1 -}}
-{{- $grant := index $parts 2 -}}
-{{- if not (hasKey $grants $toolset) }}{{ $_ := set $grants $toolset (dict) }}{{ end -}}
-{{- $byGrant := get $grants $toolset -}}
-{{- if not (hasKey $byGrant $grant) }}{{ $_ := set $byGrant $grant (dict) }}{{ end -}}
-{{- $_ := set (get $byGrant $grant) (index $parts 3) $v -}}
-{{- end -}}
-{{- end -}}
-{{- toYaml $grants -}}
-{{- end -}}
-
-{{- /*
-The one port every local model serves on. A local provision command carries no
-baseUrl: the server, its Service, and its ingress fence all bind this port, and
-the harness dials `inference-<key>` on the same number.
-*/}}
-{{- define "sycophant.inferenceLocalPort" -}}
-8080
-{{- end -}}
-
 {{- /*
 Projected kube-apiserver SA token + CA + namespace at the canonical
 kubelet mount path. Controllers use this in place of the auto-mounted
@@ -90,12 +54,4 @@ to the egress-entry depth (4).
           protocol: UDP
         - port: "53"
           protocol: TCP
-{{- end -}}
-
-
-{{/* Number of `kind: app` entries under `.Values.channels`. */}}
-{{- define "sycophant.appChannelCount" -}}
-{{- $n := 0 -}}
-{{- range .Values.channels }}{{- if eq .kind "app" }}{{- $n = add $n 1 }}{{- end }}{{- end -}}
-{{- $n -}}
 {{- end -}}

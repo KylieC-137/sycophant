@@ -4,7 +4,7 @@ metadata:
   name: stripped-envelope-denies
 spec:
   description: |
-    A Job created under `harness-<ws>` whose pod template still lacks a required
+    A Job created under `ws-<ws>` whose pod template still lacks a required
     isolation-envelope element after mutation is denied. The creator submits a
     container that explicitly declares a non-compliant securityContext
     (readOnlyRootFilesystem: false, allowPrivilegeEscalation: true); the gate's
@@ -50,7 +50,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-probe" -n "$TENANT_NS" -f -
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:ws-probe" -n "$TENANT_NS" -f -
               apiVersion: batch/v1
               kind: Job
               metadata:
@@ -62,7 +62,7 @@ spec:
                       sycophant.md/job-kind: tool
                   spec:
                     restartPolicy: Never
-                    serviceAccountName: unprivileged-probe
+                    serviceAccountName: ws-probe-unprivileged
                     containers:
                       - name: probe
                         image: registry.k8s.io/pause:3.9

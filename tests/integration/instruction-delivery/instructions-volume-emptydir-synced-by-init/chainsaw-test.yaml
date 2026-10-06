@@ -14,8 +14,8 @@ spec:
               set -euo pipefail
               REPO_ROOT=$(git rev-parse --show-toplevel)
               render=$(mktemp)
-              helm template t "$REPO_ROOT/charts/sycophant-tenant" -n tenant-1 \
-                --set render=workspace --set name=research \
+              helm template t "$REPO_ROOT/charts/sycophant-workspace" -n tenant-1 \
+                --set name=research \
                 > "$render"
               python3 - "$render" <<'PY'
               import sys, yaml

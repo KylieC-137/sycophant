@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-channel-app
+  namespace: tenant-acme
+  uid: 0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+data:
+  storageClass: local-path
+  kind: app
+  image: tailscale/tailscale
+  tag: v1.80.0
+  pullPolicy: Always
+  loginServer: http://headscale:8080
+  hostname: relay
+  authKeySecret: relay-tsnet-authkey
+  headscale.enabled: "true"
+  headscale.image: headscale/headscale
+  headscale.tag: "0.28.0"
+  headscale.pullPolicy: Always
+  headscale.serverUrl: http://localhost:8080
+  headscale.magicDns: "true"
+  headscale.baseDomain: ts.local
+  headscale.acme.enabled: "false"
+  headscale.acme.email: ops@example.com

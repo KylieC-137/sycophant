@@ -1,4 +1,3 @@
-{{- if eq .Values.render "base" }}
 {{- if .Release.IsInstall }}
 ---
 # The relay's routing and authorization table. Helm creates the object and
@@ -37,5 +36,4 @@ metadata:
   labels:
     {{- include "sycophant.labels" . | nindent 4 }}
     sycophant.md/type: relay-access-grants
-{{- end }}
 {{- end }}

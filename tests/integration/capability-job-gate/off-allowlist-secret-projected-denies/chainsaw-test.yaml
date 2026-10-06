@@ -4,9 +4,9 @@ metadata:
   name: off-allowlist-secret-projected-denies
 spec:
   description: |
-    A Job created under `harness-<ws>` that references, on
+    A Job created under `ws-<ws>` that references, on
     `volumes[].projected.sources[].secret.name`, a Secret name absent from the
-    workspace's `capability-grants-<ws>` allowlist is denied. The projected volume
+    workspace's `ws-<ws>-capability-grants` allowlist is denied. The projected volume
     is a permitted volume kind, so the volume-kind allowlist admits it; the
     secret-name check over the projected secret source is the only reason to deny.
     With that surface unchecked the Job admits and this test goes red.
@@ -44,7 +44,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:harness-probe" -n "$TENANT_NS" -f -
+              cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:ws-probe" -n "$TENANT_NS" -f -
               apiVersion: batch/v1
               kind: Job
               metadata:
@@ -56,7 +56,7 @@ spec:
                       sycophant.md/job-kind: tool
                   spec:
                     restartPolicy: Never
-                    serviceAccountName: unprivileged-probe
+                    serviceAccountName: ws-probe-unprivileged
                     volumes:
                       - name: creds
                         projected:

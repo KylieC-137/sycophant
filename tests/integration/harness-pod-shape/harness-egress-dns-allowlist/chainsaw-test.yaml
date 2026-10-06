@@ -3,7 +3,7 @@ kind: Test
 metadata:
   name: harness-egress-dns-allowlist
 spec:
-  description: harness-egress-<workspace> is each harness's sole egress policy and carries the L7 DNS allowlist.
+  description: ws-<workspace>-egress is each harness's sole egress policy and carries the L7 DNS allowlist.
   bindings:
     - name: tenant_ns
       value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
@@ -22,7 +22,7 @@ spec:
               apiVersion: cilium.io/v2
               kind: CiliumNetworkPolicy
               metadata:
-                name: harness-egress-probe
+                name: ws-probe-egress
                 namespace: ($tenant_ns)
               spec:
                 endpointSelector:

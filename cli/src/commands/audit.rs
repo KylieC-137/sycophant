@@ -11,6 +11,7 @@ use crate::cli::AuditCmd;
 use crate::commands::common::{ok, step, warn};
 use crate::runner::{run_output, run_passthrough, run_silent};
 use crate::scope::Scope;
+use shared::auth::{unprivileged_sa, WORKSPACE_PREFIX};
 
 // Real key prefixes + a length floor, so the bare strings "sk-"/"sk-ant-" in
 // ordinary text don't false-positive.
@@ -62,7 +63,7 @@ pub(crate) fn run(scope: &Scope, cmd: AuditCmd) -> Result<(), String> {
     );
 
     // 2. Secret scrubbing — no real key prefixes in harness stdout or the
-    //    conversation log on the harness's own conversation-data PVC.
+    //    conversation log on the harness's own ws-<ws>-conversation PVC.
     record(
         &mut failures,
         match scrub_hits(ns, ws) {
@@ -234,7 +235,7 @@ fn scrub_hits(ns: &str, ws: &str) -> Result<(u32, u32), String> {
         &[
             "-c",
             &format!(
-                "kubectl logs -n {ns} deployment/{ws} -c harness --tail=10000 2>/dev/null | \
+                "kubectl logs -n {ns} deployment/{WORKSPACE_PREFIX}{ws} -c harness --tail=10000 2>/dev/null | \
          grep -cE '{KEY_REGEX}' || true"
             ),
         ],
@@ -360,17 +361,18 @@ fn parse_grep_count(s: &str) -> u32 {
 }
 
 /// `kubectl get sa -o name` lists `serviceaccount/<name>`; a workspace's SAs are
-/// `harness-<workspace>`, `unprivileged-<workspace>`, and `<workspace>-workspace-init`.
+/// `ws-<workspace>`, `ws-<workspace>-unprivileged`, and `ws-<workspace>-init`.
 /// Exact line match so a shorter workspace name can't satisfy a longer one.
 fn workspace_sa_present(get_output: &str, ws: &str) -> bool {
-    // Prefix-form SAs are built from the shared dispatch-auth source of truth, so
-    // a rename there cannot silently diverge from this check. The suffix-form
-    // `<ws>-workspace-init` SA never dials dispatch, so it stays local.
-    let mut wants: Vec<String> = shared::auth::WORKSPACE_SA_PREFIXES
-        .iter()
-        .map(|prefix| format!("serviceaccount/{prefix}{ws}"))
-        .collect();
-    wants.push(format!("serviceaccount/{ws}-workspace-init"));
+    // The dispatch-facing names are built from the shared dispatch-auth source of
+    // truth, so a rename there cannot silently diverge from this check. The
+    // `-init` SA never dials dispatch, so its suffix stays local.
+    let base = format!("serviceaccount/{WORKSPACE_PREFIX}{ws}");
+    let wants = [
+        format!("serviceaccount/{}", unprivileged_sa(ws)),
+        format!("{base}-init"),
+        base,
+    ];
     get_output
         .lines()
         .any(|l| wants.iter().any(|want| l.trim() == want))
@@ -408,23 +410,23 @@ mod tests {
 
     #[test]
     fn workspace_sa_exact_match() {
-        // Chart-rendered forms: harness-<ws>, unprivileged-<ws>, <ws>-workspace-init.
+        // Chart-rendered forms: ws-<ws>, ws-<ws>-unprivileged, ws-<ws>-init.
         // Each accepted form must resolve on its own.
         assert!(workspace_sa_present(
-            "serviceaccount/harness-hello-world\n",
+            "serviceaccount/ws-hello-world\n",
             "hello-world"
         ));
         assert!(workspace_sa_present(
-            "serviceaccount/unprivileged-hello-world\n",
+            "serviceaccount/ws-hello-world-unprivileged\n",
             "hello-world"
         ));
         assert!(workspace_sa_present(
-            "serviceaccount/hello-world-workspace-init\n",
+            "serviceaccount/ws-hello-world-init\n",
             "hello-world"
         ));
         // Mutant using `contains` instead of exact match would pass this.
         assert!(!workspace_sa_present(
-            "serviceaccount/harness-hello-world-2\n",
+            "serviceaccount/ws-hello-world-2\n",
             "hello-world"
         ));
         assert!(!workspace_sa_present("", "hello-world"));
