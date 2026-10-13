@@ -37,6 +37,8 @@
 # user:
 #   tenant: acme
 #   subject: "https://dex.example.com/dex#alice"
+#   workspaces: []           # the subject's granted workspace names
+#   handles: {}              # <channel>: that platform's user ID, e.g. slack: U0123ABCDEF
 
 # channel:
 #   name: app

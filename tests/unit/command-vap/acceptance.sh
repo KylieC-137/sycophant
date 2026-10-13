@@ -200,6 +200,13 @@ expect slice-commands-validate-data provision-user-0f1e2d3c4 handle
 expect slice-commands-validate-data provision-user-1f1e2d3c4b quote
 expect slice-commands-validate-data provision-user-2f1e2d3c4b quote
 expect slice-commands-validate-data provision-user-3f1e2d3c4b quote
+# The user command's data contract: subject + workspaces + handles.
+expect user-commands provision-user-4d5e6f7a81 ""
+expect user-commands provision-user-4d5e6f7a82 "comma list of DNS-safe names"
+expect user-commands provision-user-4d5e6f7a83 "handle.<channel>"
+expect user-commands provision-user-4d5e6f7a84 "control character"
+# A standing ServiceAccount credential cannot write a user command.
+expect user-from-serviceaccount provision-user-4d5e6f7a81 "issuer-prefixed"
 while IFS=$'\t' read -r res name detail; do
   if [ "$res" = ok ]; then ok "$name"; else bad "$name" "$detail"; fi
 done < "$WORK/checks"

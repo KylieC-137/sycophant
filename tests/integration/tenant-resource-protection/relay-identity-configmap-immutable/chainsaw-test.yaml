@@ -1,9 +1,9 @@
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
-  name: protect-grants-configmap-blocks-same-ns
+  name: relay-identity-configmap-immutable
 spec:
-  description: An in-namespace ServiceAccount cannot create, update, or delete the relay-access-grants ConfigMap.
+  description: An in-namespace ServiceAccount, the relay included, cannot create, update, or delete a relay-identity ConfigMap.
   bindings:
     - name: tenant_ns
       value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
@@ -64,7 +64,7 @@ spec:
                 kind: Role
                 name: configmap-writers
                 apiGroup: rbac.authorization.k8s.io
-    - name: operator-seeds-the-grants-configmap
+    - name: operator-seeds-the-identity-configmap
       try:
         - apply:
             template: true
@@ -72,62 +72,61 @@ spec:
               apiVersion: v1
               kind: ConfigMap
               metadata:
-                name: relay-access-grants
+                name: user-0a1b2c3d4e
                 namespace: ($tenant_ns)
                 labels:
                   app.kubernetes.io/part-of: sycophant
-                  sycophant.md/type: relay-access-grants
+                  sycophant.md/type: relay-identity
               data:
-                caleb-phone: |
-                  channel: app
-                  identity: kJ8f2QwXnR4tYv6b
-                  workspace: family
+                subject: "https://issuer.example#alice"
+                workspaces: "alpha,beta"
+                handle.slack: "U0123ABCDEF"
         - assert:
             resource:
               apiVersion: v1
               kind: ConfigMap
               metadata:
-                name: relay-access-grants
+                name: user-0a1b2c3d4e
                 namespace: ($tenant_ns)
-    - name: in-namespace-sa-cannot-update-the-grants-rows
+    - name: in-namespace-sa-cannot-rewrite-identity-data
       try:
         - script:
             env:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl patch configmap relay-access-grants -n "$TENANT_NS" --type=merge \
-                -p '{"data":{"attacker-row":"channel: app\nidentity: stolen\nworkspace: family\n"}}' \
+              kubectl patch configmap user-0a1b2c3d4e -n "$TENANT_NS" --type=merge \
+                -p '{"data":{"workspaces":"alpha,beta,gamma"}}' \
                 --as="system:serviceaccount:${TENANT_NS}:attacker"
             check:
               ($error != null): true
               (contains($stderr, 'cluster-protect-security')): true
-    - name: the-relay-sa-cannot-update-the-grants-rows-either
+    - name: the-relay-sa-cannot-rewrite-identity-data-either
       try:
         - script:
             env:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl patch configmap relay-access-grants -n "$TENANT_NS" --type=merge \
-                -p '{"data":{"relay-minted-row":"channel: app\nidentity: self\nworkspace: family\n"}}' \
+              kubectl patch configmap user-0a1b2c3d4e -n "$TENANT_NS" --type=merge \
+                -p '{"data":{"handle.slack":"attacker"}}' \
                 --as="system:serviceaccount:${TENANT_NS}:relay-controller"
             check:
               ($error != null): true
               (contains($stderr, 'cluster-protect-security')): true
-    - name: in-namespace-sa-cannot-delete-the-grants-configmap
+    - name: in-namespace-sa-cannot-delete-the-identity-configmap
       try:
         - script:
             env:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl delete configmap relay-access-grants -n "$TENANT_NS" \
+              kubectl delete configmap user-0a1b2c3d4e -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:attacker"
             check:
               ($error != null): true
               (contains($stderr, 'cluster-protect-security')): true
-    - name: in-namespace-sa-cannot-create-a-second-grants-configmap
+    - name: in-namespace-sa-cannot-create-a-second-identity-configmap
       try:
         - script:
             env:
@@ -138,29 +137,24 @@ spec:
               apiVersion: v1
               kind: ConfigMap
               metadata:
-                name: grants-shadow
+                name: identity-shadow
                 labels:
-                  sycophant.md/type: relay-access-grants
+                  sycophant.md/type: relay-identity
               data:
-                attacker-row: |
-                  channel: app
-                  identity: stolen
-                  workspace: family
+                subject: "https://issuer.example#mallory"
+                workspaces: "alpha"
               MANIFEST
             check:
               ($error != null): true
               (contains($stderr, 'cluster-protect-security')): true
-    - name: an-out-of-namespace-principal-can-still-write-the-rows
+    - name: an-out-of-namespace-principal-can-still-write-identity-data
       try:
         - script:
             env:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl patch configmap relay-access-grants -n "$TENANT_NS" --type=merge \
-                -p '{"data":{"dad-telegram":"channel: telegram\nidentity: \"7133824091\"\nworkspace: family\n"}}'
+              kubectl patch configmap user-0a1b2c3d4e -n "$TENANT_NS" --type=merge \
+                -p '{"data":{"handle.email":"alice@example.com"}}'
             check:
               ($error == null): true
-      catch:
-        - events:
-            namespace: ($tenant_ns)

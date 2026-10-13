@@ -55,8 +55,8 @@ spec:
             capabilities:
               drop: [ALL]
           env:
-            # Namespace the gateway reads its relay-access-grants ConfigMap
-            # and registered-keys Secret from.
+            # Namespace the gateway reads the relay-identity ConfigMaps and
+            # submits its authorization reviews in.
             - name: RELAY_NAMESPACE
               value: "{{ .Release.Namespace }}"
           ports:
@@ -65,19 +65,21 @@ spec:
             # CiliumNetworkPolicy below (harness Subscribe; later DeliverOutbound).
             - name: grpc-internal
               containerPort: 9090
-            # App listener (9091): client-signed envelope verified by the
-            # in-process tower middleware. Bound on the pod network and
-            # admitted only from the app adapter pod by relay-ingress.
+            # App listener (9091): person tokens, authenticated by
+            # TokenReview and authorized per request by
+            # SubjectAccessReview. Admitted only from the app adapter
+            # pod by relay-ingress.
             - name: grpc-app
               containerPort: 9091
-            # Adapter listener (9092): the same client-signed envelope on
-            # its own socket, admitted only from adapter-class: principal
-            # pods by relay-ingress.
+            # Adapter listener (9092): adapter ServiceAccount tokens only,
+            # authenticated by an audience-pinned TokenReview and authorized
+            # by SubjectAccessReview. Admitted only from adapter-class:
+            # principal pods by relay-ingress.
             - name: grpc-adapter
               containerPort: 9092
-          # Startup blocks on the grants watcher's initial sync (up to 10s)
-          # and the registered-key rebuild. A generous startupProbe avoids
-          # liveness flapping during that window.
+          # Startup blocks on the identity watcher's initial sync. A
+          # generous startupProbe avoids liveness flapping during that
+          # window.
           startupProbe:
             grpc:
               port: 9090

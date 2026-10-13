@@ -8,7 +8,7 @@ FROM alpine:3.21
 ARG TARGETARCH
 ARG HELM_VERSION=v3.17.3
 ARG KUBECTL_VERSION=v1.31.0
-RUN apk add --no-cache curl ca-certificates && \
+RUN apk add --no-cache curl ca-certificates jq && \
     curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-${TARGETARCH}.tar.gz" \
       | tar -xzO "linux-${TARGETARCH}/helm" > /usr/local/bin/helm && \
     chmod +x /usr/local/bin/helm && \

@@ -34,7 +34,8 @@ cat > "$WORK/bin/kubectl" <<'SH'
 #!/bin/sh
 printf 'kubectl %s\n' "$*" >> "$CALLS"
 case "$*" in
-  *"get configmap"*) printf '%s' "${GET_CM:-{\}}" ;;
+  *"get configmap"*"-o json"*) [ -n "${GET_CM_EXIT:-}" ] && exit "$GET_CM_EXIT"; _d='{}'; printf '{"metadata":{"uid":"%s","creationTimestamp":"2026-01-01T00:00:00Z"},"data":%s}' "${ORIG_UID:-$COMMAND_UID}" "${GET_CM-$_d}" ;;
+  *"get configmap"*) [ -n "${GET_CM_EXIT:-}" ] && exit "$GET_CM_EXIT"; printf '%s' "${GET_CM-{\}}" ;;
 esac
 exit 0
 SH
@@ -85,14 +86,21 @@ def find(docs, kind, name, ns):
             return d
     return None
 
-def run_job(job, helm_exit, get_cm="{}"):
+def run_job(job, helm_exit, get_cm="{}", get_cm_exit="", wrong_uid=False):
     c = job["spec"]["template"]["spec"]["containers"][0]
     script = c["args"][0].replace("/tmp/", work + "/scratch/")
     os.makedirs(work + "/scratch", exist_ok=True)
     calls = os.path.join(work, "calls")
     open(calls, "w").close()
     env = {e["name"]: e.get("value", "") for e in c.get("env", [])}
-    env.update(PATH=f"{work}/bin:/usr/bin:/bin", CALLS=calls, HELM_EXIT=str(helm_exit), HOME=work, GET_CM=get_cm)
+    import shutil
+    jq_dir = os.path.dirname(shutil.which("jq") or "/usr/local/bin/jq")
+    env.update(PATH=f"{work}/bin:{jq_dir}:/usr/bin:/bin", CALLS=calls, HELM_EXIT=str(helm_exit), HOME=work, GET_CM=get_cm, GET_CM_EXIT=get_cm_exit)
+    # The stub always returns the command's real uid in its JSON.
+    # ORIG_UID carries it; COMMAND_UID is what the Job thinks its command's uid is.
+    env["ORIG_UID"] = env.get("COMMAND_UID", "")
+    if wrong_uid:
+        env["COMMAND_UID"] = "wrong-uid-from-a-different-grant"
     rc = subprocess.run(["sh", "-c", script], env=env, capture_output=True).returncode
     with open(calls) as fh:
         return rc, [l.split() for l in fh.read().splitlines()]
@@ -158,6 +166,13 @@ for kind, c in cases.items():
         bad(f"{kind}: successful install deletes its command after helm",
             f"rc={rc}, calls={[' '.join(a) for a in calls]}")
 
+    if kind == "user":
+        name = "user: install hands the command's write time to the chart"
+        if helm_at and any(a.startswith("commandCreated=") for a in calls[helm_at[0]]):
+            ok(name)
+        else:
+            bad(name, f"no commandCreated in {[' '.join(calls[i]) for i in helm_at]}")
+
     if c["release"]:
         if helm_at and c["release"] in calls[helm_at[0]]:
             ok(f"{kind}: release named from the command name suffix")
@@ -170,6 +185,29 @@ for kind, c in cases.items():
         ok(f"{kind}: failed install leaves its command")
     else:
         bad(f"{kind}: failed install leaves its command", f"rc={rc}, calls={[' '.join(a) for a in calls]}")
+
+    if kind != "tenant":
+        # A retry that finds its command gone must not reach helm: empty
+        # values would prune the release.
+        name = f"{kind}: a missing command stops the install before helm"
+        rc, calls = run_job(job, 0, get_cm_exit="1")
+        if rc != 0 and not any(a[0] == "helm" for a in calls):
+            ok(name)
+        else:
+            bad(name, f"rc={rc}, calls={[' '.join(a) for a in calls]}")
+        name = f"{kind}: a command with no data stops the install before helm"
+        rc, calls = run_job(job, 0, get_cm="")
+        if rc != 0 and not any(a[0] == "helm" for a in calls):
+            ok(name)
+        else:
+            bad(name, f"rc={rc}, calls={[' '.join(a) for a in calls]}")
+
+        name = f"{kind}: a replaced command stops the install before helm"
+        rc, calls = run_job(job, 0, wrong_uid=True)
+        if rc != 0 and not any(a[0] == "helm" for a in calls):
+            ok(name)
+        else:
+            bad(name, f"rc={rc}, calls={[' '.join(a) for a in calls]}")
 
 docs = generated("tenant")
 name = f"provision-tenant-{uid10}"
@@ -224,14 +262,17 @@ for kind in cases:
     at = argv.index("--install") + 2 if "--install" in argv else len(argv)
     chart = argv[at] if at < len(argv) else None
     sets = [argv[i + 1] for i in range(len(argv) - 1) if argv[i] in ("--set", "--set-string")]
+    # The user install rides the generic values path like every other kind:
+    # its chart consumes .Values.command, and the installer passes
+    # --set-string name= unconditionally.
     want = {"tenant": "namespace.create=false" in sets,
-            "user": not any(a.startswith("name=") for a in sets)}.get(kind, True)
+            "user": any(a.startswith("name=") for a in sets)}.get(kind, True)
     if chart == f"/charts/sycophant-{kind}" and want:
         ok(name)
     else:
         bad(name, f"chart {chart}, sets {sets}")
 
-for kind, release in (("inference", "local"), ("toolset", "one"), ("workspace", "one"), ("channel", "app")):
+for kind, release in (("inference", "local"), ("toolset", "one"), ("workspace", "one"), ("channel", "app"), ("user", "0123456789")):
     command_data = yaml.safe_load(open(os.path.join(sys.argv[2], f"{kind}.yaml")))["data"]
     argv = install_call(kind, json.dumps(command_data))
     name = f"{kind}: install hands the command data and name to the chart"

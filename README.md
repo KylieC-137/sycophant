@@ -24,7 +24,7 @@ Most agent frameworks are built for capability, not containment. Isolation is so
 
 Hosted platforms take the other extreme. The model, your data, and the agent all run on their infrastructure. You get controls, but they are settings on machines you do not own, backed by promises you have to trust.
 
-Sycophant is neither. Your data lives on infrastructure you choose. The agent answers only to devices you approve. Containment is the default, not an add-on.
+Sycophant is neither. Your data lives on infrastructure you choose. The agent answers only to the people, and their bound chat handles, you grant. Containment is the default, not an add-on.
 
 ## What a compromised agent can't do
 
@@ -80,13 +80,13 @@ helm install sycophant charts/sycophant-cluster \
 Three components, each with a single, well-defined job. The harness is the broker: the agent asks it for a tool or model by name. For a tool or a remote model, it spins up a throwaway job holding only the credentials and egress that call needs. A local model runs on a warm in-cluster service the harness dials directly, with no credential. Neither secrets nor egress reach the agent.
 
 <p align="center">
-  <img src="docs/architecture.svg" alt="Registered devices reach a per-workspace harness through the relay-controller gateway. The harness runs the agent loop, owns the conversation log, and reads its capability catalog and instructions from read-only volumes. It reaches three capabilities on separate paths: a warm local-inference Service it dials directly with no credential, and a remote-inference Job and a tool Job, each an ephemeral gVisor sandbox the harness creates with only its own Secret and its own network egress. Only tool Jobs mount the workspace volume. Credentials exist only inside those Jobs, never with the agent." width="840" />
+  <img src="docs/architecture.svg" alt="Authenticated people and channel adapters (person or adapter tokens) reach a per-workspace harness through the relay-controller gateway. The harness runs the agent loop, owns the conversation log, and reads its capability catalog and instructions from read-only volumes. It reaches three capabilities on separate paths: a warm local-inference Service it dials directly with no credential, and a remote-inference Job and a tool Job, each an ephemeral gVisor sandbox the harness creates with only its own Secret and its own network egress. Only tool Jobs mount the workspace volume. Credentials exist only inside those Jobs, never with the agent." width="840" />
 </p>
 
 | Component | Role |
 | --- | --- |
 | **Harness** | The agent runtime and broker, one per workspace. Runs the agent loop, owns the conversation history, and reads its own instructions — the workspace's AGENTS.md, sub-agents, and skills — in-process from a read-only volume. Creates each tool call and remote model call as a gated, throwaway job with only the credentials and egress that call needs, and dials a warm local model directly. |
-| **Relay** | The client gateway. Registered devices dial in through it to reach their agent, and it relays messages to and from the harness. |
+| **Relay** | The client gateway. Authenticated people and channel adapters (person or adapter tokens) dial in through it to reach their agent, and it relays messages to and from the harness. |
 | **Toolset** | The tool runtime. Runs one tool call inside a throwaway gVisor sandbox the harness creates and tears down. |
 
 Built as a Rust monorepo on gRPC (tonic/prost), Kubernetes CRDs (kube-rs), and Helm charts. The `syco` CLI drives it. Images target Linux arm64 and amd64.

@@ -197,7 +197,7 @@ impl ConversationRegistry {
     pub(crate) async fn set_name(&self, conv_id: &str, new_name: &str) -> Result<(), String> {
         validate_conversation_id(conv_id)?;
         // The owner is rewritten verbatim: a rename must never orphan a
-        // conversation from the row that minted it.
+        // conversation from the subject that minted it.
         let owner = self
             .meta
             .read()
@@ -645,25 +645,25 @@ mod tests {
     // The owner is threaded through `ConversationMeta` and the `meta.json`
     // sidecar, so the stamp survives a harness roll.
 
-    const ROW_A: &str = "caleb-phone";
-    const ROW_B: &str = "caleb-laptop";
+    const SUBJECT_A: &str = "https://issuer.example#alice";
+    const SUBJECT_B: &str = "https://issuer.example#bob";
 
-    /// `list_summaries` returns only the asking owner's conversations. Two rows
-    /// in the same workspace is the only shape a single harness ever sees, since
-    /// a harness *is* one workspace.
+    /// `list_summaries` returns only the asking owner's conversations. Two
+    /// subjects in the same workspace is the only shape a single harness ever
+    /// sees, since a harness *is* one workspace.
     ///
-    /// Return the unfiltered map and `caleb-phone` sees `caleb-laptop`'s
-    /// conversation drawer. Filter on the wrong side of the comparison and it
-    /// sees only the other row's. Neither is visible at the relay, because the
-    /// relay is not the thing enumerating.
+    /// Return the unfiltered map and alice sees bob's conversation drawer.
+    /// Filter on the wrong side of the comparison and she sees only bob's.
+    /// Neither is visible at the relay, because the relay is not the thing
+    /// enumerating.
     #[tokio::test]
     async fn list_summaries_returns_only_the_asking_owners_conversations() {
         let (reg, _root) = local_registry();
-        let mine = reg.mint(ROW_A).await.unwrap();
-        let theirs = reg.mint(ROW_B).await.unwrap();
+        let mine = reg.mint(SUBJECT_A).await.unwrap();
+        let theirs = reg.mint(SUBJECT_B).await.unwrap();
 
         let ids: Vec<String> = reg
-            .list_summaries(ROW_A)
+            .list_summaries(SUBJECT_A)
             .await
             .into_iter()
             .map(|(id, _, _)| id)
@@ -671,7 +671,7 @@ mod tests {
         assert_eq!(ids, vec![mine.clone()]);
 
         let ids: Vec<String> = reg
-            .list_summaries(ROW_B)
+            .list_summaries(SUBJECT_B)
             .await
             .into_iter()
             .map(|(id, _, _)| id)
@@ -693,8 +693,8 @@ mod tests {
     #[tokio::test]
     async fn the_owner_stamp_survives_rebuild_from_disk() {
         let (reg, root) = local_registry();
-        let mine = reg.mint(ROW_A).await.unwrap();
-        let _theirs = reg.mint(ROW_B).await.unwrap();
+        let mine = reg.mint(SUBJECT_A).await.unwrap();
+        let _theirs = reg.mint(SUBJECT_B).await.unwrap();
 
         // Fresh registry over the same root: the harness pod was replaced.
         let factory: Arc<dyn ConversationStoreFactory> = Arc::new(LocalFsFactory::new(root));
@@ -702,7 +702,7 @@ mod tests {
         fresh.rebuild_from_disk().await.unwrap();
 
         let ids: Vec<String> = fresh
-            .list_summaries(ROW_A)
+            .list_summaries(SUBJECT_A)
             .await
             .into_iter()
             .map(|(id, _, _)| id)
@@ -710,12 +710,12 @@ mod tests {
         assert_eq!(
             ids,
             vec![mine],
-            "after a roll each row must still see exactly its own conversations"
+            "after a roll each subject must still see exactly its own conversations"
         );
         assert_eq!(
-            fresh.list_summaries(ROW_B).await.len(),
+            fresh.list_summaries(SUBJECT_B).await.len(),
             1,
-            "the other row's conversation must survive too, still owned"
+            "the other subject's conversation must survive too, still owned"
         );
     }
 }

@@ -65,6 +65,9 @@ message MintConversationRequest {
   // never parses it, never derives authorization from it, and never learns
   // what it names; it is an equality key. Authorization stays at the relay.
   string owner = 1;
+  // The workspace this conversation is minted in. The relay authorizes it
+  // against the caller's live reach before forwarding.
+  string workspace = 2;
 }
 
 message MintConversationResponse {
@@ -103,6 +106,8 @@ message ConversationSummary {
 
 message DeleteConversationRequest {
   string conversation_id = 1;
+  // The workspace the conversation lives in.
+  string workspace = 2;
 }
 
 message DeleteConversationResponse {}
@@ -110,6 +115,8 @@ message DeleteConversationResponse {}
 message SetConversationNameRequest {
   string conversation_id = 1;
   string name = 2;
+  // The workspace the conversation lives in.
+  string workspace = 3;
 }
 
 message SetConversationNameResponse {}
@@ -123,7 +130,8 @@ message ListWorkspacesResponse {
 // The grants the caller's workspace may select from, grouped by
 // toolset. Names only — the relay never reads a Secret.
 message ListGrantsRequest {
-  // Must match the caller's verified workspace; empty is accepted.
+  // Required; empty is InvalidArgument. Authorized by a review of the
+  // caller's subject against this workspace.
   string workspace = 1;
 }
 
@@ -294,14 +302,15 @@ message GrantSelection {
 // --- Conversation history ---
 
 message GetConversationHistoryRequest {
-  // Conversation to read; must belong to the workspace the calling SA
-  // token authorizes for.
+  // Conversation to read; must belong to the workspace the request names.
   string conversation_id = 1;
   // Max number of recent entries to return. Server clamps to a sane
   // ceiling; 0 / unset → server default (~50).
   optional uint32 limit = 2;
   // Opaque owner key. The conversation must carry this owner.
   string owner = 3;
+  // The workspace the conversation lives in.
+  string workspace = 4;
 }
 
 message GetConversationHistoryResponse {
@@ -327,12 +336,16 @@ message HistoryEntry {
 
 message GetTurnStateRequest {
   string conversation_id = 1;
+  // The workspace the conversation lives in.
+  string workspace = 2;
 }
 
 // Client-initiated local stop of the in-flight turn for this conversation.
 // Keyed by conversation_id (one turn in flight per conversation).
 message CancelTurnRequest {
   string conversation_id = 1;
+  // The workspace the conversation lives in.
+  string workspace = 2;
 }
 
 message CancelTurnResponse {
@@ -342,7 +355,10 @@ message CancelTurnResponse {
 
 // --- Tool dispatch ---
 
-message WatchToolsRequest {}
+message WatchToolsRequest {
+  // The workspace whose tool catalog this stream watches.
+  string workspace = 1;
+}
 
 message ToolListUpdate {
   repeated ToolInfo tools = 1;
@@ -365,8 +381,11 @@ message CallToolRequest {
   // its active conversation; the harness records the call's frames in
   // that conversation's execution log. Empty is accepted: a
   // conversation-less app call streams live but persists no per-conversation
-  // record. A non-empty id must be owned by the caller's workspace.
+  // record. A non-empty id must have been minted by the caller's subject.
   string conversation_id = 3;
+  // The workspace the call runs in. The relay authorizes it against the
+  // caller's live reach before forwarding.
+  string workspace = 4;
 }
 
 message CallToolResponse {
@@ -422,6 +441,8 @@ message AwaitToolResultRequest {
   // execution.json instead of scanning. Empty for a conversation-less
   // call, which persists nothing.
   string conversation_id = 2;
+  // The workspace the call runs in.
+  string workspace = 3;
 }
 
 message CancelToolRequest {
@@ -439,9 +460,9 @@ message ChannelIngestRequest {
   // The channel_id received as the first frame on the ChannelReceive
   // response stream. Server-minted; opaque to clients.
   string channel_id = 1;
-  // The user's message payload. The workspace is derived from the
-  // caller's signature (NOT from this field) so external callers
-  // cannot inject into other workspaces.
+  // The user's message payload. The workspace comes from the
+  // channel_id's server-side binding (NOT from this field) so external
+  // callers cannot inject into other workspaces.
   //
   // Exactly one of `user_message` / `client_response` MUST be set per
   // call. Both-set or neither-set → InvalidArgument at the handler.
@@ -455,7 +476,7 @@ message ChannelIngestRequest {
   repeated string supported_methods = 4;
   // Conversation this message belongs to. Empty string → controller
   // mints a fresh id and returns it in the ack. Non-empty → controller
-  // validates the id belongs to the caller's workspace and continues
+  // validates the id was minted by the caller's subject and continues
   // the existing conversation; mismatch returns PermissionDenied.
   string conversation_id = 5;
 }
@@ -471,39 +492,19 @@ message ChannelIngestAck {
 message ChannelReceiveRequest {
   // Free-form, untrusted, log-only label for operator debugging.
   optional string adapter_hint = 1;
+  // The workspace this receive stream serves. Every workspace-scoped
+  // request names its workspace; the relay authorizes it per credential
+  // class.
+  string workspace = 2;
+  // The adapter path's sender: the platform user ID the adapter reports
+  // verbatim. The relay resolves it to a subject through the operator's
+  // handle binding; the adapter vouches for no one.
+  string sender = 3;
 }
 
 // --- Subscribe RPCs ---
 
 message SubscribeRequest {}
-
-// --- RedeemCode RPCs ---
-
-message RedeemCodeRequest {
-  // The operator-verified grant row's identity: an unguessable string the
-  // operator invented, wrote into the row, and handed over out of band.
-  // Possession of it is the whole proof. The relay mints nothing.
-  string code = 1;
-  // Client-generated P-256 ECDSA public key, SEC1 uncompressed bytes.
-  // The relay records it against the matched row; subsequent requests sign
-  // each call with the matching private key, which never leaves the device.
-  bytes public_key = 2;
-}
-
-message RedeemCodeResponse {
-  // The grant row key the presented key was registered against. This is
-  // also the signing `kid` the client presents from now on.
-  string client_name = 1;
-  // Unix-seconds timestamp when the public key was registered.
-  int64 enrolled_at = 2;
-  // The workspaces this device is authorized for, resolved at redeem
-  // time so enrollment completes in one round trip. Returning them here
-  // means the client never makes a second signed call during
-  // enrollment, so a post-redeem failure can no longer strand a spent
-  // grant row. A grant row names exactly one workspace today; repeated
-  // mirrors ListWorkspacesResponse and leaves room to grow.
-  repeated string workspaces = 3;
-}
 
 // --- Server-initiated tool dispatch (cluster → client) ---
 //

@@ -16,6 +16,12 @@ REMOTE='{"format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https
 TOOLSET='{"image":"ghcr.io/sycophant-md/git@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","keepalive":"false","tool.git-status.description":"Show the working tree status.","tool.git-commit.description":"Commit staged changes.","tool.git-commit.arg.message.type":"string","tool.git-commit.arg.message.required":"true","tool.git-commit.arg.message.env":"MESSAGE"}'
 WORKSPACE='{"toolsets":"git,ssh","models":"a,b","storage":"5Gi","grant.ssh.demo.secret":"demo-key","grant.ssh.demo.path":"/home/agent/.ssh/id","grant.ssh.demo.egress":"github.com"}'
 CHANNEL='{"kind":"app","loginServer":"http://headscale:8080","headscale.enabled":"true","headscale.serverUrl":"http://localhost:8080"}'
+SUBJECT="https://issuer.example#alice"
+HASH="$(printf '%s' "$SUBJECT" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)"
+# Offline there is no cluster, so a listed workspace never exists: the user
+# chart must refuse it. The positive shape is rendered with no workspaces.
+USER_COMMAND="$(printf '{"user":"%s","handle.slack":"U12345"}' "$SUBJECT")"
+USER_MISSING_WS="$(printf '{"user":"%s","workspaces":"alpha,beta","handle.slack":"U12345"}' "$SUBJECT")"
 
 render() {
   local out="$1" chart="$2"; shift 2
@@ -24,7 +30,6 @@ render() {
   echo $? > "$WORK/$out.rc"
 }
 render bare tenant --set namespace.create=false
-render upgrade tenant --set namespace.create=false --is-upgrade
 render channel channel --set name=app --set-json "command=$CHANNEL"
 render headscale-off channel --set name=app --set-json 'command={"kind":"app","loginServer":"https://hs.example.test"}'
 render acme channel --set name=app --set-json "command=$(printf '%s' "$CHANNEL" \
@@ -36,7 +41,8 @@ render remote inference --set name=deepseek --set-json "command=$REMOTE"
 render toolset toolset --set name=git --set-json "command=$TOOLSET"
 render workspace workspace --set name=one --set-json "command=$WORKSPACE"
 render wsbase workspace --set name=one --set-json 'command={}'
-render user user --set-json 'users=["https://issuer.example#alice"]'
+render user user --set-string name="$HASH" --set-json "command=$USER_COMMAND"
+render user-missing-ws user --set-string name="$HASH" --set-json "command=$USER_MISSING_WS"
 for m in override:'{"server.weightsPath":"/opt/m.gguf","server.contextBudget":"8192","server.slots":"1","server.outputCap":"512","server.threads":"2","server.memory":"4Gi","server.cpu":"2"}' \
          mount:'{"server.weightsDelivery":"mount"}' \
          tpl-copy:'{"server.chatTemplate":"TEMPLATE-BODY"}' \
@@ -46,10 +52,11 @@ for m in override:'{"server.weightsPath":"/opt/m.gguf","server.contextBudget":"8
   render "local-${m%%:*}" inference --set name=local --set-json "command=$(printf '%s' "$LOCAL" | jq -c ". + ${m#*:}")"
 done
 
-python3 - "$WORK" "$REMOTE" "$TOOLSET" "$WORKSPACE" <<'PY'
-import hashlib, json, sys, yaml
+python3 - "$WORK" "$REMOTE" "$TOOLSET" "$WORKSPACE" "$SUBJECT" "$HASH" <<'PY'
+import json, sys, yaml
 
 work, remote, toolset, workspace = sys.argv[1], json.loads(sys.argv[2]), json.loads(sys.argv[3]), json.loads(sys.argv[4])
+subject, hash10 = sys.argv[5], sys.argv[6]
 passed = failed = 0
 
 def ok(name):
@@ -123,23 +130,13 @@ def model_cm(docs, key):
 
 BASE = ["CiliumNetworkPolicy/default-deny-egress", "CiliumNetworkPolicy/install-wait-egress",
         "CiliumNetworkPolicy/relay-egress", "CiliumNetworkPolicy/relay-ingress",
-        "ConfigMap/relay-access-grants", "ConfigMap/toolset-scheduling",
+        "ConfigMap/toolset-scheduling",
         "Deployment/relay-controller", "Job/install-wait",
         "Role/install-wait", "Role/relay-controller",
         "RoleBinding/install-wait", "RoleBinding/relay-controller",
         "Service/relay-controller", "ServiceAccount/install-wait", "ServiceAccount/relay-controller"]
 check("base chart renders only the tenant's shared objects", "bare",
       lambda docs: None if objects(docs) == BASE else f"want {BASE}, got {objects(docs)}")
-
-def user_binding(docs):
-    subject = "https://issuer.example#alice"
-    name = f"RoleBinding/user-{hashlib.sha256(subject.encode()).hexdigest()[:10]}"
-    if objects(docs) != [name]:
-        return f"want only {name}, got {objects(docs)}"
-    rb = docs[0]
-    got = ([(s["kind"], s["name"]) for s in rb.get("subjects") or []], rb["roleRef"]["kind"], rb["roleRef"]["name"])
-    return got != ([("User", subject)], "ClusterRole", "provision-identity") and f"binding {got}"
-check("user chart binds each identity to provision-identity in its own RoleBinding", "user", user_binding)
 
 check("channel renders the adapter and headscale", "channel",
       lambda docs: None if all(get(docs, k, n) for k, n in [
@@ -276,22 +273,6 @@ def workspace_init_unselected(docs):
     return sel and f"policies select workspace-init: {sel}"
 check("no policy selects the workspace-init pod", "wsbase", workspace_init_unselected)
 
-def grants_install_only(_):
-    cm = get(load("bare")[0], "ConfigMap", "relay-access-grants")
-    meta = (cm or {}).get("metadata", {})
-    if (meta.get("annotations") or {}).get("helm.sh/resource-policy") != "keep" \
-            or (meta.get("labels") or {}).get("sycophant.md/type") != "relay-access-grants":
-        return f"install must render relay-access-grants with keep and its type label, got {meta}"
-    docs, err = load("upgrade")
-    if docs is None:
-        return err
-    if not get(docs, "ConfigMap", "toolset-scheduling"):
-        return "upgrade render is empty"
-    found = [d["metadata"]["name"] for d in docs if d["kind"] == "ConfigMap"
-             and "relay-access-grants" in (d["metadata"]["name"], (d["metadata"].get("labels") or {}).get("sycophant.md/type"))]
-    return found and f"upgrade renders {found}"
-check("relay-access-grants renders on install only, kept", ([], None), grants_install_only)
-
 def harness_reaches_inference(docs):
     p = get(docs, "CiliumNetworkPolicy", "ws-one-egress")
     if p is None:
@@ -391,7 +372,7 @@ check("a workspace command syncs instructions from <namespace>/<workspace> and s
 WORKSPACE_OBJECTS = sorted([
     "CiliumNetworkPolicy/ws-one-egress", "CiliumNetworkPolicy/ws-one-grant-ssh-demo", "CiliumNetworkPolicy/ws-one-job-ingress",
     "ConfigMap/ws-one-capability-grants", "ConfigMap/ws-one-relay-grants", "Deployment/ws-one", "Job/ws-one-init",
-    "PersistentVolumeClaim/ws-one-conversation", "PersistentVolumeClaim/ws-one-data", "Role/ws-one", "RoleBinding/ws-one",
+    "PersistentVolumeClaim/ws-one-conversation", "PersistentVolumeClaim/ws-one-data", "Role/ws-one", "Role/ws-one-reach", "RoleBinding/ws-one",
     "Service/ws-one", "Service/ws-one-capability",
     "ServiceAccount/ws-one", "ServiceAccount/ws-one-init", "ServiceAccount/ws-one-unprivileged"])
 
@@ -519,6 +500,58 @@ def tool_pod_ingress(docs):
                 return None
     return "no policy admits workspace one's harness to its capability-job pods on 9090"
 check("capability-job pods admit their own workspace's harness on 9090", "wsbase", tool_pod_ingress)
+
+def reach_role(docs):
+    role = get(docs, "Role", "ws-one-reach")
+    if role is None:
+        return "no Role/ws-one-reach in the render; the workspace chart must render the reach Role"
+    if role["metadata"].get("namespace") != "tenant-acme":
+        return f"Role namespace must be the release namespace, got {role['metadata']}"
+    want = [{"apiGroups": [""], "resources": ["services"], "verbs": ["get"], "resourceNames": ["ws-one"]}]
+    return None if role.get("rules") == want else f"the reach Role's rules must be exactly {want}, got {role.get('rules')}"
+check("the workspace chart renders Role ws-<name>-reach granting get on exactly Service ws-<name>", "wsbase", reach_role)
+
+def refuses_missing_workspace():
+    name = "a user command naming a workspace that does not exist fails the install and renders nothing"
+    rc = int(open(f"{work}/user-missing-ws.rc").read())
+    err = open(f"{work}/user-missing-ws.err").read()
+    if rc == 0:
+        bad(name, "the user chart rendered a grant to workspace alpha, which does not exist")
+    elif "workspace alpha does not exist" not in err:
+        bad(name, f"the render failed, but not on the missing workspace: {err.strip()[-300:]}")
+    else:
+        ok(name)
+refuses_missing_workspace()
+
+def grants_no_verb(docs):
+    verb_kinds = {d["kind"] for d in docs} & {"Role", "ClusterRole"}
+    return verb_kinds and f"the user chart renders {sorted(verb_kinds)}; it must grant no verb and no ConfigMap access"
+check("the user chart renders no Role and no ClusterRole, so a user command grants no verb", "user", grants_no_verb)
+
+def identity_cm(docs):
+    cm = get(docs, "ConfigMap", f"user-{hash10}")
+    if cm is None:
+        return f"no ConfigMap/user-{hash10} in the render; the identity ConfigMap is missing"
+    labels = cm["metadata"].get("labels") or {}
+    if labels.get("sycophant.md/type") != "relay-identity":
+        return f"the identity ConfigMap must carry sycophant.md/type: relay-identity, got {labels}"
+    if labels.get("app.kubernetes.io/part-of") != "sycophant":
+        return f"the identity ConfigMap must carry the sycophant labels, got {labels}"
+    want = {"subject": subject, "handle.slack": "U12345"}
+    return None if cm.get("data") == want else f"the identity ConfigMap must carry the command data verbatim, want {want}, got {cm.get('data')}"
+check("the identity ConfigMap carries the subject and the handle verbatim", "user", identity_cm)
+
+def membership_binding(docs):
+    rb = get(docs, "RoleBinding", f"user-{hash10}")
+    if rb is None:
+        return f"no RoleBinding/user-{hash10} in the render; provision-identity membership must survive"
+    subjects = [(s.get("kind"), s.get("name")) for s in rb.get("subjects") or []]
+    if subjects != [("User", subject)]:
+        return f"membership binding must carry the raw subject, got {subjects}"
+    ref = rb["roleRef"]
+    if (ref.get("kind"), ref.get("name")) != ("ClusterRole", "provision-identity"):
+        return f"membership binding must reference provision-identity, got {ref}"
+check("the provision-identity membership RoleBinding renders for the subject", "user", membership_binding)
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

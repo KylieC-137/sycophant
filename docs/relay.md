@@ -2,101 +2,77 @@
 
 [![made-with-rust](https://img.shields.io/badge/Made%20with-Rust-1f425f.svg)](https://www.rust-lang.org/)
 
-Client gateway for agent workspaces. Relay is the single ingress: it authorizes callers against the grants table, verifies every inbound request's signature, relays user messages to the Harness, and relays the assistant reply and turn-state back to the client. It holds no LLM credentials, no conversation history, and no transport of its own. Each channel supplies its own transport through its own adapter Deployment.
+Client gateway for agent workspaces. Relay is the single ingress: it authenticates every caller through the Kubernetes API, authorizes every request against the caller's live RBAC, relays user messages to the Harness, and relays the assistant reply and turn-state back to the client. It holds no LLM credentials, no conversation history, and no transport of its own. Each channel supplies its own transport through its own adapter Deployment.
 
 ## How It Works
 
-One component, the **gateway controller**, one per workspace namespace. It:
+One component, the **gateway controller**, one per tenant namespace. It:
 
-- Serves three ports: the harness link (9090), the app port (9091, reached from the app channel's adapter), and the adapter port (9092, reached from platform adapters).
-- Watches the `relay-access-grants` ConfigMap and reloads the authorization table live.
-- Verifies the ECDSA-P256 signature envelope on every inbound request against the registered public key of the grant row that signed it.
-- Registers a presented public key against the grant row whose code was presented (`RedeemCode`).
-- Holds the registered device public key of each grant row, and verifies every inbound signature against it.
+- Serves three ports, one credential class each: the harness link (9090, SA tokens via TokenReview), the app port (9091, person tokens), and the adapter port (9092, `adapter-<channel>` SA tokens).
+- Watches the `relay-identity` ConfigMaps — one per subject, carrying that person's workspace list and per-channel handle bindings — and reloads the identity table live.
+- Authenticates person tokens by TokenReview and adapter tokens by an audience-pinned TokenReview; a thin per-listener layer stamps the credential class, and handlers branch on the stamped class, never on the credential's shape.
+- Authorizes every request by a Kubernetes access review — one SubjectAccessReview carrying the resolved subject, submitted under the relay's own credential on every path — so the operator's live RBAC is the whole answer, checked per request.
 - Relays inbound user messages → Harness, and outbound (assistant reply + turn-state) → client.
 
 The gateway carries **no LLM credentials** and owns **no conversation log**. LLM dispatch is [Toolset](toolset.md); conversation history lives on the [Harness](harness.md). Relay is a relay across the trust boundary.
 
 ## Why Relay
 
-The Harness and Toolset controller are in-cluster, trusted-network components. Something has to stand at the edge, authenticate external devices, and police what crosses in. That is Relay.
+The Harness and Toolset controller are in-cluster, trusted-network components. Something has to stand at the edge, authenticate external callers, and police what crosses in. That is Relay.
 
-- **One authorization model, many transports** — authentication is pluggable per channel; authorization is central. Every request is checked against the same grants table, whatever transport carried it.
-- **Row authorization** — a caller cannot talk to a workspace until a grant row names it. Adding a row invites; removing one revokes within seconds, with no pod restart.
-- **Credential containment** — the gateway never holds LLM API keys; a compromised gateway cannot call providers. Its only Secret is the registered-key store, and every verb on it is name-scoped.
+- **One authorization model, many transports** — every request is authorized by the same per-request Kubernetes review, whatever transport carried it.
+- **Subject authorization** — a person reaches exactly the workspaces their RoleBindings grant, from any channel their tenant has enabled. Binding removal revokes within seconds, with no pod restart; token expiry bounds any stale credential.
+- **Credential containment** — the gateway never holds LLM API keys; a compromised gateway cannot call providers. It holds no Secrets at all.
 
 ## Architecture
 
 ```
               adapter        gRPC :9091/:9092      gRPC :9090
    Client ───> Adapter ─────────────────> Gateway ───────> Harness
-  (ECDSA-P256  (per-channel                (grants table,   (agent loop,
-   signed)      transport)                  verify sig,      conversation
-                                            registered keys) history)
+  (person or   (per-channel                (TokenReview,    (agent loop,
+   platform     transport)                 SAR per         conversation
+   token)                                   request)         history)
 
    Client <─── Adapter <───────────────── Gateway <─────── Harness
   (assistant reply +                     (relay outbound)  (DeliverOutbound:
    turn-state)                                              reply + turn-state)
 ```
 
-Inbound: the client signs a request, its channel's adapter delivers it, the gateway checks the signing grant row against the live grants table and verifies the signature against that row's registered key, then forwards user messages to the Harness. Outbound: the Harness originates the assistant reply and terminal turn-state and pushes them to the gateway (`DeliverOutbound`), which fans them out to the subscribed client.
+Inbound: the caller presents a token, its channel's adapter delivers it, the gateway TokenReviews the token, resolves the caller to an OIDC subject (person) or through a handle binding (adapter), and authorizes the named workspace by a Kubernetes access review before forwarding user messages to the Harness. Outbound: the Harness originates the assistant reply and terminal turn-state and pushes them to the gateway (`DeliverOutbound`), which fans them out to the subscribed client.
 
-## The two verification methods
+## Identity
 
-How a channel's identity is proven. There are two, and the keypair granularity follows from which one a channel uses.
+**The OIDC subject is the root of identity.** The apiserver's own OIDC authenticator resolves a person token to a username — the issuer-prefixed subject string. The relay requires `authenticated` and a non-empty username; it pins no audience of its own, because the apiserver enforces the issuer's audience at authentication time.
 
-**Operator verification.** No registry exists behind the channel, so the operator is the vouching authority. The identity *is* the code: an unguessable string the operator invents, writes into the grant row, and hands over out of band. Possession of the string is the whole proof. The app channel is operator-verified.
+An operator grants a person reach by writing their workspace list once, with `syco user up`: the user command renders one reach RoleBinding per listed workspace (subject kind `User`, the raw subject string, roleRef the workspace's `ws-<workspace>-reach` Role granting `get` on the workspace's harness Service) plus one identity ConfigMap. A listed workspace must already exist when the command is written, or the command fails and grants nothing. Each reach RoleBinding is owned by its workspace's reach Role, so reaping a workspace deletes every grant to it, and a workspace recreated under the same name reaches nobody until re-granted. Re-running the command with a shorter list revokes the excess workspaces on the next request; removing a handle binding stops the sender resolving on the next message.
 
-*Granularity: one keypair per grant row, held by the enrolled client itself.* The private half lives in the device's platform secure storage and never enters the cluster; the relay stores only the public half, against that row. The row is spent once a key is registered, so revoke-and-re-invite is: delete the row, write a new row with a fresh string.
+**Adapter channel identity is structural.** The adapter port's TokenReview must yield `system:serviceaccount:<namespace>:adapter-<channel>`; the channel is the SA name minus `adapter-`. Adapter tokens are pinned to the `adapter.relay.sycophant.md` audience. The relay resolves the message's `sender` — the platform user ID — through the identity table's `handle.<channel>` bindings; a handle with no operator binding is refused before any review.
 
-**Platform verification.** The platform's own authentication vouches — a Telegram login, an email passing DKIM, SPF, and DMARC — checked inside the adapter before any identity mapping. The identity is the platform handle. The operator writes the row; on first contact from that identity the adapter maps it to the row and speaks for it.
+A handle claimed by two subjects resolves to neither and is reported as a row error, so the operator fixes the binding instead of one person silently receiving the other's messages.
 
-*Granularity: one keypair per adapter.* The adapter signs each envelope with its adapter key and asserts, per message, which grant row is speaking. The relay verifies the adapter signature, then checks the assertion against the grants table: the asserted row exists, and its channel matches the adapter that signed. Per-grant keys held by the adapter would add nothing — the adapter holds every key it would use.
+**Revocation is binding removal plus token expiry.** The relay holds no denylist: a removed RoleBinding fails the very next SubjectAccessReview, and a removed handle binding fails the very next resolution, which runs on every message, so an already-open adapter channel is cut too. An open stream re-reviews its bearer token, the handle, and the subject's reach before every outbound item, so an expired token, a removed RoleBinding, or a removed handle ends it on its next item.
 
-Revocation is identical under both: the relay checks the asserted or signing row against the live grants table on every message, so deleting a row cuts access within seconds regardless of who holds which key.
+## The relay-identity ConfigMaps
 
-Platform-verified channels do not take operator-invented codes. They would prove only what the platform already proves.
-
-## The relay-access-grants ConfigMap
-
-The relay's routing and authorization table. One ConfigMap named `relay-access-grants` per tenant namespace, one key per grant row:
+One ConfigMap per subject, rendered by the user chart from the operator's command, named `user-<hash10>` and labelled `sycophant.md/type: relay-identity`:
 
 ```yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: relay-access-grants
+  name: user-0a1b2c3d4e
   labels:
-    sycophant.md/type: relay-access-grants
+    sycophant.md/type: relay-identity
 data:
-  caleb-phone: |
-    channel: app
-    identity: kJ8f2QwXnR4tYv6b        # one-time code; spent after key registration
-    workspace: family
-  dad-telegram: |
-    channel: telegram
-    identity: "7133824091"            # Telegram numeric user id
-    workspace: family
+  subject: "https://issuer.example#alice"
+  workspaces: "alpha,beta"
+  handle.slack: "U0123ABCDEF"
+  handle.telegram: "7133824091"
 ```
 
-The operator is the only writer. Helm creates the object at install and never touches its `data` again, so an upgrade cannot stomp live rows. A Kyverno rule matching the `sycophant.md/type: relay-access-grants` label denies CREATE, UPDATE, and DELETE from every ServiceAccount inside the tenant namespace, the relay included.
+The operator (through the user command and its installer) is the only writer. A Kyverno rule matching the `sycophant.md/type: relay-identity` label denies CREATE, UPDATE, and DELETE from every ServiceAccount inside the tenant namespace, the relay included.
 
-Validation is invalid-is-absent, per row: known channel, non-empty identity, non-empty workspace, and no other field. A row that does not parse does not exist, and it never suppresses the rows beside it — a typo must not block a revocation made in the same edit. Rejected rows are logged and raised as Warning Events on the ConfigMap, so `kubectl describe configmap relay-access-grants` names the row and the reason.
-
-Write a row with `kubectl`:
-
-```bash
-kubectl patch configmap relay-access-grants -n <namespace> --type=merge -p '{"data":{
-  "caleb-laptop": "channel: app\nidentity: kJ8f2QwXnR4tYv6b\nworkspace: my-ws\n"
-}}'
-```
-
-Revoke it by removing the key:
-
-```bash
-kubectl patch configmap relay-access-grants -n <namespace> --type=json \
-  -p '[{"op":"remove","path":"/data/caleb-laptop"}]'
-```
+Validation is invalid-is-absent, per ConfigMap: a non-empty `subject`, a comma-separated `workspaces` list, and non-empty `handle.<channel>` values. A ConfigMap that does not parse does not exist, and it never suppresses the subjects beside it — a typo must not block a revocation made in the same edit. Rejected ConfigMaps are logged and raised as Warning Events naming the ConfigMap and the reason, so `kubectl describe configmap` shows the row the relay dropped.
 
 ## Conversation Lifecycle
 
@@ -111,18 +87,19 @@ The S3 conversation backend was dropped; the Harness persists to LocalFs only.
 
 Proto definitions at `crates/relay-proto/proto/relay/v1/relay.proto`.
 
-**`relay.v1.RelayGateway`** — the signature-verified, client-facing surface:
+**`relay.v1.RelayGateway`** — the token-authenticated, client-facing surface. Every workspace-scoped RPC names its workspace, and CancelTool resolves its workspace from the `call_id`; the relay authorizes that workspace per request:
 
 | RPC | Description |
 |-----|-------------|
-| `RedeemCode` | Present an operator-verified row's code; register the device public key against that row. |
-| `ListWorkspaces` | The workspace the signing grant row names. |
-| `ListGrants` | The workspace's toolset grants, grouped by toolset. Names only, merged live from the per-workspace `ws-<workspace>-relay-grants` ConfigMaps; the gateway reads no Secret. |
-| `MintConversation` / `ListConversations` / `DeleteConversation` / `SetConversationName` / `GetConversationHistory` | Conversation lifecycle; relayed to the Harness. |
+| `ListWorkspaces` | The caller's whole granted list, straight from the watched identity ConfigMaps. One TokenReview authenticates; nothing is enumerated. |
+| `ListGrants` | The named workspace's toolset grants, grouped by toolset, after the workspace is authorized. Names only, merged live from the per-workspace `ws-<workspace>-relay-grants` ConfigMaps; the gateway reads no Secret. |
+| `MintConversation` / `ListConversations` / `DeleteConversation` / `SetConversationName` / `GetConversationHistory` | Conversation lifecycle; each names its workspace and is authorized before the relay to the Harness. |
 | `GetTurnState` | Current turn-state for a conversation. |
-| `ChannelIngest` | Inbound user message in. |
-| `ChannelReceive` | Server-stream of outbound events (assistant reply + turn-state) to the client. |
-| `WatchTools` / `CallTool` | Tool list + invocation, relayed to the Harness. |
+| `ChannelIngest` | Inbound user message in; the channel_id's registered (subject, workspace) binding is re-checked for reach on every ingest. |
+| `ChannelReceive` | Server-stream of outbound events (assistant reply + turn-state) to the client; names its workspace and (on the adapter path) its sender. |
+| `WatchTools` / `DispatchTool` / `AwaitToolResult` | Tool surface, relayed to the Harness; each names its workspace. |
+| `CancelTool` | Cancels an in-flight tool call. Names no workspace: the relay resolves it from the `call_id`'s server-side (subject, workspace) binding and re-runs the reach check. |
+| `CancelTurn` | Cancels the conversation's in-flight turn; names its workspace. |
 
 **`relay.v1.RelayInternal`** — the in-cluster surface the Harness calls back on:
 
@@ -138,51 +115,38 @@ The relay carries no transport. Each channel supplies its own, as a standing Dep
 
 The app channel's adapter is the tailnet terminus. It is `sycophant.md/adapter-class: transport` — transport only, holding no signing identity and mounting no keypair volume — and forwards tailnet TCP :9090 to the relay's app port. Its tailnet node identity persists across restarts in the fixed `adapter-state` Secret (`TS_KUBE_SECRET`, one app channel per tenant). It is the stated exception to dial-out-only: it accepts inbound tailnet connections, so no ingress policy selects it. See [`docs/headscale-self-host-acme.md`](headscale-self-host-acme.md) for the self-hosted control plane.
 
-Platform adapters (`sycophant.md/adapter-class: principal`) hold one adapter keypair each and reach the relay on the adapter port. They are dial-out-only.
+Platform adapters (`sycophant.md/adapter-class: principal`) reach the relay on the adapter port with their `adapter-<channel>` ServiceAccount tokens. They are dial-out-only.
 
 ## RBAC
 
-The gateway ServiceAccount can read ConfigMaps, raise Events, read/write its own registered-key Secret, and authenticate caller SA tokens. It has **no Jobs, Deployments, or Pods RBAC**, no ConfigMap write verb, and no access to LLM credentials.
+The gateway ServiceAccount can read ConfigMaps, raise Events, and create authorization reviews. It has **no Jobs, Deployments, or Pods RBAC**, no ConfigMap write verb, no Secrets RBAC at all, and no access to LLM credentials.
 
 ```yaml
 rules:
-  # The relay-access-grants ConfigMap: read-only. RBAC is the first lock on the
-  # authorization table; the Kyverno rule is the second.
+  # The relay-identity ConfigMaps: read-only. RBAC is the first lock on
+  # the identity table; the Kyverno rule is the second.
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "watch"]
-  # Warning Events naming rejected grant rows.
+  # Warning Events naming rejected identity ConfigMaps.
   - apiGroups: ["events.k8s.io"]
     resources: ["events"]
     verbs: ["create", "patch"]
-  # `create` cannot be name-scoped: `resourceNames` is not consulted on
-  # create. A secret-name-allowlist VAP pins which Secret names this SA
-  # may create. Needed for the first-ever redemption, which finds no
-  # registered-keys Secret and creates one.
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["create"]
-  # Registered device keys, one per grant row. Name-scoped, because
-  # `resourceNames` IS honored on update and patch — so no other Secret
-  # in the namespace is reachable.
-  - apiGroups: [""]
-    resources: ["secrets"]
-    resourceNames: ["relay-registered-keys"]
-    verbs: ["get", "update", "patch"]
 ```
 
 The app adapter carries a Role granting `get`/`update`/`patch` on the fixed `adapter-state` Secret (and `create` for first start), bound to the adapter's ServiceAccount, not the relay's.
 
-TokenReview is cluster-scoped: a shared `cluster-relay-tokenreview` ClusterRole grants `create` on `tokenreviews`, bound to each tenant's `relay-controller` SA by the `tenant-rolebinding-generator` Kyverno policy.
+TokenReview and SubjectAccessReview are cluster-scoped: the shared `cluster-relay-tokenreview` ClusterRole grants `create` on `tokenreviews` and `subjectaccessreviews`, bound to each tenant's `relay-controller` SA by the `tenant-rolebinding-generator` Kyverno policy.
 
 ## Security Model
 
-- Every inbound request carries an ECDSA-P256 signature verified against the registered key of the grant row that signed it, and that row is re-checked against the live grants table on every request. A caller with no row cannot talk to the workspace.
-- Conversations bind to the grant row that created them, not only to the workspace, so two rows in one workspace cannot read each other's conversations.
-- The gateway holds no server signing key: it verifies client signatures and signs nothing. Its only Secret is the registered-key store, and every verb on it is name-scoped.
+- Every workspace-scoped request names its workspace (CancelTool resolves its workspace from the `call_id`) and is authorized by a Kubernetes access review carrying the relay's own namespace — never a caller-supplied one — so a workspace the caller cannot reach fails closed.
+- The caller's token reaches the apiserver only in its TokenReview. Every access review is a SubjectAccessReview for the resolved subject under the relay's own credential: the subject's live RBAC is the whole answer, so removing a RoleBinding revokes on the very next request.
+- The adapter path resolves senders only through operator-written handle bindings; an unbound handle is refused before any review or routing.
+- Conversations bind to the OIDC subject that created them, not only to the workspace, so two subjects in one workspace cannot read each other's conversations.
+- The gateway holds no signing keys, no device keys, and no Secrets at all: it authenticates by TokenReview and signs nothing. It cannot store a device credential because it has nowhere to put one.
 - The gateway holds no LLM credentials and no Jobs RBAC — it cannot dispatch LLM calls or call providers.
 - The gateway owns no conversation log — history lives on the Harness's PVC, so a compromised gateway cannot forge or rewrite history.
-- The secret-name-allowlist VAP pins which Secret names the gateway SA may create.
 - All images are FROM scratch with musl static builds, signed with cosign (keyless, sigstore).
 
 ## Crate Structure
@@ -201,4 +165,4 @@ Container image is published to GHCR on each release:
 ghcr.io/calebfaruki/relay-controller:latest
 ```
 
-The tenant chart (`charts/sycophant-tenant/`) installs the gateway Deployment and the relay-access-grants ConfigMap, once per tenant. The workspace chart (`charts/sycophant-workspace/`) installs each workspace's `ws-<workspace>-relay-grants` ConfigMap. The channel chart (`charts/sycophant-channel/`), installed by `syco channel up`, installs headscale and the channel's adapter Deployment. Authorize a caller by writing its grant row (see the relay-access-grants ConfigMap section above). No custom kinds are on this path.
+The tenant chart (`charts/sycophant-tenant/`) installs the gateway Deployment, once per tenant. The user command installs each person's reach RoleBindings and identity ConfigMap (`syco user up`). The workspace chart (`charts/sycophant-workspace/`) installs each workspace's `ws-<workspace>-relay-grants` ConfigMap and reach Role. The channel chart (`charts/sycophant-channel/`), installed by `syco channel up`, installs headscale and the channel's adapter Deployment. A caller's reach is the operator's RoleBinding grant; the identity ConfigMap is the operator's handle and workspace-list record. No custom kinds are on this path.

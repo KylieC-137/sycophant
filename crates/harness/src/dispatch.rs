@@ -63,6 +63,23 @@ const READY_TIMEOUT: Duration = Duration::from_secs(30);
 /// itself down. Zero for a one-shot (non-keepalive) tool.
 const TOOL_KEEPALIVE_IDLE_SECONDS: u64 = 600;
 
+/// How long before the idle window ends a warm pod stops being attached to.
+/// The pod starts its idle timer a moment before the harness records the
+/// call's completion, and a dial takes time; a call attached inside this
+/// margin could reach a pod that has already exited.
+const KEEPALIVE_ATTACH_MARGIN: Duration = Duration::from_secs(60);
+
+/// Whether a new call may attach to `active` at `now`. Only a keepalive pod
+/// with a job id, idle for less than its window minus the margin, is still
+/// serving; anything else gets a fresh Job.
+fn attachable(active: &ActiveJob, now: Instant) -> bool {
+    if active.job_id.is_empty() || active.keepalive_seconds == 0 {
+        return false;
+    }
+    let window = Duration::from_secs(active.keepalive_seconds);
+    now.saturating_duration_since(active.last_activity) + KEEPALIVE_ATTACH_MARGIN < window
+}
+
 /// RAII wrapper around a pending call's frame sender. Guarantees the producer's
 /// drain always terminates: the pod forwards frames through `sender()` and, on
 /// the terminal `ToolComplete`, `mark_complete` silences `Drop`. Dropped without
@@ -402,10 +419,13 @@ impl DispatchState {
         }
     }
 
-    async fn bump_last_activity(&self, tool_name: &str) {
+    /// Record activity on the one Job that served a call. Bumping every Job
+    /// for the tool would make another grant's idle pod look warm after it
+    /// has shut itself down.
+    async fn bump_last_activity(&self, tool_name: &str, job_name: &str) {
         let mut jobs = self.active_jobs.write().await;
         for (key, job) in jobs.iter_mut() {
-            if key.0 == tool_name {
+            if key.0 == tool_name && job.job_name == job_name {
                 job.last_activity = Instant::now();
             }
         }
@@ -470,15 +490,14 @@ impl DispatchState {
                 needs_deadline = true;
                 let should_spawn = match self.get_active_job(tool_name, call_grant.as_deref()).await
                 {
+                    // Not attachable: no record, a record naming no job id, a
+                    // one-shot tool's record (its pod exits after one call), or
+                    // a warm pod idle long enough to have shut itself down.
+                    // Spawn fresh and overwrite the record; the harness holds
+                    // no delete RBAC, and an exited pod's Job is reaped by its
+                    // own ttlSecondsAfterFinished.
                     None => true,
-                    // A record naming no job id is not attachable; respawn beside
-                    // it. The harness holds no delete RBAC, so it leaves the old
-                    // record to its ready deadline rather than deleting the pod.
-                    Some(active) if active.job_id.is_empty() => true,
-                    // A non-keepalive tool runs one Job per call: its pod exits
-                    // after a single call, so its record must never be attached
-                    // to. Spawn fresh and overwrite the record.
-                    Some(active) if active.keepalive_seconds == 0 => true,
+                    Some(active) if !attachable(&active, Instant::now()) => true,
                     Some(active) => {
                         // The grant's warm pod long-polls GetToolCall on this
                         // harness; attach this call to it.
@@ -634,7 +653,7 @@ impl DispatchState {
             let completed = dial_and_run(endpoint, assignment, sender, cancel, READY_TIMEOUT).await;
             state.finish_call(&call_id).await;
             if completed {
-                state.bump_last_activity(&tool).await;
+                state.bump_last_activity(&tool, &job_name).await;
             } else {
                 warn!(
                     call_id = %call_id,
@@ -666,7 +685,7 @@ impl DispatchState {
     where
         S: tokio_stream::Stream<Item = Result<ToolResultFrame, tonic::Status>> + Unpin,
     {
-        let Some((mut guard, tool_name)) = self.take_result_tx(&call_id).await else {
+        let Some((mut guard, _tool)) = self.take_result_tx(&call_id).await else {
             return Ok(());
         };
 
@@ -684,10 +703,8 @@ impl DispatchState {
         }
         drop(guard);
 
+        // No Job served this seam's frames, so there is no record to bump.
         self.finish_call(&call_id).await;
-        if !tool_name.is_empty() {
-            self.bump_last_activity(&tool_name).await;
-        }
         Ok(())
     }
 }
@@ -1174,6 +1191,70 @@ mod tests {
             grant: None,
             target_job_id: job_id.to_string(),
         }
+    }
+
+    /// A warm pod is attached to only while it is still inside its idle
+    /// window, less the margin. Past that it has shut itself down (or is about
+    /// to), and a call attached to it would wait out the ready deadline and
+    /// fail.
+    #[test]
+    fn a_warm_pod_is_attachable_only_inside_its_idle_window() {
+        let job = active("shell", "job-a", None);
+        let t0 = job.last_activity;
+        assert!(attachable(&job, t0), "just used: attach");
+        assert!(
+            attachable(&job, t0 + Duration::from_secs(500)),
+            "idle 500s of a 600s window, outside the 60s margin: attach"
+        );
+        assert!(
+            !attachable(&job, t0 + Duration::from_secs(540)),
+            "inside the margin: spawn fresh"
+        );
+        assert!(
+            !attachable(&job, t0 + Duration::from_secs(601)),
+            "past the window, the pod has exited: spawn fresh"
+        );
+    }
+
+    #[test]
+    fn one_shot_and_unnamed_records_are_never_attachable() {
+        let mut one_shot = active("shell", "job-a", None);
+        one_shot.keepalive_seconds = 0;
+        assert!(!attachable(&one_shot, one_shot.last_activity));
+        let unnamed = active("shell", "", None);
+        assert!(!attachable(&unnamed, unnamed.last_activity));
+    }
+
+    /// A completed call refreshes only the Job that served it: another
+    /// grant's idle pod for the same tool keeps aging toward its exit.
+    #[tokio::test]
+    async fn a_completed_call_refreshes_only_the_job_that_served_it() {
+        let state = state();
+        let a = active("Search", "a", Some("grant-a"));
+        let b = active("Search", "b", Some("grant-b"));
+        let (a_before, b_before) = (a.last_activity, b.last_activity);
+        state.set_active_job(a).await;
+        state.set_active_job(b).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        state.bump_last_activity("Search", "tool-Search-a").await;
+
+        let a_after = state
+            .get_active_job("Search", Some("grant-a"))
+            .await
+            .unwrap();
+        let b_after = state
+            .get_active_job("Search", Some("grant-b"))
+            .await
+            .unwrap();
+        assert!(
+            a_after.last_activity > a_before,
+            "the serving Job is refreshed"
+        );
+        assert_eq!(
+            b_after.last_activity, b_before,
+            "the other grant's Job is not"
+        );
     }
 
     /// Two grants' active Jobs for one tool occupy distinct slots: neither can

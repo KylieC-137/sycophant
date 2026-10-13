@@ -1,0 +1,51 @@
+# Writes a user command for `<issuer>#<sub>` as `<issuer>#<writer>`, the same
+# act as `syco user up`. expect=admitted requires the create to succeed;
+# expect=forbidden requires an RBAC denial. Leave handle_slack empty for no
+# handle. The installer deletes the command after a successful install, so a
+# re-grant is a fresh create.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: user-command
+spec:
+  try:
+    - script:
+        timeout: 60s
+        env:
+          - name: TENANT_NS
+            value: ($tenant_ns)
+          - name: SUB
+            value: ($sub)
+          - name: WORKSPACES
+            value: ($workspaces)
+          - name: HANDLE_SLACK
+            value: ($handle_slack)
+          - name: WRITER
+            value: ($writer)
+          - name: EXPECT
+            value: ($expect)
+        content: |
+          set -u
+          ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+          USER_SUB="${ISSUER}#${SUB}"
+          HASH=$(printf '%s' "$USER_SUB" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
+          err=$(kubectl create configmap "provision-user-$HASH" -n "$TENANT_NS" \
+            --from-literal=user="$USER_SUB" \
+            --from-literal=workspaces="$WORKSPACES" \
+            ${HANDLE_SLACK:+--from-literal=handle.slack="$HANDLE_SLACK"} \
+            --dry-run=client -o yaml \
+            | kubectl label --local -f - -o yaml \
+                app.kubernetes.io/part-of=sycophant sycophant.md/command=true \
+            | kubectl create --as="${ISSUER}#${WRITER}" -f - 2>&1 >/dev/null)
+          rc=$?
+          case "$EXPECT" in
+            admitted)
+              [ "$rc" -eq 0 ] || { echo "user command for $SUB refused: $err"; exit 1; } ;;
+            forbidden)
+              [ "$rc" -ne 0 ] || { echo "$WRITER wrote a user command without RBAC"; exit 1; }
+              case "$err" in
+                *forbidden*) ;;
+                *) echo "the denial was not RBAC's: $err"; exit 1 ;;
+              esac ;;
+            *) echo "expect must be admitted or forbidden, got $EXPECT"; exit 1 ;;
+          esac

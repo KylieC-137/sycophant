@@ -3,7 +3,7 @@ kind: Test
 metadata:
   name: relay-ctrl-no-secret-updates
 spec:
-  description: The apiserver enforces the chart's Secret bound for relay-controller.
+  description: The apiserver enforces the relay-controller's total lack of Secret verbs.
   bindings:
     - name: tenant_ns
       value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
@@ -28,22 +28,19 @@ spec:
               helm template probe "$REPO_ROOT/charts/sycophant-tenant" \
                 -n "$TENANT_NS" -s templates/relay-ctrl-rbac.yaml \
                 | kubectl apply -f -
-    - name: relay-can-create-and-patch-registered-keys-name-scoped
+    - name: relay-cannot-create-any-secret
       try:
         - script:
             env:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -e
-              kubectl create secret generic relay-registered-keys \
+              kubectl create secret generic anything \
                 --from-literal=k=v -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:relay-controller"
-              kubectl patch secret relay-registered-keys -n "$TENANT_NS" \
-                --type=merge -p='{"data":{"k":"dmFsdWU="}}' \
-                --as="system:serviceaccount:${TENANT_NS}:relay-controller"
             check:
-              ($error == null): true
+              ($error != null): true
+              (contains($stderr, 'forbidden')): true
     - name: relay-cannot-patch-arbitrary-secrets
       try:
         - script:
@@ -59,14 +56,29 @@ spec:
             check:
               ($error != null): true
               (contains($stderr, 'forbidden')): true
-    - name: relay-cannot-delete-registered-keys
+    - name: relay-cannot-read-any-secret
       try:
         - script:
             env:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              kubectl delete secret relay-registered-keys -n "$TENANT_NS" \
+              set -u
+              for verb in get list watch; do
+                [ "$(kubectl auth can-i "$verb" secrets -n "$TENANT_NS" \
+                  --as="system:serviceaccount:${TENANT_NS}:relay-controller")" = no ] \
+                  || { echo "the relay can $verb Secrets"; exit 1; }
+              done
+    - name: relay-cannot-delete-any-secret
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl create secret generic bystander-two \
+                --from-literal=k=v -n "$TENANT_NS"
+              kubectl delete secret bystander-two -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:relay-controller"
             check:
               ($error != null): true

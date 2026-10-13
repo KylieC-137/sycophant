@@ -131,14 +131,14 @@ spec:
       message: >-
         Toolset ConfigMaps in a sycophant tenant namespace cannot be
         modified by callers inside the namespace.
-    # The relay-access-grants ConfigMap is the relay's authorization table and
-    # the operator is its only writer. No per-subject carve-out: the relay is
-    # denied too. A relay that could write the table it reads could mint
-    # itself a row into any workspace, and every downstream check would then
-    # be checking a table the attacker wrote.
+    # A relay-identity ConfigMap is one person's workspace list and handle
+    # bindings — the data the relay answers ListWorkspaces and handle
+    # resolution from. The operator (or the provision installer outside the
+    # namespace) is its only writer; the relay is denied too, or a
+    # compromised relay could rewrite any person's reach.
     - expression: >-
-        !(variables.kind == "ConfigMap" && variables.typeLabel == "relay-access-grants")
+        !(variables.kind == "ConfigMap" && variables.typeLabel == "relay-identity")
       message: >-
-        Grant rows in a sycophant tenant namespace cannot be modified by
-        workloads inside the namespace.
+        Identity ConfigMaps in a sycophant tenant namespace cannot be
+        modified by workloads inside the namespace.
 {{- end }}

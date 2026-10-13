@@ -16,32 +16,18 @@ metadata:
     {{- include "sycophant.labels" . | nindent 4 }}
     app.kubernetes.io/component: relay-controller
 rules:
-  # The relay-access-grants ConfigMap: read-only. RBAC is the first lock on
-  # the authorization table; the Kyverno rule is the second. A relay that could
-  # write the table it reads could mint itself a row into any workspace.
+  # The relay-identity ConfigMaps: read-only. RBAC is the first lock on the
+  # identity table; the Kyverno rule is the second. A relay that could write
+  # the table it reads could mint itself a binding into any workspace.
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "watch"]
-  # Warning Events naming rejected grant rows. ConfigMaps have no status
-  # subresource, so `kubectl describe configmap relay-access-grants` is the
-  # operator's only surface for a row the relay refused.
+  # Warning Events naming rejected identity ConfigMaps. ConfigMaps have no
+  # status subresource, so `kubectl describe configmap` is the operator's
+  # only surface for a row the relay refused.
   - apiGroups: ["events.k8s.io"]
     resources: ["events"]
     verbs: ["create", "patch"]
-  # `create` cannot be name-scoped: `resourceNames` is not consulted on
-  # create, because the name is not known at authorization time. The
-  # secret-name-allowlist VAP is what pins which Secret names this SA may
-  # create. The relay needs it for the first-ever redemption, which finds no
-  # registered-keys Secret and creates one.
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["create"]
-  # Registered device keys. Every read and write the relay makes is scoped to
-  # this one name, so no other Secret in the namespace is reachable.
-  - apiGroups: [""]
-    resources: ["secrets"]
-    resourceNames: ["relay-registered-keys"]
-    verbs: ["get", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

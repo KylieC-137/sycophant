@@ -242,6 +242,8 @@ spec:
               value: (( variables.tenant ))
             - name: COMMAND
               value: (( object.metadata.name ))
+            - name: COMMAND_UID
+              value: (( object.metadata.uid ))
           volumeMounts:
             - name: tmp
               mountPath: /tmp
@@ -298,21 +300,27 @@ helm upgrade --install "$TENANT" {{ $ctx.Values.provisioner.chartsDir }}/sycopha
 kubectl delete configmap "$COMMAND" -n sycophant-system
 {{- else }}
 NAME="${COMMAND#provision-{{ $kind }}-}"
-{{- if eq $kind "user" }}
-# Quoted so the subject's `:` and `#` stay one scalar.
-SUBJECT="$(kubectl get configmap "$COMMAND" \
-  -n "$TENANT" -o "jsonpath={.data.user}")"
-printf 'users:\n  - "%s"\n' "$SUBJECT" > /tmp/values.yaml
-{{- else }}
 # The provision command's flat data rides into the chart verbatim as
-# .Values.command.
-printf '{"command":%s}' "$(kubectl get configmap "$COMMAND" \
-  -n "$TENANT" -o 'jsonpath={.data}')" > /tmp/values.yaml
+# .Values.command. Read by plain assignment so a missing command (deleted
+# under a retry) stops the install: helm given empty values would prune the
+# release.
+# Read the command in one get: uid, data and (for user) the write time.
+# Stop if the command is gone, empty, or belongs to a different grant.
+CM="$(kubectl get configmap "$COMMAND" -n "$TENANT" -o json)" \
+  || { echo "command $COMMAND is gone; this attempt is stale" >&2; exit 1; }
+CM_UID="$(printf '%s' "$CM" | jq -r '.metadata.uid')"
+[ "$CM_UID" = "$COMMAND_UID" ] || { echo "command $COMMAND was replaced (uid $CM_UID != $COMMAND_UID); this attempt is stale" >&2; exit 1; }
+DATA="$(printf '%s' "$CM" | jq -c '.data')"
+[ -n "$DATA" ] && [ "$DATA" != "null" ] || { echo "command $COMMAND has no data" >&2; exit 1; }
+printf '{"command":%s}' "$DATA" > /tmp/values.yaml
+{{- if eq $kind "user" }}
+CREATED="$(printf '%s' "$CM" | jq -r '.metadata.creationTimestamp')"
 {{- end }}
 helm upgrade --install "{{ include "sycophant.releasePrefix" $kind }}-$NAME" {{ $ctx.Values.provisioner.chartsDir }}/sycophant-{{ $kind }} \
   --namespace "$TENANT" \
-{{- if ne $kind "user" }}
   --set-string name="$NAME" \
+{{- if eq $kind "user" }}
+  --set-string commandCreated="$CREATED" \
 {{- end }}
   -f /tmp/values.yaml \
   --timeout 10m

@@ -8,12 +8,11 @@ Kyverno rule rejecting the request).
 
 | Test                                  | What it proves                                                                |
 |---------------------------------------|-------------------------------------------------------------------------------|
-| provision-write-scope/                | provision-write creates Secrets but `get`s only relay-registered-keys and adapter-state, and writes only in its bound namespace |
-| provision-identity-rolebinding/       | The user chart rejects a subject with a quote, backslash, control character, or U+2028 |
+| provision-write-scope/                | provision-write creates Secrets but `get`s only adapter-state, and writes only in its bound namespace |
 | provision-identity-clusterrole-minimal/ | The provision-identity ClusterRole has no rules and no aggregation |
-| relay-ctrl-grants-and-key-rbac/   | The chart-rendered relay-controller Role grants exactly its grants and key verbs |
-| relay-ctrl-no-secret-updates/     | relay's Secret writes are name-scoped to relay-registered-keys, and it can delete none |
-| relay-secret-name-allowlist/      | relay may only create the Secret named relay-registered-keys; an adapter only adapter-state |
+| relay-ctrl-identity-rbac/         | The chart-rendered relay-controller Role reads the identity ConfigMaps read-only and spawns no workload |
+| relay-ctrl-no-secret-updates/     | the relay holds no Secret verbs at all: create, patch, and delete each fail, and get, list, and watch are denied |
+| adapter-secret-name-allowlist/    | an adapter may only create the Secret named adapter-state, and only in its own namespace |
 | workspace-sa-no-verbs/                | workspace SA has zero K8s API verbs                                           |
 
 Belongs here: SA-impersonation probes (`kubectl --as` or `kubectl auth

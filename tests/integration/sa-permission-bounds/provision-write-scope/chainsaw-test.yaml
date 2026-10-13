@@ -59,8 +59,8 @@ spec:
               assert not bad, "provision-write can read any Secret: %s" % sorted(bad)
               for r in rules:
                   if r.get("resourceNames") and set(r.get("verbs", [])) & reads:
-                      assert sorted(r["resourceNames"]) == ["adapter-state", "relay-registered-keys"], \
-                          "scoped Secret read not pinned to adapter-state,relay-registered-keys: %s" % r["resourceNames"]
+                      assert sorted(r["resourceNames"]) == ["adapter-state"], \
+                          "scoped Secret read not pinned to adapter-state: %s" % r["resourceNames"]
                       assert not (set(r["verbs"]) - {"get"}), \
                           "scoped Secret rule grants more than get: %s" % sorted(r["verbs"])
               '

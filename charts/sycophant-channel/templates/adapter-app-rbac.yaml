@@ -1,8 +1,8 @@
 {{- $channel := .Values.name }}
 ---
 # Tailnet node state for the app adapter (fixed name: see adapter-app.yaml).
-# Bound to the adapter's own ServiceAccount, never the relay's: a relay holding
-# `patch` on Secrets could rotate its own signing key.
+# Bound to the adapter's own ServiceAccount, never the relay's: the relay holds
+# no Secrets RBAC, and only the adapter keeps tailnet state.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

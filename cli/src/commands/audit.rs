@@ -219,7 +219,8 @@ fn toolset_pod(ns: &str, ws: &str) -> Result<String, String> {
         return Err(format!(
             "stdlib toolset pod for workspace `{ws}` not found.\n  \
              The audit probes a live sandbox: send the agent a message that triggers a\n  \
-             tool call (via a client holding a grant row) so the toolset pod spawns, then\n  \
+             tool call (via a client whose subject is bound to the workspace) so the \
+             toolset pod spawns, then\n  \
              re-run."
         ));
     }

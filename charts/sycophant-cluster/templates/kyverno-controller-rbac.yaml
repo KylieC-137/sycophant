@@ -50,7 +50,7 @@ rules:
   - apiGroups: [""]
     resources:
       - "secrets"
-    resourceNames: ["relay-registered-keys", "adapter-state"]
+    resourceNames: ["adapter-state"]
     verbs: ["get"]
   - apiGroups: ["events.k8s.io"]
     resources: ["events"]
@@ -101,9 +101,13 @@ rules:
   # K8s RBAC anti-escalation: Kyverno cannot grant permissions it does
   # not itself hold. When the generate rule creates a ClusterRoleBinding
   # pointing at `cluster-relay-tokenreview`, Kyverno must hold the verbs
-  # that ClusterRole grants.
+  # that ClusterRole grants; the bind is rejected for any verb the mirror
+  # omits.
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
+    verbs: ["create"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
     verbs: ["create"]
 ---
 # The reap-tenant DeletingPolicy runs in the cleanup controller, whose own

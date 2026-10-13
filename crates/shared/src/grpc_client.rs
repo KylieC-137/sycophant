@@ -12,6 +12,10 @@ use tonic::transport::{Channel, Endpoint};
 const H2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
 const H2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
 const TCP_KEEPALIVE: Duration = Duration::from_secs(30);
+/// Cap on a single connect attempt. Without one a dial to an address that
+/// never answers (unresolvable Service DNS while the harness pod is down)
+/// hangs until the OS gives up — far longer than any caller's patience.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub fn keepalive_endpoint(addr: &str) -> Result<Endpoint, String> {
     Endpoint::from_shared(addr.to_string())
@@ -21,6 +25,7 @@ pub fn keepalive_endpoint(addr: &str) -> Result<Endpoint, String> {
                 .keep_alive_timeout(H2_KEEPALIVE_TIMEOUT)
                 .keep_alive_while_idle(true)
                 .tcp_keepalive(Some(TCP_KEEPALIVE))
+                .connect_timeout(CONNECT_TIMEOUT)
         })
 }
 

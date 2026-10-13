@@ -144,15 +144,13 @@ For a phone: install the official Tailscale Android app, **Settings** → kebab 
 
 ## Test from the Flutter app (or any direct gRPC client)
 
-The Flutter app (sycophant's e2e-testing client) inherits the host's network when run on the emulator, so once the Mac is on your headscale tailnet, `relay.ts.local:9090` (the app adapter's MagicDNS hostname) resolves and routes through the tailnet. Authorize the device by writing its grant row, inventing the code yourself:
+The Flutter app (sycophant's e2e-testing client) inherits the host's network when run on the emulator, so once the Mac is on your headscale tailnet, `relay.ts.local:9090` (the app adapter's MagicDNS hostname) resolves and routes through the tailnet. Authorize the person by binding their subject to the workspace list with the user command:
 
 ```sh
-kubectl patch configmap relay-access-grants -n tenant-<name> --type=merge -p '{"data":{
-  "<row-key>": "channel: app\nidentity: <an unguessable string>\nworkspace: <ws>\n"
-}}'
+syco user up -f user.yaml   # writes the identity ConfigMap and the reach RoleBindings
 ```
 
-Paste that string into the Flutter app's sign-in screen (along with the workspace name). See [`flutter-app.md`](flutter-app.md) for build/sideload of the app itself.
+Present the person's token as the gRPC bearer credential. See [`flutter-app.md`](flutter-app.md) for build/sideload of the app itself.
 
 ## Gotchas
 

@@ -1,9 +1,9 @@
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
-  name: relay-secret-name-allowlist
+  name: adapter-secret-name-allowlist
 spec:
-  description: relay-controller may create only the relay-registered-keys Secret and an adapter only adapter-state.
+  description: An adapter SA may create only the adapter-state Secret, and only in its own namespace.
   bindings:
     - name: tenant_ns
       value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
@@ -20,16 +20,8 @@ spec:
           bindings:
             - name: tenant_ns
               value: ($tenant_ns)
-    - name: install-relay-ctrl-rbac
+    - name: install-adapter-sa
       try:
-        - apply:
-            template: true
-            resource:
-              apiVersion: v1
-              kind: ServiceAccount
-              metadata:
-                name: relay-controller
-                namespace: ($tenant_ns)
         - apply:
             template: true
             resource:
@@ -38,13 +30,14 @@ spec:
               metadata:
                 name: adapter-app
                 namespace: ($tenant_ns)
+        # RBAC is the first lock; the VAP is the second, for adapters.
         - apply:
             template: true
             resource:
               apiVersion: rbac.authorization.k8s.io/v1
               kind: Role
               metadata:
-                name: relay-controller
+                name: adapter-secret-writer
                 namespace: ($tenant_ns)
               rules:
                 - apiGroups: [""]
@@ -56,12 +49,9 @@ spec:
               apiVersion: rbac.authorization.k8s.io/v1
               kind: RoleBinding
               metadata:
-                name: relay-controller
+                name: adapter-secret-writer
                 namespace: ($tenant_ns)
               subjects:
-                - kind: ServiceAccount
-                  name: relay-controller
-                  namespace: ($tenant_ns)
                 - kind: ServiceAccount
                   name: adapter-app
                   namespace: ($tenant_ns)
@@ -72,37 +62,12 @@ spec:
                   namespace: ($foreign_ns)
               roleRef:
                 kind: Role
-                name: relay-controller
+                name: adapter-secret-writer
                 apiGroup: rbac.authorization.k8s.io
     - name: wait-for-vap-cache-refresh
       try:
         - sleep:
             duration: 5s
-    - name: retired-signing-key-name-rejected
-      try:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              kubectl create secret generic relay-signing-key \
-                --from-literal=seed=fake -n "$TENANT_NS" \
-                --as="system:serviceaccount:${TENANT_NS}:relay-controller"
-            check:
-              ($error != null): true
-              (contains($stderr, 'relay-controller may only create Secrets')): true
-    - name: allowed-name-relay-registered-keys-succeeds
-      try:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              kubectl create secret generic relay-registered-keys \
-                --from-literal=caleb-phone=fake -n "$TENANT_NS" \
-                --as="system:serviceaccount:${TENANT_NS}:relay-controller"
-            check:
-              ($error == null): true
     # Runs before the accept below and claims the SAME name, so the only
     # thing that can refuse it is the namespace clause. Drop that clause and
     # this goes green (admitted) AND the accept below then reds on
@@ -121,7 +86,7 @@ spec:
                 --as="system:serviceaccount:${FOREIGN_NS}:adapter-app"
             check:
               ($error != null): true
-              (contains($stderr, 'relay-controller may only create Secrets')): true
+              (contains($stderr, 'adapter ServiceAccount may only create the adapter-state Secret')): true
     - name: adapter-sa-may-create-the-fixed-state-secret
       try:
         - script:
@@ -146,33 +111,7 @@ spec:
                 --as="system:serviceaccount:${TENANT_NS}:adapter-app"
             check:
               ($error != null): true
-              (contains($stderr, 'relay-controller may only create Secrets')): true
-    - name: relay-sa-cannot-create-an-adapter-state-secret
-      try:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              kubectl create secret generic adapter-state \
-                --from-literal=state=fake -n "$TENANT_NS" \
-                --as="system:serviceaccount:${TENANT_NS}:relay-controller"
-            check:
-              ($error != null): true
-              (contains($stderr, 'relay-controller may only create Secrets')): true
-    - name: forbidden-name-rejected
-      try:
-        - script:
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              kubectl create secret generic evil-secret \
-                --from-literal=k=v -n "$TENANT_NS" \
-                --as="system:serviceaccount:${TENANT_NS}:relay-controller"
-            check:
-              ($error != null): true
-              (contains($stderr, 'relay-controller may only create Secrets')): true
+              (contains($stderr, 'adapter ServiceAccount may only create the adapter-state Secret')): true
     - name: forbidden-name-with-generate-name-rejected
       try:
         - script:
@@ -181,7 +120,7 @@ spec:
                 value: ($tenant_ns)
             content: |
               cat <<EOF | kubectl create -f - -n "$TENANT_NS" \
-                --as="system:serviceaccount:${TENANT_NS}:relay-controller"
+                --as="system:serviceaccount:${TENANT_NS}:adapter-app"
               apiVersion: v1
               kind: Secret
               metadata:
@@ -192,7 +131,7 @@ spec:
               EOF
             check:
               ($error != null): true
-              (contains($stderr, 'relay-controller may only create Secrets')): true
+              (contains($stderr, 'adapter ServiceAccount may only create the adapter-state Secret')): true
     - name: cluster-admin-can-still-create-arbitrary-secrets
       try:
         - script:

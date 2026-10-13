@@ -66,9 +66,9 @@ spec:
       app.kubernetes.io/component: relay-controller
       app.kubernetes.io/part-of: sycophant
   egress:
-    # kube-apiserver: TokenReview (internal-caller auth), the
-    # relay-access-grants ConfigMap watch, Warning Events on bad rows, and the
-    # registered-keys Secret.
+    # kube-apiserver: TokenReview on every caller, the relay-identity
+    # ConfigMap watch, per-request access reviews, and Warning Events on bad
+    # identity ConfigMaps.
     - toEntities:
         - kube-apiserver
       toPorts:
@@ -81,8 +81,9 @@ spec:
     # harness. This is the harness's relay-only port, split off the pod-facing
     # dispatch port (9090). The per-workspace ws-<ws>-egress CNP
     # authorises the reverse (harness ingress admitting relay-controller to 9091).
-    # Workspace scoping is enforced at the application layer (caller's signed
-    # envelope + channel binding) and by the harness's per-workspace ingress.
+    # Workspace scoping is enforced at the application layer (the per-request
+    # SubjectAccessReview + channel binding) and by the harness's
+    # per-workspace ingress.
     - toEndpoints:
         - matchLabels:
             app.kubernetes.io/component: harness

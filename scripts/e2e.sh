@@ -2,8 +2,10 @@
 # Single-command end-to-end test for sycophant.
 #
 # Deploys the Helm charts (in-cluster headscale plus the app-channel adapter),
-# launches the Flutter client, and runs the Step 6 security assertions. Pauses
-# for the operator at the Flutter UI step.
+# drives the app path over the run's tailnet with the operator's Dex token
+# (grpcurl), optionally builds the Flutter macOS app as a compile check, and
+# runs the Step 6 security assertions. Unattended apart from one sudo prompt
+# for the tailnet join.
 #
 # By default reuses an existing k3d cluster and its loaded images, running only
 # the phases that prove the cluster works. Pass --clean to delete+recreate the
@@ -53,16 +55,15 @@ for arg in "$@"; do
     *) printf 'unknown argument: %s (see --help)\n' "$arg" >&2; exit 1 ;;
   esac
 done
-# The operator invents the grant row's identity and hands it over out of
-# band. The relay mints nothing, so this string is the whole proof.
-# The producer is bounded, not the consumer: `tr </dev/urandom | head -c 16`
-# hands `tr` a SIGPIPE the moment `head` has its 16 bytes, and under
-# `pipefail` that aborts the script at line 1.
-GRANT_CODE="e2e-$(head -c 256 /dev/urandom | LC_ALL=C tr -dc 'a-zA-Z0-9' | cut -c1-16)"
+# The app path is driven by the operator's person token: a Dex-signed ID
+# token whose subject `syco user up` bound to the workspace list. The relay
+# mints nothing; the operator's live RBAC is the whole authorization.
 HEADSCALE_USER="e2e"
 # The client reaches the relay through the app adapter's tailnet node, at the
 # adapter's MagicDNS hostname. Nothing dials the relay's app port directly.
 TAILNET_RELAY_ADDR="relay:9090"
+# The gateway serves no reflection: grpcurl reads the service from the protos.
+RELAY_GRPC_PROTO="-import-path $REPO_ROOT/crates/relay-proto/proto -import-path $REPO_ROOT/crates/proto-common/proto -proto relay/v1/relay.proto"
 ADAPTER_AUTHKEY_SECRET="relay-tsnet-authkey"
 # Object-storage instructions delivery. The store lives in the system namespace
 # and its operator credential never leaves it; the e2e host reaches it over
@@ -95,24 +96,27 @@ INFERENCE_PORT="8080"
 # per-call inference job holding the vendor key:
 # examples/inference/deepseek-v4-flash.yaml.
 REMOTE_MODEL="deepseek-v4-flash"
-# Client choice. Prompt when unset + interactive (the "confirm during install"
-# step); honor the env var otherwise so CI/agents run non-interactively.
-# none = backend-only: skip the local Flutter client and connect one remotely.
-if [ -z "${FLUTTER_TARGET:-}" ]; then
-  if [ -t 0 ]; then
-    printf 'Install a Flutter client? [macos/none] (none = backend-only): ' >&2
-    read -r FLUTTER_TARGET
-    FLUTTER_TARGET="${FLUTTER_TARGET:-none}"
-  else
-    FLUTTER_TARGET="macos"
-  fi
-fi
+# Flutter app compile check. Until the app's own OIDC login lands it cannot
+# connect, so the e2e only builds it; the app path is driven from here with
+# the operator's Dex token. macos = build the macOS app; none = skip.
+# The interactive prompt is off and the build is skipped by default; set
+# FLUTTER_TARGET=macos to run the compile check.
+# if [ -z "${FLUTTER_TARGET:-}" ]; then
+#   if [ -t 0 ]; then
+#     printf 'Build the Flutter macOS app as a compile check? [macos/none]: ' >&2
+#     read -r FLUTTER_TARGET
+#     FLUTTER_TARGET="${FLUTTER_TARGET:-none}"
+#   else
+#     FLUTTER_TARGET="macos"
+#   fi
+# fi
+FLUTTER_TARGET="${FLUTTER_TARGET:-none}"
 case "$FLUTTER_TARGET" in
-  macos)   CLIENT_NAME_DEFAULT="caleb-macbook" ;;
-  none)    CLIENT_NAME_DEFAULT="remote-client" ;;
+  macos|none) ;;
   *) printf 'unknown FLUTTER_TARGET: %s (expected macos|none)\n' "$FLUTTER_TARGET" >&2; exit 1 ;;
 esac
-CLIENT_NAME="${CLIENT_NAME:-$CLIENT_NAME_DEFAULT}"
+# Exported so the preflight child sees a prompted answer too.
+export FLUTTER_TARGET
 
 : "${OPENROUTER_API_KEY:?must be set}"
 
@@ -120,15 +124,6 @@ CLIENT_NAME="${CLIENT_NAME:-$CLIENT_NAME_DEFAULT}"
 step()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 ok()    { printf '\033[1;32m ✓\033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33m ⚠\033[0m %s\n' "$*" >&2; }
-pause() {
-  local marker="/tmp/sycophant-e2e-continue"
-  rm -f "$marker"
-  printf '\n\033[1;33m🛑 %s\033[0m\n' "$1"
-  printf '   When done, run: \033[1mtouch %s\033[0m\n' "$marker"
-  until [ -f "$marker" ]; do sleep 2; done
-  rm -f "$marker"
-}
-
 # wait_for <description> <timeout-seconds> <shell-condition>
 # Polls the condition every 2 s until it succeeds OR the timeout expires.
 # Returns non-zero on timeout, with a `warn` log. Use this instead of an
@@ -155,7 +150,7 @@ release_deployed() {
   [ -n "$out" ]
 }
 
-# ---- background cleanup (port-forwards, flutter run) ----
+# ---- background cleanup (port-forwards, receive streams) ----
 declare -a CLEANUP_PIDS=()
 # Set once the headscale forward is up. The cluster outlives the script but
 # the forward does not, so a client still driving the app loses the tailnet
@@ -707,25 +702,11 @@ POD
   ok "syco channel up: headscale and the app channel installed"
   step_3_headscale_authkey
 
-  # Grant rows are runtime data, not chart config: the operator writes them
-  # into the chart-created `relay-access-grants` ConfigMap. The identity IS the
-  # code, and the operator invents it — the relay mints nothing.
-  kubectl patch configmap relay-access-grants -n "$NAMESPACE" --type=merge -p "$(
-    cat <<EOF
-{"data":{"${CLIENT_NAME}":"channel: app\nidentity: ${GRANT_CODE}\nworkspace: hello-world\n"}}
-EOF
-  )" >/dev/null
-  ok "Grant row ${CLIENT_NAME} written (channel app, workspace hello-world)"
-
-  # The grant code is one-time. A reused cluster keeps this client's prior device
-  # registration in relay-registered-keys, which would leave the app "already
-  # enrolled" against a now-spent code and suppress this run's fresh enrollment.
-  # Clear the client's registration so THIS run's freshly written code is
-  # redeemable and the device re-enrolls every run. No-op on a clean cluster
-  # (secret or key absent).
-  kubectl patch secret relay-registered-keys -n "$NAMESPACE" --type=json \
-    -p "[{\"op\":\"remove\",\"path\":\"/data/${CLIENT_NAME}\"}]" >/dev/null 2>&1 || true
-  ok "Cleared prior ${CLIENT_NAME} registration — this run mints a fresh enrollment"
+  # Identity is operator-written runtime data, not chart config: `syco user
+  # up` (run above) rendered the subject's reach RoleBindings and identity
+  # ConfigMap, so the operator's Dex token already reaches hello-world. The
+  # relay mints nothing; authorization is a per-request Kubernetes review
+  # under that token.
 
   # The per-model egress CNP and the per-grant egress CNP are all chart-rendered
   # — the structural proof that egress authoring lives OUTSIDE the tenant.
@@ -825,7 +806,7 @@ step_4_verify() {
   fi
 }
 
-# ---- step 5: flutter ----
+# ---- step 5: app path ----
 # Forwards headscale's HTTP API, so the operator can point the host's
 # Tailscale at the in-cluster control plane and reach the app adapter over
 # the tailnet. This is the only forward the run stands up: the relay's app
@@ -853,20 +834,128 @@ step_5_headscale_port_forward() {
   HEADSCALE_FORWARD_STARTED=1
 }
 
-# The code is read back from the row this script itself wrote this run. The
-# deploy step clears any prior device registration for this client, so the fresh
-# code is always redeemable and always surfaced — every run prints a live code.
-step_5_grant_code() {
-  kubectl get configmap relay-access-grants -n "$NAMESPACE" \
-    -o jsonpath="{.data.${CLIENT_NAME}}" \
-    | sed -n 's/^identity: //p' | tr -d '\n'
+# One relay RPC over the tailnet with a person token. The request body is
+# read from stdin; extra grpcurl flags follow the method.
+relay_call() {
+  local token="$1" method="$2"; shift 2
+  # shellcheck disable=SC2086 # RELAY_GRPC_PROTO is a flag list; it must split.
+  grpcurl -plaintext ${RELAY_GRPC_PROTO} -authority "$TAILNET_RELAY_ADDR" \
+    -H "authorization: Bearer ${token}" "$@" -d @ \
+    "${TAILNET_RELAY_ADDR}" "relay.v1.RelayGateway/${method}"
+}
+
+# Conversations this run creates. Step 6 inspects exactly these, so records
+# left on the conversation PVC by an earlier run cannot satisfy it.
+E2E_TOOL_CONV=""
+E2E_CHAT_CONV=""
+
+# A client tool call inside a fresh conversation, no model involved: mint
+# the conversation, dispatch Shell into it, and wait for the result. Sets
+# E2E_TOOL_CONV. The call also starts the stdlib toolset pod Step 6 probes,
+# so it runs last in Step 5.
+e2e_tool_call() {
+  local token="$1" command="$2"
+  local conv call result
+  conv="$(relay_call "$token" MintConversation <<<'{"workspace":"hello-world"}' | jq -r '.conversationId // empty')"
+  [ -n "$conv" ] || { warn "MintConversation returned no conversation"; return 1; }
+
+  call="$(relay_call "$token" DispatchTool <<JSON | jq -r '.callId // empty'
+{"name": "Shell", "workspace": "hello-world", "conversationId": "$conv",
+ "inputJson": $(jq -n --arg c "$command" '{command: $c} | tojson')}
+JSON
+  )"
+  [ -n "$call" ] || { warn "DispatchTool returned no call id"; return 1; }
+
+  result="$(relay_call "$token" AwaitToolResult -max-time 180 <<JSON 2>&1
+{"callId": "$call", "conversationId": "$conv", "workspace": "hello-world"}
+JSON
+  )"
+  printf '%s' "$result" | jq -e 'select(.complete.outcome == "TOOL_OUTCOME_DONE")' >/dev/null 2>&1 \
+    || { warn "tool call did not complete: ${result}"; return 1; }
+  E2E_TOOL_CONV="$conv"
+}
+
+# One model turn with the demo-key grant, as a person-token client would
+# send it: open a receive stream, ingest the message on its channel, and wait
+# for the turn to go idle. Sets E2E_CHAT_CONV.
+e2e_chat_turn() {
+  local token="$1" message="$2"
+  local stream pid ch conv
+  stream="$(mktemp)"
+  relay_call "$token" ChannelReceive -max-time 300 \
+    <<<'{"workspace":"hello-world"}' >"$stream" 2>&1 &
+  pid=$!
+  CLEANUP_PIDS+=("$pid")
+
+  # shellcheck disable=SC2016 # single-quoted on purpose: wait_for evals it.
+  wait_for "receive stream opened" 30 \
+    'jq -r ".ack.channelId // empty" "'"$stream"'" 2>/dev/null | grep -q .' \
+    || { warn "ChannelReceive opened no channel: $(cat "$stream")"; return 1; }
+  ch="$(jq -r '.ack.channelId // empty' "$stream" 2>/dev/null | head -1)"
+
+  conv="$(relay_call "$token" ChannelIngest <<JSON | jq -r '.conversationId // empty'
+{"channelId": "$ch",
+ "userMessage": {"content": [{"text": {"text": $(jq -Rn --arg m "$message" '$m')}}],
+                 "grants": [{"toolset": "ssh-credentials", "grant": "demo-key"}]}}
+JSON
+  )"
+  [ -n "$conv" ] || { warn "ChannelIngest filed no conversation"; kill "$pid" 2>/dev/null; return 1; }
+
+  # shellcheck disable=SC2016 # single-quoted on purpose: wait_for evals it.
+  wait_for "chat turn finished" 180 \
+    'jq -r "select(.turnState.conversationId == \"'"$conv"'\") | .turnState.state" "'"$stream"'" 2>/dev/null | grep -qE "TURN_STATE_(IDLE|FAILED)"' \
+    || { kill "$pid" 2>/dev/null; return 1; }
+  kill "$pid" 2>/dev/null
+  if jq -r "select(.turnState.conversationId == \"$conv\") | .turnState.state" "$stream" 2>/dev/null \
+       | grep -q TURN_STATE_FAILED; then
+    warn "chat turn failed: $(jq -c 'select(.turnState.state == "TURN_STATE_FAILED")' "$stream" 2>/dev/null)"
+    return 1
+  fi
+  jq -r '.streamItem.start.toolUse.name // empty' "$stream" 2>/dev/null | grep -qx 'test-cmd' \
+    || { warn "the model did not call test-cmd in the chat turn"; return 1; }
+  E2E_CHAT_CONV="$conv"
+}
+
+# The app path with the operator's person token, over the same tailnet
+# forward the app uses. The relay TokenReviews the token, resolves the bound
+# subject, and authorizes the named workspace by SubjectAccessReview for it.
+step_5_app_path_turn() {
+  local token="$1"
+  command -v grpcurl >/dev/null 2>&1 \
+    || { warn "grpcurl required for the app-path turn"; return 1; }
+
+  # The watched identity table answers the bound list for the token's subject.
+  local listed
+  listed="$(relay_call "$token" ListWorkspaces <<<'{}' 2>&1)" \
+    || { warn "ListWorkspaces failed over the tailnet: ${listed}"; return 1; }
+  printf '%s' "$listed" | grep -q 'hello-world' \
+    || { warn "ListWorkspaces did not answer hello-world: ${listed}"; return 1; }
+  ok "ListWorkspaces answered the bound list (hello-world present)"
+
+  # The same token on a workspace it was never granted: the review must deny.
+  local denied
+  denied="$(relay_call "$token" DispatchTool 2>&1 <<'JSON'
+{"name": "Shell", "workspace": "not-granted", "conversationId": "", "inputJson": "{}"}
+JSON
+  )"
+  printf '%s' "$denied" | grep -q 'PermissionDenied' \
+    || { warn "an ungranted workspace was not denied over the app path: ${denied}"; return 1; }
+  ok "Ungranted workspace denied over the app path"
+
+  e2e_chat_turn "$token" "Use the test-cmd tool." || return 1
+  ok "Chat turn with the demo-key grant ran over the app path (${E2E_CHAT_CONV})"
+
+  # Last, so the stdlib toolset pod it starts is freshly used when Step 6
+  # probes it: keepalive pods exit after 10 minutes idle.
+  e2e_tool_call "$token" 'dmesg | head -1' || return 1
+  ok "Tool call ran in a conversation over the app path (${E2E_TOOL_CONV})"
 }
 
 # Re-register the operator's Mac against THIS run's headscale. Every Step 0
 # rebuilds the cluster, so headscale starts with an empty node DB while the Mac
 # still holds the previous run's tailnet identity; `tailscale up` against the
 # same login-server then silently keeps the now-unregistered node and the app's
-# enrollment hangs against a relay it can't reach. Force-reauth fixes it every
+# tailnet join hangs against a relay it can't reach. Force-reauth fixes it every
 # run so the join stops being a manual dance.
 #
 # The pre-auth key goes mint -> 0600 file -> `--auth-key=file:`, never a printf
@@ -874,7 +963,7 @@ step_5_grant_code() {
 # A sentinel is written immediately before the sudo prompt for the monitor.
 tailnet_join_macos() {
   command -v tailscale >/dev/null 2>&1 \
-    || { warn "tailscale CLI not found; join the tailnet manually before enrolling"; return 1; }
+    || { warn "tailscale CLI not found; join the tailnet manually first"; return 1; }
 
   kubectl exec -n "$NAMESPACE" deploy/headscale -- \
     headscale users create "$HEADSCALE_USER" >/dev/null 2>&1 || true
@@ -912,110 +1001,47 @@ tailnet_join_macos() {
   ok "Mac joined the tailnet (re-registered against this run'\''s headscale)"
 }
 
-step_5_flutter_macos() {
-  local code="$1"
-  step "Building Flutter macOS app"
+# Build the macOS app as a compile check. It is not launched: until its
+# own OIDC login lands it cannot connect.
+step_5_flutter_build() {
+  step "Building Flutter macOS app (compile check)"
   # CODE_SIGNING_ALLOWED=NO: build unsigned. arm64 applies a linker ad-hoc
-  # signature so the app still launches locally; no Apple team or
-  # provisioning profile needed. Never re-enable signing for the e2e.
+  # signature; no Apple team or provisioning profile needed. Never re-enable
+  # signing for the e2e.
   ( cd "$REPO_ROOT/client" && FLUTTER_XCODE_CODE_SIGNING_ALLOWED=NO flutter build macos --debug ) >/tmp/sycophant-flutter-build.log 2>&1 \
     || { warn "flutter build macos --debug failed; see /tmp/sycophant-flutter-build.log"; return 1; }
-  local app_path="$REPO_ROOT/client/build/macos/Build/Products/Debug/sycophant.app"
-  ok "macOS app built: $app_path"
-
-  step "Launching macOS app"
-  pkill -f "sycophant.app/Contents/MacOS/sycophant" 2>/dev/null || true
-  sleep 1
-  # `open -n` forces a new instance and bypasses the LaunchServices
-  # "bring to front" path that returns -600 on stale state.
-  if ! open -n "$app_path" 2>/dev/null; then
-    warn "open -n failed, executing binary directly"
-    "$app_path/Contents/MacOS/sycophant" >/dev/null 2>&1 &
-  fi
-
-  # The deploy step cleared any prior registration and wrote a fresh grant, so
-  # the code is always live here — print the enrollment block unconditionally.
-  printf '\n\033[1;35m========== Paste these into the app ==========\033[0m\n'
-  printf '  Server:           %s\n' "$TAILNET_RELAY_ADDR"
-  printf '  Workspace:        hello-world\n'
-  printf '  Grant code:       %s\n' "$code"
-  printf '  In-cluster model: %s  (a turn requesting this model routes to the inf-%s Service)\n' "$INFERENCE_PROFILE" "$INFERENCE_PROFILE"
-  printf '\033[1;35m===============================================\033[0m\n'
-  printf 'The tailnet was joined automatically for this run.\n'
-  printf 'If the app opens at the chat screen with stale credentials, tap Sign Out first.\n'
-}
-
-# Backend-only (FLUTTER_TARGET=none): no local client to launch. Bring up the
-# external listener, surface the connect details, and pause for the operator to
-# attach a client from another machine (e.g. over Tailscale) and drive the
-# Step 6 chat. Step 6 still runs afterward.
-step_5_backend_only() {
-  step "Step 5: Backend-only — connect a remote client"
-
-  step_5_headscale_port_forward
-  local code
-  code="$(step_5_grant_code)"
-
-  local addr="$TAILNET_RELAY_ADDR"
-
-  printf '\n  Backend is up. Connect a client from another machine:\n' >&2
-  printf '    Server:          %s\n' "$addr" >&2
-  printf '    Workspace:       hello-world\n' >&2
-  printf '    Namespace:       %s\n' "$NAMESPACE" >&2
-  printf '    Client:          %s\n' "$CLIENT_NAME" >&2
-  printf '    Grant code:      %s\n' "$code" >&2
-  printf '    In-cluster model:%s  (routes to the inf-%s Service)\n' "$INFERENCE_PROFILE" "$INFERENCE_PROFILE" >&2
-
-  pause "From the other machine, point the app at ${addr}, enroll with the code
-   above. If the app was enrolled against a prior run, sign out first: this run
-   rebuilt the cluster and minted a fresh code, so the app's stored device key
-   no longer matches and signed calls fail until you re-enroll. Then send these
-   two messages IN ORDER, ONE tool per message (the
-   small in-cluster model calls a single tool reliably, not a chained sequence):
-     1. (chip 'ssh-credentials: demo-key')  Use the test-cmd tool.
-     2. (chip 'ssh-credentials: demo-key')  Use the Shell tool to run \`dmesg | head -1\`.
-   The test-cmd reply's tool-result card shows the credential REDACTED. Step 6
-   asserts on the toolset tool + the stdlib pod the Shell call triggers — same
-   as the local-client path."
+  ok "macOS app built"
 }
 
 step_5_flutter() {
-  if [ "$FLUTTER_TARGET" = "none" ]; then
-    step_5_backend_only
-    return
+  step "Step 5: App path"
+
+  # The compile check runs first: anything slow between the last stdlib call
+  # and Step 6 risks the toolset pod Step 6 probes idling out.
+  if [ "$FLUTTER_TARGET" = "macos" ]; then
+    step_5_flutter_build || return 1
   fi
 
-  step "Step 5: Flutter ${FLUTTER_TARGET} + chat"
-
   step_5_headscale_port_forward
-  # Join the tailnet before the client launches, so enrollment reaches the relay
-  # over the fresh tailnet instead of hanging on a stale node.
+  # The app path is reached over the fresh tailnet, so this host joins it
+  # first on every run.
   tailnet_join_macos || return 1
-  local code
-  code="$(step_5_grant_code)"
 
-  case "$FLUTTER_TARGET" in
-    macos)   step_5_flutter_macos "$code" ;;
-  esac
-
-  pause "Tap Enroll, then drive the grant flow IN ORDER, ONE tool per message
-   (the in-cluster model is small and calls a single tool reliably, not a
-   chained sequence):
-   1. Select the credential chip 'ssh-credentials: demo-key' above the
-      input box, then send EXACTLY:
-        Use the test-cmd tool.
-      test-cmd runs under the demo-key grant (key delivered at its ssh
-      path). The reply's tool-result card must show the key REDACTED, not
-      raw — that card is the scrub proof, independent of the model's prose.
-   2. Keep 'demo-key' selected and send EXACTLY:
-        Use the Shell tool to run \`dmesg | head -1\`.
-      Shell spawns the stdlib pod Step 6 asserts on for gVisor + egress +
-      credential isolation and keepalive."
+  # The operator's person token: a Dex-signed ID token for the subject
+  # `syco user up` bound to the workspace list.
+  local token
+  token="$(mint_dex_token "$TENANT_A_USER_SUB")"
+  step_5_app_path_turn "$token" \
+    || { warn "the operator-token app-path turn failed"; return 1; }
+  ok "App path proven with the operator token (denial, chat turn, tool call)"
 }
 
 # ---- step 6: security assertions ----
 step_6_security() {
   step "Step 6: Security assertions"
+
+  [ -n "$E2E_TOOL_CONV" ] && [ -n "$E2E_CHAT_CONV" ] \
+    || { warn "Step 5 recorded no conversations to inspect"; return 1; }
 
   # The harness creates the stdlib toolset pod on the first stdlib call; 90s
   # covers the ARM64 gVisor cold-start slow path.
@@ -1066,6 +1092,23 @@ step_6_security() {
   patch='{"spec":{"ephemeralContainers":[{"name":"'"$scrub_c"'","image":"busybox:1.36","command":["sleep","180"],"targetContainerName":"harness","securityContext":{"runAsNonRoot":true,"runAsUser":1000,"readOnlyRootFilesystem":true,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}}}]}}'
   kubectl patch pod "$tb_pod" -n "$NAMESPACE" \
     --subresource=ephemeralcontainers --type=strategic -p "$patch" >/dev/null
+  # Both of this run's conversations must be on the PVC before any scan of
+  # it counts: an empty directory would pass every absence check below.
+  local conv_root=/proc/1/root/var/lib/harness/conversations
+  local chat_dir="" tool_dir=""
+  for _ in $(seq 1 15); do
+    chat_dir="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
+      find "$conv_root" -maxdepth 2 -type d -name "$E2E_CHAT_CONV" 2>/dev/null | head -1)" || true
+    tool_dir="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
+      find "$conv_root" -maxdepth 2 -type d -name "$E2E_TOOL_CONV" 2>/dev/null | head -1)" || true
+    # The ephemeral container may not be running yet; under set -e the
+    # assignments above are guarded so this loop can retry.
+    [ -n "$chat_dir" ] && [ -n "$tool_dir" ] && break
+    sleep 2
+  done
+  [ -n "$chat_dir" ] && [ -n "$tool_dir" ] \
+    || { warn "this run's conversations are not on the PVC (chat=${chat_dir:-none} tool=${tool_dir:-none})"; return 1; }
+
   local conv_hits=""
   for _ in $(seq 1 15); do
     conv_hits="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
@@ -1088,13 +1131,13 @@ step_6_security() {
   # scrubbed on the way out of the pod.
   local grant_raw grant_marker
   grant_raw="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
-    sh -c "grep -rc 'FAKE-ED25519-PRIVATE-KEY' /proc/1/root/var/lib/harness/conversations 2>/dev/null | grep -v ':0\$' | wc -l" 2>/dev/null)"
+    sh -c "grep -rc 'FAKE-ED25519-PRIVATE-KEY' '$conv_root' 2>/dev/null | grep -v ':0\$' | wc -l" 2>/dev/null)"
   grant_marker="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
-    sh -c "grep -rl 'REDACTED:demo-ssh-key' /proc/1/root/var/lib/harness/conversations 2>/dev/null | wc -l" 2>/dev/null)"
+    sh -c "grep -rl 'REDACTED:demo-ssh-key' '$chat_dir' 2>/dev/null | wc -l" 2>/dev/null)"
   grant_raw="${grant_raw//[[:space:]]/}"; grant_raw="${grant_raw:-1}"
   grant_marker="${grant_marker//[[:space:]]/}"; grant_marker="${grant_marker:-0}"
   if [ "$grant_raw" -eq 0 ] && [ "$grant_marker" -ge 1 ]; then
-    ok "Grant credential read + scrubbed (marker present, raw bytes absent)"
+    ok "Grant credential read + scrubbed (marker in this run's chat turn, raw bytes nowhere)"
   else
     warn "grant credential evidence wrong: raw_files=$grant_raw marker_files=$grant_marker"
     return 1
@@ -1107,19 +1150,19 @@ step_6_security() {
   # one ToolComplete), each line carrying its call_id, with binary frames moved
   # to content-addressed blobs/sha256/<hex> in the same conversation dir. A tool
   # that ran to completion leaves a non-empty execution.json, so assert a
-  # non-empty execution.json exists. Read it via the same ephemeral container
-  # the conv-log scrub scan above used.
+  # non-empty execution.json exists for this run's tool-call conversation.
+  # Read it via the same ephemeral container the conv-log scrub scan used.
   local exec_ok=""
   for _ in $(seq 1 30); do
     exec_ok="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
-      sh -c 'find /proc/1/root/var/lib/harness/conversations -type f -name "execution.json" -size +0c 2>/dev/null | head -1')" \
+      find "$tool_dir" -maxdepth 1 -type f -name execution.json -size +0c 2>/dev/null | head -1)" \
       && [ -n "$exec_ok" ] && break
     sleep 2
   done
   if [ -n "$exec_ok" ]; then
-    ok "Tool execution (non-empty execution.json record persisted)"
+    ok "Tool execution (non-empty execution.json in this run's tool-call conversation)"
   else
-    warn "no execution.json record on harness PVC"
+    warn "no execution.json in this run's tool-call conversation ($E2E_TOOL_CONV)"
     return 1
   fi
 
@@ -1184,7 +1227,7 @@ step_6_security() {
     step_6_adapter_isolation
     step_6_adapter_port_fence
     step_6_inference_fence
-    step_6_grant_row_hot_reload
+    step_6_identity_hot_reload
   )
   local failed=() c
   for c in "${checks[@]}"; do
@@ -1415,53 +1458,58 @@ POD
     "${prompt_ms:-n/a}" "${rate:-n/a}" "${mem:-n/a}"
 }
 
-# Adding a row admits an identity and removing it revokes,
-# both without a pod restart. The relay logs each delivery it applies with
-# the resulting table size (rows=N), so a new delivery line whose rows count
-# moved is direct evidence the live table changed. Line counts scope the
-# wait to deliveries after each patch; the startup delivery can't match.
-step_6_grant_row_hot_reload() {
-  step "Grant row hot reload"
-  local before after count0 rows0 count1
-
-  grants_deliveries() {
-    kubectl logs deploy/relay-controller -n "$NAMESPACE" 2>/dev/null \
-      | grep -c '"message":"grants delivery applied"'
-  }
-  grants_last_rows() {
-    kubectl logs deploy/relay-controller -n "$NAMESPACE" 2>/dev/null \
-      | grep '"message":"grants delivery applied"' | tail -1 \
-      | grep -o '"rows":[0-9]*' | cut -d: -f2
-  }
+# Identity is live operator data: the operator re-runs `syco user up` and the
+# relay's watched table answers the change without a pod restart. The probe
+# binds a second subject, waits for its identity ConfigMap to appear in the
+# watched answer, then removes the binding and waits for the answer to go
+# empty — the whole revocation promise on the ListWorkspaces surface.
+step_6_identity_hot_reload() {
+  step "Identity hot reload"
+  local before after token listed
+  local probe_sub="e2e-hot-reload"
 
   before="$(kubectl get pod -n "$NAMESPACE" -l app.kubernetes.io/component=relay-controller \
     -o jsonpath='{.items[0].metadata.name}')"
-  count0="$(grants_deliveries)"
-  rows0="$(grants_last_rows)"
-  if [ -z "$rows0" ]; then
-    warn "no grants delivery in relay logs before the probe — watcher never synced"
+
+  # Bind the probe subject to the workspace, then wait for the relay to
+  # answer its list.
+  # Its own handle: a handle two subjects claim resolves to neither, which
+  # would unbind the main user's slack handle for the length of the probe.
+  "$SYCO" user up -f "$REPO_ROOT/examples/users/alice.yaml" \
+    --set "user.subject=${APISERVER_OIDC_ISSUER}#${probe_sub}" \
+    --set "user.handles.slack=E2E-HOT-RELOAD" \
+    >/dev/null \
+    || { warn "syco user up failed for the hot-reload probe"; return 1; }
+
+  token="$(mint_dex_token "$probe_sub")"
+  # shellcheck disable=SC2016 # single-quoted on purpose: wait_for evals it.
+  if wait_for "relay answers the freshly bound subject's list" 90 \
+       'relay_call "'"$token"'" ListWorkspaces <<<"{}" 2>/dev/null | grep -q hello-world'; then
+    ok "Freshly bound subject reaches the workspace without a restart"
+  else
+    warn "relay never answered the freshly bound subject's list"
     return 1
   fi
 
-  kubectl patch configmap relay-access-grants -n "$NAMESPACE" --type=merge \
-    -p '{"data":{"e2e-probe-row":"channel: app\nidentity: e2e-probe-identity\nworkspace: hello-world\n"}}' \
-    >/dev/null
-  if wait_for "relay applies the added row (rows $rows0 -> $((rows0 + 1)))" 60 \
-       "[ \"\$(grants_deliveries)\" -gt $count0 ] && [ \"\$(grants_last_rows)\" -eq $((rows0 + 1)) ]"; then
-    ok "Added row applied without a restart (rows=$((rows0 + 1)))"
+  # Remove the binding by deleting the user's release, exactly as the
+  # operator would re-run `syco user up` without the workspace: the identity
+  # ConfigMap and the reach RoleBindings go together. The relay's next
+  # answer must be empty.
+  local release_name
+  release_name="$(handle_of "${APISERVER_OIDC_ISSUER}#${probe_sub}")"
+  # The provision installers keep release records in ConfigMaps.
+  HELM_DRIVER=configmap helm uninstall "user-${release_name}" -n "$NAMESPACE" >/dev/null 2>&1 \
+    || { warn "could not remove the probe user's release user-${release_name}"; return 1; }
+  # A dropped tailnet or a crashed relay must not count as revoked: the
+  # answer must be a successful list without hello-world, or a denial.
+  # shellcheck disable=SC2016 # single-quoted on purpose: wait_for evals it.
+  if wait_for "revoked subject's list goes empty" 90 \
+       'out="$(relay_call "'"$token"'" ListWorkspaces <<<"{}" 2>&1)"; rc=$?;
+        { [ "$rc" -eq 0 ] && ! printf "%s" "$out" | grep -q hello-world; } \
+          || printf "%s" "$out" | grep -qE "PermissionDenied|Unauthenticated"'; then
+    ok "Binding removal revoked the subject without a restart"
   else
-    warn "relay never applied the added grant row"
-    return 1
-  fi
-
-  count1="$(grants_deliveries)"
-  kubectl patch configmap relay-access-grants -n "$NAMESPACE" --type=json \
-    -p '[{"op":"remove","path":"/data/e2e-probe-row"}]' >/dev/null
-  if wait_for "relay applies the removal (rows back to $rows0)" 60 \
-       "[ \"\$(grants_deliveries)\" -gt $count1 ] && [ \"\$(grants_last_rows)\" -eq $rows0 ]"; then
-    ok "Removed row left the live table (rows=$rows0)"
-  else
-    warn "relay never applied the row removal — revocation did not land"
+    warn "relay kept answering the revoked subject's list — revocation did not land"
     return 1
   fi
 
@@ -1471,7 +1519,7 @@ step_6_grant_row_hot_reload() {
     warn "relay pod restarted during the hot-reload probe ($before -> $after)"
     return 1
   fi
-  ok "Hot reload completed with no relay restart"
+  ok "Identity hot reload completed with no relay restart"
 }
 
 # ---- step 7: syco upgrade via the CLI ----
@@ -1801,7 +1849,8 @@ verify_user_isolation() {
   "$SYCO" tenant up -f "$REPO_ROOT/examples/tenants/e2e-test.yaml" \
     --set "tenant.name=${TENANT_B_NAMESPACE#tenant-}" --set tenant.capacity=512Mi
   "$SYCO" user up -f "$REPO_ROOT/examples/users/alice.yaml" --set "user.tenant=${TENANT_B_NAMESPACE#tenant-}" \
-    --set "user.subject=${APISERVER_OIDC_ISSUER}#${TENANT_B_USER_SUB}"
+    --set "user.subject=${APISERVER_OIDC_ISSUER}#${TENANT_B_USER_SUB}" \
+    --set "user.workspaces="
   ok "tenant ${TENANT_B_NAMESPACE} provisioned and bound to ${TENANT_B_USER_SUB}"
 
   # Two Dex-signed tokens: a positive one whose sub is tenant A's bound
@@ -1870,10 +1919,16 @@ d = json.load(sys.stdin); ident = os.environ["IDENT"]
 print("\n".join(rb["metadata"]["name"] for rb in d["items"]
       if any(s.get("kind") == "User" and s.get("name") == ident
              for s in rb.get("subjects") or [])))')"
-  local user_rb; user_rb="user-$(handle_of "$user_identity")"
-  [ "$rb_naming" = "$user_rb" ] \
-    || { warn "user identity ${user_identity} is named by RoleBinding(s) other than ${user_rb}: ${rb_naming:-none}"; exit 1; }
-  ok "no per-identity binding minted at login; the user provision command's ${user_rb} binding is the only grant"
+  local user_hash; user_hash="$(handle_of "$user_identity")"
+  local user_rb="user-${user_hash}"
+  # Every binding naming the identity must come from the user provision
+  # command's own release: the membership binding user-<hash>, or a reach
+  # binding user-ws-<hash>-<workspace>. A binding outside that shape is a mint.
+  local foreign_rb
+  foreign_rb="$(printf '%s\n' "$rb_naming" | grep -vE "^(${user_rb}|user-ws-${user_hash}-[a-z0-9]([-a-z0-9]*[a-z0-9])?)$" || true)"
+  [ -z "$foreign_rb" ] \
+    || { warn "user identity ${user_identity} is named by RoleBinding(s) outside ${user_rb}(-ws-<workspace>): ${foreign_rb:-none}"; exit 1; }
+  ok "no per-identity binding minted at login; every binding naming the user comes from the user provision command"
 
   ok "per-identity cluster-identity isolation proof passed"
 }

@@ -1,12 +1,10 @@
 //! Shared primitives used across the workspace.
 
 pub mod auth;
-pub mod client_signature;
 pub mod configmap_watcher;
 pub mod grpc_client;
 pub mod keepalive;
 pub mod podspec;
-pub mod replay_cache;
 pub mod scheduling;
 pub mod scrub;
 pub mod toolset;

@@ -21,11 +21,10 @@ use proto_common::{
     channel_outbound, ChannelOutbound, ClientResponseError, ServerRequest, TurnState,
     TurnStateEvent, UserMessage,
 };
-use shared::client_signature::ClientSignatureVerifier;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 
-use crate::grants::RelayGrants;
 use crate::harness_client::HarnessClientPool;
+use crate::identity::IdentityTable;
 
 pub enum ServerRequestOutcome {
     /// Client returned a successful result; payload is `result_json`.
@@ -45,21 +44,31 @@ pub enum ServerRequestError {
     Disconnected,
 }
 
+/// Who opened a channel. ChannelIngest admits only the same caller: a
+/// person channel only its own subject, an adapter channel only that
+/// adapter. An adapter channel also keeps the sender handle it was opened
+/// for, so every message re-resolves that handle against the live identity
+/// table and a removed handle binding cuts an open channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelOpener {
+    Person,
+    Adapter { channel: String, sender: String },
+}
+
 /// Server-side state for one registered channel. Created via
 /// `mint_channel`; lifetime tied to the originating ChannelReceive
 /// response stream.
 pub struct ChannelEntry {
-    /// The grant row that minted this channel. ChannelIngest callers
+    /// How the channel was opened; see [`ChannelOpener`].
+    pub opener: ChannelOpener,
+    /// The subject that minted this channel. ChannelIngest callers
     /// must verify against this binding (PermissionDenied on mismatch),
-    /// so two rows in one workspace cannot reach each other's channels.
-    pub row: String,
-    /// The workspace the minting row names. The harness link checks
-    /// against this, because the harness knows workspaces and not rows.
+    /// so two subjects in one workspace cannot reach each other's channels.
+    pub subject: String,
+    /// The workspace the minting subject names. The harness link checks
+    /// against this, because the harness knows workspaces and not subjects.
     pub workspace: String,
     pub tx: mpsc::Sender<ChannelOutbound>,
-    /// Free-form, untrusted, log-only label set by the adapter at
-    /// registration time. Never used for routing or auth.
-    pub adapter_hint: Option<String>,
     /// Cluster-owned turn phase for the channel. `set_and_broadcast_turn_state`
     /// updates this and enqueues a frame under the same lock acquisition so
     /// replay on fresh ChannelReceive cannot race a live transition.
@@ -131,26 +140,27 @@ impl SubscriberRegistry {
 pub struct GatewayState {
     /// channel_id (UUID, server-minted) → ChannelEntry.
     channels: RwLock<HashMap<String, ChannelEntry>>,
-    /// (grant row, conversation_id) → last recorded turn phase. Keyed by
-    /// the caller's verified row so a `GetTurnState` poll can only read
-    /// its own row's phase; conversation_id alone is a bare UUID and would
-    /// leak across a tenant's rows. Written on every turn-state broadcast;
-    /// read by the poll.
+    /// (subject, conversation_id) → last recorded turn phase. Keyed by
+    /// the caller's verified subject so a `GetTurnState` poll can only read
+    /// its own phase; conversation_id alone is a bare UUID and would
+    /// leak across a tenant's subjects. Written on every turn-state
+    /// broadcast; read by the poll.
     last_turn_state: RwLock<HashMap<(String, String), TurnStateRecord>>,
     /// Per-workspace inbound user-message bus.
     subscribers: SubscriberRegistry,
-    /// Registered device keys, one per grant row. Rebuilt from the
-    /// relay-owned Secret at startup, written by each redemption, read by
-    /// the signature middleware on every signed request.
-    client_verifier: Arc<ClientSignatureVerifier>,
-    /// The live authorization table, swapped by the grants watcher on every
-    /// ConfigMap delivery. Every request is checked against it, so removing
-    /// a row cuts access within seconds and without a pod restart.
-    grants: Arc<RwLock<RelayGrants>>,
-    /// conversation_id → the grant row that minted it. A cache, not the
+    /// The live identity table, swapped by the identity watcher on every
+    /// relay-identity ConfigMap delivery. It answers the workspace list and
+    /// resolves channel handles to subjects; authorization itself is a
+    /// per-request Kubernetes review.
+    identity: Arc<RwLock<IdentityTable>>,
+    /// conversation_id → the subject that minted it. A cache, not the
     /// record: the harness holds the durable stamp. A miss resolves against
     /// the harness; it never reads as "unowned, therefore fine".
     conversation_owners: RwLock<HashMap<String, String>>,
+    /// call_id → the (subject, workspace) that dispatched it. The relay
+    /// mints the call_id (via the harness), so a CancelToolRequest — which
+    /// carries no workspace — resolves its workspace here.
+    dispatched_calls: RwLock<HashMap<String, (String, String)>>,
     kube_client: Option<kube::Client>,
     namespace: String,
     /// Pool of per-workspace harness clients for the tool forwards
@@ -163,19 +173,15 @@ pub struct GatewayState {
 }
 
 impl GatewayState {
-    pub fn new(
-        client_verifier: Arc<ClientSignatureVerifier>,
-        kube_client: Option<kube::Client>,
-        namespace: String,
-    ) -> Self {
+    pub fn new(kube_client: Option<kube::Client>, namespace: String) -> Self {
         let harness_clients = HarnessClientPool::new(&namespace);
         Self {
             channels: RwLock::new(HashMap::new()),
             last_turn_state: RwLock::new(HashMap::new()),
             subscribers: SubscriberRegistry::new(),
-            client_verifier,
-            grants: Arc::new(RwLock::new(RelayGrants::default())),
+            identity: Arc::new(RwLock::new(IdentityTable::default())),
             conversation_owners: RwLock::new(HashMap::new()),
+            dispatched_calls: RwLock::new(HashMap::new()),
             kube_client,
             namespace,
             harness_clients,
@@ -183,14 +189,19 @@ impl GatewayState {
         }
     }
 
-    /// Seed the capability grants for test fixtures.
-    #[cfg(test)]
-    pub fn with_capabilities(self, capabilities: crate::capabilities::CapabilityGrants) -> Self {
-        *self
-            .capabilities
-            .try_write()
-            .expect("no watcher holds the capabilities lock at construction") = capabilities;
-        self
+    /// Like [`GatewayState::new`], but the harness pool dials `template`
+    /// (`{workspace}` substituted) instead of the in-cluster Service DNS, so a
+    /// test can stand a harness up on a loopback port.
+    #[cfg(any(test, feature = "test-fixtures"))]
+    pub fn with_harness_template(
+        kube_client: Option<kube::Client>,
+        namespace: String,
+        template: String,
+    ) -> Self {
+        Self {
+            harness_clients: HarnessClientPool::from_service_template(template),
+            ..Self::new(kube_client, namespace)
+        }
     }
 
     /// Shared handle on the live ListGrants table. The toolset-grants watcher
@@ -199,38 +210,13 @@ impl GatewayState {
         self.capabilities.clone()
     }
 
-    #[cfg(test)]
-    pub fn new_with_harness_pool(
-        client_verifier: Arc<ClientSignatureVerifier>,
-        kube_client: Option<kube::Client>,
-        namespace: String,
-        harness_clients: Arc<HarnessClientPool>,
-    ) -> Self {
-        Self {
-            channels: RwLock::new(HashMap::new()),
-            last_turn_state: RwLock::new(HashMap::new()),
-            subscribers: SubscriberRegistry::new(),
-            client_verifier,
-            grants: Arc::new(RwLock::new(RelayGrants::default())),
-            conversation_owners: RwLock::new(HashMap::new()),
-            kube_client,
-            namespace,
-            harness_clients,
-            capabilities: Arc::new(RwLock::new(crate::capabilities::CapabilityGrants::default())),
-        }
+    /// Shared handle on the live identity table. The identity watcher writes
+    /// through it; the workspace-list answer and handle resolution read it.
+    pub fn identity(&self) -> Arc<RwLock<IdentityTable>> {
+        self.identity.clone()
     }
 
-    pub fn client_verifier(&self) -> &Arc<ClientSignatureVerifier> {
-        &self.client_verifier
-    }
-
-    /// Shared handle on the live authorization table. The grants watcher
-    /// writes through it; every request reads through it.
-    pub fn grants(&self) -> Arc<RwLock<RelayGrants>> {
-        self.grants.clone()
-    }
-
-    /// The grant row a conversation is cached under, if the relay has seen
+    /// The subject a conversation is cached under, if the relay has seen
     /// it since this process started.
     pub async fn conversation_owner(&self, conversation_id: &str) -> Option<String> {
         self.conversation_owners
@@ -240,13 +226,28 @@ impl GatewayState {
             .cloned()
     }
 
-    /// Cache a conversation's owning row after minting it or resolving it
-    /// against the harness.
-    pub async fn record_conversation_owner(&self, conversation_id: &str, row: &str) {
+    /// Cache a conversation's owning subject after minting it or resolving
+    /// it against the harness.
+    pub async fn record_conversation_owner(&self, conversation_id: &str, subject: &str) {
         self.conversation_owners
             .write()
             .await
-            .insert(conversation_id.to_string(), row.to_string());
+            .insert(conversation_id.to_string(), subject.to_string());
+    }
+
+    /// Record which (subject, workspace) dispatched a call, so a later
+    /// CancelToolRequest resolves its workspace without a wire field.
+    pub async fn record_dispatched_call(&self, call_id: &str, subject: &str, workspace: &str) {
+        self.dispatched_calls.write().await.insert(
+            call_id.to_string(),
+            (subject.to_string(), workspace.to_string()),
+        );
+    }
+
+    /// The (subject, workspace) a call_id was dispatched under, if the relay
+    /// has seen it since this process started.
+    pub async fn dispatched_call(&self, call_id: &str) -> Option<(String, String)> {
+        self.dispatched_calls.read().await.get(call_id).cloned()
     }
 
     pub fn kube_client(&self) -> Option<&kube::Client> {
@@ -269,26 +270,26 @@ impl GatewayState {
         self.subscribers.notify(workspace, message).await;
     }
 
-    /// Mint a fresh channel_id (UUID), bind it to the minting grant row
-    /// and that row's workspace, and store the tx for outbound routing.
+    /// Mint a fresh channel_id (UUID), bind it to the minting subject
+    /// and that subject's workspace, and store the tx for outbound routing.
     /// Returns the channel_id; the caller is responsible for echoing it
     /// back to the adapter as the first frame of the outbound stream
     /// (ChannelAck).
     pub async fn mint_channel(
         &self,
-        row: String,
+        opener: ChannelOpener,
+        subject: String,
         workspace: String,
-        adapter_hint: Option<String>,
         tx: mpsc::Sender<ChannelOutbound>,
     ) -> String {
         let id = uuid::Uuid::new_v4().to_string();
         self.channels.write().await.insert(
             id.clone(),
             ChannelEntry {
-                row,
+                opener,
+                subject,
                 workspace,
                 tx,
-                adapter_hint,
                 current_state: Mutex::new(TurnState::Idle),
                 pending_server_requests: Mutex::new(HashMap::new()),
                 supported_methods: Mutex::new(HashSet::new()),
@@ -301,38 +302,23 @@ impl GatewayState {
         self.channels.write().await.remove(channel_id);
     }
 
-    /// Return the grant row bound to a channel_id, or None if unknown.
-    /// ChannelIngest uses this: the caller's verified row MUST equal the
-    /// channel's bound row, otherwise the call is rejected.
-    pub async fn channel_row(&self, channel_id: &str) -> Option<String> {
-        self.channels
-            .read()
-            .await
-            .get(channel_id)
-            .map(|entry| entry.row.clone())
-    }
-
-    /// Return the workspace bound to a channel_id, or None if unknown.
-    /// The harness link checks against this, because the harness knows
-    /// workspaces and not rows.
-    pub async fn channel_workspace(&self, channel_id: &str) -> Option<String> {
-        self.channels
-            .read()
-            .await
-            .get(channel_id)
-            .map(|entry| entry.workspace.clone())
-    }
-
-    /// Return the `(row, workspace)` a channel_id is bound to, in one read.
-    /// A caller that needs both must not take two locks: the channel can be
-    /// unregistered between them, leaving the second lookup empty while the
-    /// first said the channel was live.
-    pub async fn channel_binding(&self, channel_id: &str) -> Option<(String, String)> {
-        self.channels
-            .read()
-            .await
-            .get(channel_id)
-            .map(|entry| (entry.row.clone(), entry.workspace.clone()))
+    /// Return who opened a channel_id and the `(subject, workspace)` it is
+    /// bound to, in one read, or None if unknown. ChannelIngest admits only
+    /// the caller that opened it. A caller that needs more than one field must
+    /// not take two locks: the channel can be unregistered between them,
+    /// leaving the second lookup empty while the first said the channel was
+    /// live.
+    pub async fn channel_binding(
+        &self,
+        channel_id: &str,
+    ) -> Option<(ChannelOpener, String, String)> {
+        self.channels.read().await.get(channel_id).map(|entry| {
+            (
+                entry.opener.clone(),
+                entry.subject.clone(),
+                entry.workspace.clone(),
+            )
+        })
     }
 
     pub async fn send_to_channel(&self, channel_id: &str, msg: ChannelOutbound) -> bool {
@@ -353,7 +339,7 @@ impl GatewayState {
     pub async fn set_and_broadcast_turn_state(
         &self,
         channel_id: &str,
-        row: &str,
+        subject: &str,
         conversation_id: &str,
         state: TurnState,
     ) -> bool {
@@ -361,7 +347,7 @@ impl GatewayState {
         // captured even when the channel has gone away (client disconnected
         // mid-turn) — the client recovers it via GetTurnState on reconnect.
         self.record_turn_state(
-            row,
+            subject,
             conversation_id,
             TurnStateRecord {
                 state,
@@ -395,13 +381,13 @@ impl GatewayState {
     pub async fn set_and_broadcast_turn_failed(
         &self,
         channel_id: &str,
-        row: &str,
+        subject: &str,
         conversation_id: &str,
         reason: &str,
         code: &str,
     ) -> bool {
         self.record_turn_state(
-            row,
+            subject,
             conversation_id,
             TurnStateRecord {
                 state: TurnState::Failed,
@@ -435,7 +421,7 @@ impl GatewayState {
     /// not pollute the per-conversation map.
     pub async fn record_turn_state(
         &self,
-        row: &str,
+        subject: &str,
         conversation_id: &str,
         record: TurnStateRecord,
     ) {
@@ -445,7 +431,7 @@ impl GatewayState {
         self.last_turn_state
             .write()
             .await
-            .insert((row.to_string(), conversation_id.to_string()), record);
+            .insert((subject.to_string(), conversation_id.to_string()), record);
     }
 
     /// Read the recorded turn phase for a conversation. `None` when no
@@ -454,13 +440,13 @@ impl GatewayState {
     /// that to IDLE, since absence of a record is not a failure.
     pub async fn turn_state_record(
         &self,
-        row: &str,
+        subject: &str,
         conversation_id: &str,
     ) -> Option<TurnStateRecord> {
         self.last_turn_state
             .read()
             .await
-            .get(&(row.to_string(), conversation_id.to_string()))
+            .get(&(subject.to_string(), conversation_id.to_string()))
             .cloned()
     }
 
@@ -614,21 +600,32 @@ impl GatewayState {
     }
 }
 
+/// Fixtures shared by the crate's unit tests.
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
 
-    fn fixture_verifier() -> Arc<ClientSignatureVerifier> {
-        Arc::new(ClientSignatureVerifier::new(Duration::from_secs(300)))
+    pub(crate) fn make_state() -> Arc<GatewayState> {
+        Arc::new(GatewayState::new(None, "default".into()))
     }
 
-    fn make_state() -> Arc<GatewayState> {
-        Arc::new(GatewayState::new(
-            fixture_verifier(),
-            None,
-            "default".into(),
-        ))
+    /// Mint a person-opened channel for `subject` on `workspace`.
+    pub(crate) async fn mint_person(
+        state: &GatewayState,
+        subject: &str,
+        workspace: &str,
+        tx: mpsc::Sender<ChannelOutbound>,
+    ) -> String {
+        state
+            .mint_channel(ChannelOpener::Person, subject.into(), workspace.into(), tx)
+            .await
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{make_state, mint_person};
+    use super::*;
 
     fn extract_turn_state(msg: &ChannelOutbound) -> Option<TurnState> {
         match &msg.command {
@@ -648,9 +645,7 @@ mod tests {
     async fn mint_channel_and_send() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(4);
-        let id = state
-            .mint_channel("row-alpha".into(), "alpha".into(), None, tx)
-            .await;
+        let id = mint_person(&state, "subject-alpha", "alpha", tx).await;
         assert!(
             state
                 .send_to_channel(
@@ -674,27 +669,22 @@ mod tests {
     async fn mint_channel_returns_unique_ids() {
         let state = make_state();
         let (tx, _rx) = mpsc::channel(1);
-        let a = state
-            .mint_channel("row-ws".into(), "ws".into(), None, tx.clone())
-            .await;
-        let b = state
-            .mint_channel("row-ws".into(), "ws".into(), None, tx)
-            .await;
+        let a = mint_person(&state, "subject-ws", "ws", tx.clone()).await;
+        let b = mint_person(&state, "subject-ws", "ws", tx).await;
         assert_ne!(a, b, "each mint must produce a distinct channel_id");
     }
 
     #[tokio::test]
-    async fn channel_workspace_returns_binding() {
+    async fn channel_binding_returns_opener_subject_workspace() {
         let state = make_state();
         let (tx, _rx) = mpsc::channel(1);
-        let id = state
-            .mint_channel("row-hello".into(), "hello-world".into(), None, tx)
-            .await;
-        assert_eq!(
-            state.channel_workspace(&id).await.as_deref(),
-            Some("hello-world")
-        );
-        assert_eq!(state.channel_workspace("nonexistent").await, None);
+        let id = mint_person(&state, "subject-hello", "hello-world", tx).await;
+        let (_, _, ws) = state
+            .channel_binding(&id)
+            .await
+            .expect("channel must exist");
+        assert_eq!(ws, "hello-world");
+        assert!(state.channel_binding("nonexistent").await.is_none());
     }
 
     #[tokio::test]
@@ -702,12 +692,8 @@ mod tests {
         let state = make_state();
         let (tx_a, mut rx_a) = mpsc::channel(4);
         let (tx_b, mut rx_b) = mpsc::channel(4);
-        let a = state
-            .mint_channel("row-ws".into(), "ws".into(), None, tx_a)
-            .await;
-        let _b = state
-            .mint_channel("row-ws".into(), "ws".into(), None, tx_b)
-            .await;
+        let a = mint_person(&state, "subject-ws", "ws", tx_a).await;
+        let _b = mint_person(&state, "subject-ws", "ws", tx_b).await;
         state
             .send_to_channel(
                 &a,
@@ -727,20 +713,16 @@ mod tests {
     async fn unregister_channel_removes() {
         let state = make_state();
         let (tx, _rx) = mpsc::channel(1);
-        let id = state
-            .mint_channel("row-ws".into(), "ws".into(), None, tx)
-            .await;
+        let id = mint_person(&state, "subject-ws", "ws", tx).await;
         state.unregister_channel(&id).await;
-        assert_eq!(state.channel_workspace(&id).await, None);
+        assert!(state.channel_binding(&id).await.is_none());
     }
 
     #[tokio::test]
     async fn mint_channel_defaults_current_state_to_idle() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(4);
-        let id = state
-            .mint_channel("row-ws".into(), "ws".into(), None, tx)
-            .await;
+        let id = mint_person(&state, "subject-ws", "ws", tx).await;
         assert!(state.replay_turn_state(&id).await);
         let msg = rx.recv().await.unwrap();
         assert_eq!(extract_turn_state(&msg), Some(TurnState::Idle));
@@ -750,12 +732,10 @@ mod tests {
     async fn set_and_broadcast_turn_state_updates_state_and_emits_frame() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(4);
-        let id = state
-            .mint_channel("row-ws".into(), "ws".into(), None, tx)
-            .await;
+        let id = mint_person(&state, "subject-ws", "ws", tx).await;
         assert!(
             state
-                .set_and_broadcast_turn_state(&id, "ws", "ws.conv-1", TurnState::Working)
+                .set_and_broadcast_turn_state(&id, "subject-ws", "ws.conv-1", TurnState::Working)
                 .await
         );
         let msg = rx.recv().await.unwrap();
@@ -766,12 +746,10 @@ mod tests {
     async fn set_and_broadcast_turn_state_emits_conversation_id() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(4);
-        let id = state
-            .mint_channel("row-ws".into(), "ws".into(), None, tx)
-            .await;
+        let id = mint_person(&state, "subject-ws", "ws", tx).await;
         assert!(
             state
-                .set_and_broadcast_turn_state(&id, "ws", "ws.conv-1", TurnState::Working)
+                .set_and_broadcast_turn_state(&id, "subject-ws", "ws.conv-1", TurnState::Working)
                 .await
         );
         let msg = rx.recv().await.unwrap();
@@ -794,14 +772,12 @@ mod tests {
     async fn turn_state_transitions_arrive_in_fifo_order() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(8);
-        let id = state
-            .mint_channel("row-ws".into(), "ws".into(), None, tx)
+        let id = mint_person(&state, "subject-ws", "ws", tx).await;
+        state
+            .set_and_broadcast_turn_state(&id, "subject-ws", "ws.c", TurnState::Working)
             .await;
         state
-            .set_and_broadcast_turn_state(&id, "ws", "ws.c", TurnState::Working)
-            .await;
-        state
-            .set_and_broadcast_turn_state(&id, "ws", "ws.c", TurnState::Idle)
+            .set_and_broadcast_turn_state(&id, "subject-ws", "ws.c", TurnState::Idle)
             .await;
         let first = rx.recv().await.unwrap();
         let second = rx.recv().await.unwrap();
@@ -813,13 +789,14 @@ mod tests {
     async fn set_and_broadcast_turn_state_records_phase_for_poll() {
         let state = make_state();
         let (tx, _rx) = mpsc::channel(4);
-        let id = state
-            .mint_channel("row-ws".into(), "ws".into(), None, tx)
-            .await;
+        let id = mint_person(&state, "subject-ws", "ws", tx).await;
         state
-            .set_and_broadcast_turn_state(&id, "ws", "ws.conv-x", TurnState::Working)
+            .set_and_broadcast_turn_state(&id, "subject-ws", "ws.conv-x", TurnState::Working)
             .await;
-        let rec = state.turn_state_record("ws", "ws.conv-x").await.unwrap();
+        let rec = state
+            .turn_state_record("subject-ws", "ws.conv-x")
+            .await
+            .unwrap();
         assert_eq!(rec.state, TurnState::Working);
     }
 
@@ -839,12 +816,16 @@ mod tests {
     async fn set_and_broadcast_turn_failed_emits_and_records_reason_code() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(4);
-        let id = state
-            .mint_channel("row-ws".into(), "ws".into(), None, tx)
-            .await;
+        let id = mint_person(&state, "subject-ws", "ws", tx).await;
         assert!(
             state
-                .set_and_broadcast_turn_failed(&id, "ws", "ws.conv-z", "inference job reaped", "14")
+                .set_and_broadcast_turn_failed(
+                    &id,
+                    "subject-ws",
+                    "ws.conv-z",
+                    "inference job reaped",
+                    "14"
+                )
                 .await
         );
         let msg = rx.recv().await.unwrap();
@@ -856,7 +837,10 @@ mod tests {
         assert_eq!(event.conversation_id, "ws.conv-z");
         assert_eq!(event.reason, "inference job reaped");
         assert_eq!(event.code, "14");
-        let rec = state.turn_state_record("ws", "ws.conv-z").await.unwrap();
+        let rec = state
+            .turn_state_record("subject-ws", "ws.conv-z")
+            .await
+            .unwrap();
         assert_eq!(rec.state, TurnState::Failed);
         assert_eq!(rec.reason, "inference job reaped");
         assert_eq!(rec.code, "14");
@@ -869,11 +853,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_state_record_scoped_to_workspace() {
+    async fn turn_state_record_scoped_to_subject() {
         let state = make_state();
         state
             .record_turn_state(
-                "alpha",
+                "alice",
                 "conv",
                 TurnStateRecord {
                     state: TurnState::Working,
@@ -882,9 +866,9 @@ mod tests {
                 },
             )
             .await;
-        assert!(state.turn_state_record("alpha", "conv").await.is_some());
-        // A sibling workspace with the same conversation_id sees nothing.
-        assert!(state.turn_state_record("beta", "conv").await.is_none());
+        assert!(state.turn_state_record("alice", "conv").await.is_some());
+        // Another subject with the same conversation_id sees nothing.
+        assert!(state.turn_state_record("bob", "conv").await.is_none());
     }
 
     #[tokio::test]
@@ -995,9 +979,7 @@ mod tests {
     async fn send_server_notification_unsupported_method_errors() {
         let state = make_state();
         let (tx, _rx) = mpsc::channel(4);
-        let id = state
-            .mint_channel("row-ws".into(), "ws".into(), None, tx)
-            .await;
+        let id = mint_person(&state, "subject-ws", "ws", tx).await;
         // No supported_methods advertised → unsupported.
         let err = state
             .send_server_notification(&id, "RevealPath", "{}".into())
@@ -1010,9 +992,7 @@ mod tests {
     async fn send_server_notification_delivers_when_method_supported() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(4);
-        let id = state
-            .mint_channel("row-ws".into(), "ws".into(), None, tx)
-            .await;
+        let id = mint_person(&state, "subject-ws", "ws", tx).await;
         state
             .update_supported_methods(&id, vec!["RevealPath".into()])
             .await;
@@ -1037,9 +1017,7 @@ mod tests {
     async fn send_server_request_and_await_rejects_unsupported_method_without_dispatch() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(4);
-        let id = state
-            .mint_channel("row-ws".into(), "ws".into(), None, tx)
-            .await;
+        let id = mint_person(&state, "subject-ws", "ws", tx).await;
         // No supported_methods advertised → reject before dispatch.
         let result = state
             .send_server_request_and_await(
@@ -1062,9 +1040,7 @@ mod tests {
         tokio::time::pause();
         let state = make_state();
         let (tx, _rx) = mpsc::channel(4);
-        let id = state
-            .mint_channel("row-ws".into(), "ws".into(), None, tx)
-            .await;
+        let id = mint_person(&state, "subject-ws", "ws", tx).await;
         state
             .update_supported_methods(&id, vec!["AskUser".into()])
             .await;
@@ -1090,9 +1066,7 @@ mod tests {
     async fn send_server_request_and_await_delivers_client_response() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(4);
-        let id = state
-            .mint_channel("row-ws".into(), "ws".into(), None, tx)
-            .await;
+        let id = mint_person(&state, "subject-ws", "ws", tx).await;
         state
             .update_supported_methods(&id, vec!["AskUser".into()])
             .await;

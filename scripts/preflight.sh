@@ -9,12 +9,13 @@
 #   - always:      runtime + deploy toolchain, native build tools, free disk
 #   - cross-build: musl cross-compile chain, only when CLEAN=1 (a reuse run
 #                  keeps the loaded images and never cross-compiles)
-#   - client:      Flutter + platform SDK, only when FLUTTER_TARGET != none
+#   - client:      Flutter + platform SDK for the app compile check, only when
+#                  FLUTTER_TARGET != none
 #
 # Env (shared with scripts/e2e.sh):
 #   ARCH            target arch for the musl build (default aarch64)
 #   CLEAN           1 on a from-scratch build (checks the cross-build tier)
-#   FLUTTER_TARGET  macos | none  (none = backend-only, skips client tier)
+#   FLUTTER_TARGET  macos | none  (none skips the Flutter compile check and its client tier)
 
 set -uo pipefail
 
@@ -69,6 +70,9 @@ need "jq"      "command -v jq"           "brew install jq"      "apt-get install
 need "xxd"     "command -v xxd"          "brew install vim"     "apt-get install -y xxd  (or: dnf install vim-common)"
 need "openssl" "command -v openssl"      "brew install openssl" "apt-get install -y openssl"
 need "PyJWT"   "python3 -c 'import jwt'" "pip3 install pyjwt"   "pip3 install pyjwt  (or: apt-get install -y python3-jwt)"
+# Step 5 drives the app path with grpcurl over the run's tailnet.
+need "grpcurl"   "command -v grpcurl"   "brew install grpcurl"   "https://github.com/fullstorydev/grpcurl/releases"
+need "tailscale" "command -v tailscale" "brew install tailscale" "curl -fsSL https://tailscale.com/install.sh | sh"
 
 # ---- always: C toolchain (native link step) ----
 if [ "$OS" = "Darwin" ]; then

@@ -43,8 +43,7 @@ impl InternalService {
     }
 
     /// Verify the caller's SA token and return its workspace. The internal
-    /// listener has no signature middleware — the bearer SA token is the
-    /// sole identity.
+    /// listener authenticates by the bearer SA token alone.
     async fn verify_caller<T>(&self, request: &Request<T>) -> Result<String, Status> {
         let verifier = self.verifier.as_ref().ok_or_else(|| {
             Status::failed_precondition(
@@ -90,8 +89,8 @@ impl RelayInternal for InternalService {
         if req.method.is_empty() {
             return Err(Status::invalid_argument("method required"));
         }
-        match self.state.channel_workspace(&req.channel_id).await {
-            Some(bound) if bound == workspace => {}
+        match self.state.channel_binding(&req.channel_id).await {
+            Some((_, _, bound)) if bound == workspace => {}
             Some(_) => {
                 return Err(Status::permission_denied(
                     "channel_id is bound to a different workspace",
@@ -128,8 +127,8 @@ impl RelayInternal for InternalService {
         if req.method.is_empty() {
             return Err(Status::invalid_argument("method required"));
         }
-        match self.state.channel_workspace(&req.channel_id).await {
-            Some(bound) if bound == workspace => {}
+        match self.state.channel_binding(&req.channel_id).await {
+            Some((_, _, bound)) if bound == workspace => {}
             Some(_) => {
                 return Err(Status::permission_denied(
                     "channel_id is bound to a different workspace",
@@ -218,13 +217,13 @@ impl RelayInternal for InternalService {
         if req.channel_id.is_empty() {
             return Err(Status::invalid_argument("channel_id required"));
         }
-        // Turn state is keyed by the grant row that minted the channel, not
-        // by the workspace: two rows in one workspace must not read each
-        // other's phase. Row and workspace come from one read, so an
-        // unregister between them cannot leave the row empty while the
+        // Turn state is keyed by the subject that minted the channel, not
+        // by the workspace: two subjects in one workspace must not read each
+        // other's phase. Subject and workspace come from one read, so an
+        // unregister between them cannot leave the subject empty while the
         // workspace check has already passed.
-        let row = match self.state.channel_binding(&req.channel_id).await {
-            Some((row, bound)) if bound == workspace => row,
+        let subject = match self.state.channel_binding(&req.channel_id).await {
+            Some((_, subject, bound)) if bound == workspace => subject,
             Some(_) => {
                 return Err(Status::permission_denied(
                     "channel_id is bound to a different workspace",
@@ -255,7 +254,7 @@ impl RelayInternal for InternalService {
                 self.state
                     .set_and_broadcast_turn_failed(
                         &req.channel_id,
-                        &row,
+                        &subject,
                         &turn_state.conversation_id,
                         &turn_state.reason,
                         &turn_state.code,
@@ -265,7 +264,7 @@ impl RelayInternal for InternalService {
                 self.state
                     .set_and_broadcast_turn_state(
                         &req.channel_id,
-                        &row,
+                        &subject,
                         &turn_state.conversation_id,
                         state,
                     )
@@ -286,8 +285,8 @@ impl RelayInternal for InternalService {
         if req.channel_id.is_empty() {
             return Err(Status::invalid_argument("channel_id required"));
         }
-        match self.state.channel_workspace(&req.channel_id).await {
-            Some(bound) if bound == workspace => {}
+        match self.state.channel_binding(&req.channel_id).await {
+            Some((_, _, bound)) if bound == workspace => {}
             Some(_) => {
                 return Err(Status::permission_denied(
                     "channel_id is bound to a different workspace",
@@ -327,8 +326,8 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use proto_common::{ContentBlock, TurnStateEvent};
-    use shared::client_signature::ClientSignatureVerifier;
-    use std::time::Duration;
+
+    use crate::state::test_support::{make_state, mint_person};
 
     /// Stub verifier that always authenticates the caller as a fixed
     /// workspace, so handler tests exercise the post-auth path without a
@@ -340,14 +339,6 @@ mod tests {
         async fn verify_token(&self, _token: &str) -> Result<String, Status> {
             Ok(self.0.clone())
         }
-    }
-
-    fn make_state() -> Arc<GatewayState> {
-        Arc::new(GatewayState::new(
-            Arc::new(ClientSignatureVerifier::new(Duration::from_secs(300))),
-            None,
-            "default".into(),
-        ))
     }
 
     fn service_for(state: Arc<GatewayState>, workspace: &str) -> InternalService {
@@ -402,27 +393,6 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
 
-    // The internal listener authenticates ONLY K8s SA tokens. Client-signature
-    // metadata (x-sig-*) is inert here — a request carrying only x-sig-* headers
-    // and no bearer token is still PermissionDenied.
-    //
-    // This locks "x-sig-* is not an accepted credential today"; it does NOT
-    // prove a future signature verifier couldn't be wired in.
-    // That guarantee is structural (InternalService holds only a TokenVerifier,
-    // never a ClientSignatureVerifier) and is enforced by review, not this test.
-    #[tokio::test]
-    async fn internal_door_ignores_client_signature_metadata() {
-        let service = service_for(make_state(), "ws");
-        let mut req = Request::new(SubscribeRequest {});
-        // Client-signature envelope headers, but NO `authorization` bearer token.
-        req.metadata_mut()
-            .insert("x-sig-kid", "client-alpha".parse().unwrap());
-        req.metadata_mut()
-            .insert("x-sig-signature", "deadbeef".parse().unwrap());
-        let err = subscribe_err(service.subscribe(req).await);
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
-    }
-
     #[tokio::test]
     async fn subscribe_delivers_notified_message() {
         let state = make_state();
@@ -471,9 +441,7 @@ mod tests {
         let state = make_state();
         let (tx, _rx) = mpsc::channel(4);
         // Channel owned by "other".
-        let id = state
-            .mint_channel("row-other".into(), "other".into(), None, tx)
-            .await;
+        let id = mint_person(&state, "subject-other", "other", tx).await;
         let service = service_for(state, "ws");
         let err = service
             .send_server_notification(authed(SendServerNotificationRequest {
@@ -508,9 +476,7 @@ mod tests {
         let state = make_state();
         let (tx, _rx) = mpsc::channel(4);
         // Channel owned by "other"; caller authenticates as "ws".
-        let id = state
-            .mint_channel("row-other".into(), "other".into(), None, tx)
-            .await;
+        let id = mint_person(&state, "subject-other", "other", tx).await;
         let service = service_for(state, "ws");
         let err = service
             .send_server_request_and_await(authed(SendServerRequestAndAwaitRequest {
@@ -529,9 +495,7 @@ mod tests {
     async fn deliver_outbound_enqueues_reply_then_turn_state_in_order() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(8);
-        let id = state
-            .mint_channel("row-ws".into(), "ws".into(), None, tx)
-            .await;
+        let id = mint_person(&state, "subject-ws", "ws", tx).await;
         let service = service_for(state, "ws");
         let resp = service
             .deliver_outbound(authed(DeliverOutboundRequest {
@@ -586,9 +550,7 @@ mod tests {
     async fn deliver_outbound_turn_state_only_applies_without_reply() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(8);
-        let id = state
-            .mint_channel("row-ws".into(), "ws".into(), None, tx)
-            .await;
+        let id = mint_person(&state, "subject-ws", "ws", tx).await;
         let service = service_for(state.clone(), "ws");
         let resp = service
             .deliver_outbound(authed(DeliverOutboundRequest {
@@ -612,7 +574,10 @@ mod tests {
             frame.command,
             Some(channel_outbound::Command::TurnState(_))
         ));
-        let rec = state.turn_state_record("row-ws", "ws.conv").await.unwrap();
+        let rec = state
+            .turn_state_record("subject-ws", "ws.conv")
+            .await
+            .unwrap();
         assert_eq!(rec.state, TurnState::Working);
     }
 
@@ -620,9 +585,7 @@ mod tests {
     async fn deliver_outbound_failed_state_carries_reason_and_code() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(8);
-        let id = state
-            .mint_channel("row-ws".into(), "ws".into(), None, tx)
-            .await;
+        let id = mint_person(&state, "subject-ws", "ws", tx).await;
         let service = service_for(state.clone(), "ws");
         service
             .deliver_outbound(authed(DeliverOutboundRequest {
@@ -648,7 +611,10 @@ mod tests {
             }
             other => panic!("expected failed TurnState, got {other:?}"),
         }
-        let rec = state.turn_state_record("row-ws", "ws.conv").await.unwrap();
+        let rec = state
+            .turn_state_record("subject-ws", "ws.conv")
+            .await
+            .unwrap();
         assert_eq!(rec.reason, "inference job died");
         assert_eq!(rec.code, "14");
     }
@@ -673,9 +639,7 @@ mod tests {
     async fn deliver_outbound_reply_send_failure_reports_not_delivered() {
         let state = make_state();
         let (tx, rx) = mpsc::channel(8);
-        let id = state
-            .mint_channel("row-ws".into(), "ws".into(), None, tx)
-            .await;
+        let id = mint_person(&state, "subject-ws", "ws", tx).await;
         // Drop the receiver so the reply send fails; the channel stays registered.
         drop(rx);
         let service = service_for(state, "ws");
@@ -696,9 +660,7 @@ mod tests {
     async fn deliver_outbound_turn_state_send_failure_reports_not_delivered() {
         let state = make_state();
         let (tx, rx) = mpsc::channel(8);
-        let id = state
-            .mint_channel("row-ws".into(), "ws".into(), None, tx)
-            .await;
+        let id = mint_person(&state, "subject-ws", "ws", tx).await;
         // Drop the receiver so the turn-state broadcast fails; the channel stays registered.
         drop(rx);
         let service = service_for(state, "ws");
@@ -726,9 +688,7 @@ mod tests {
         use proto_common::{item_start, stream_item, ItemStart, StreamItem, ToolUseItem};
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(8);
-        let id = state
-            .mint_channel("row-ws".into(), "ws".into(), None, tx)
-            .await;
+        let id = mint_person(&state, "subject-ws", "ws", tx).await;
         let service = service_for(state, "ws");
         // A tool-use start frame with a distinctive envelope; the gateway must
         // forward the StreamItem's bytes unchanged (no inspection/collapsing).
@@ -782,9 +742,7 @@ mod tests {
     async fn deliver_stream_item_cross_workspace_channel_denied() {
         let state = make_state();
         let (tx, _rx) = mpsc::channel(4);
-        let id = state
-            .mint_channel("row-other".into(), "other".into(), None, tx)
-            .await;
+        let id = mint_person(&state, "subject-other", "other", tx).await;
         let service = service_for(state, "ws");
         let err = service
             .deliver_stream_item(authed(DeliverStreamItemRequest {
@@ -800,9 +758,7 @@ mod tests {
     async fn deliver_outbound_cross_workspace_channel_denied() {
         let state = make_state();
         let (tx, _rx) = mpsc::channel(4);
-        let id = state
-            .mint_channel("row-other".into(), "other".into(), None, tx)
-            .await;
+        let id = mint_person(&state, "subject-other", "other", tx).await;
         let service = service_for(state, "ws");
         let err = service
             .deliver_outbound(authed(DeliverOutboundRequest {

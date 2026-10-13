@@ -104,8 +104,7 @@ spec:
               # Persisted node state Secret; lets the adapter keep its
               # tailnet identity across pod restarts. Not a keypair, the
               # adapter signs nothing. Fixed name (one app channel per tenant)
-              # so the provision-write can pin a `get` on it, the way it
-              # already pins relay-registered-keys.
+              # so the provision-write can pin a `get` on it.
               value: adapter-state
             - name: TS_SERVE_CONFIG
               value: /etc/tsnet/serve.json
@@ -144,10 +143,10 @@ spec:
 ---
 # Serve config for the tailscale container. Forwards tailnet TCP :9090 to
 # the relay Service's app port. The tailnet is the trust boundary at the
-# network layer; the client-signed envelope is the trust boundary at the
-# application layer, verified by the relay itself.
+# network layer; each listener's TokenReview of the bearer token is the
+# trust boundary at the application layer.
 #
-# The tailnet-side listen port stays 9090 because that is what enrolled
+# The tailnet-side listen port stays 9090 because that is what joined
 # clients already store as their relay address.
 apiVersion: v1
 kind: ConfigMap

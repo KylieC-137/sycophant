@@ -18,7 +18,7 @@ tenant namespace comes from the tenant-namespace fixture with real perimeter lab
 | cluster-resources/              | Chart-shipped cluster-scoped resources (RuntimeClass, etc.) shape    |
 | gvisor-scope/                   | gVisor runtime scope pinned to toolsets only (capability-job); other components on runc |
 | conversation-log-mount/         | Only the harness may mount the `ws-*-conversation` PVC (VAP, label-agnostic)   |
-| relay-access-grants/            | The deployed relay reconciles the chart-created relay-access-grants ConfigMap |
+| user-reach/                     | A bound subject reaches exactly the listed workspaces; bindings and identity data follow the user command |
 | inference-workload/             | Applied shape of the in-cluster inference server and its fence |
 | namespace-egress-baseline/      | Namespace-wide egress default-deny floor; uncovered pods denied |
 | capability-job-gate/            | Identity-keyed Job CREATE gate: ws-<ws> Jobs forced into the envelope + secret allowlist or denied; the two per-workspace SAs |
@@ -36,7 +36,7 @@ Ask: "What property is this test asserting?"
 - SA-token audience handling → `sa-token-audience/`
 - Chart-shipped cluster-scoped resource shape → `cluster-resources/`
 - gVisor runtime scope (toolsets only) → `gvisor-scope/`
-- Relay reconciling the relay-access-grants ConfigMap → `relay-access-grants/`
+- Subject reach, handle binding, or identity ConfigMap protection → `user-reach/` or `tenant-resource-protection/`
 - Applied pod shape or network fence of the in-cluster inference server →
   `inference-workload/`
 - Namespace-wide egress default-deny floor, or a pod left uncovered by it →

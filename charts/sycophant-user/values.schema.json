@@ -3,10 +3,20 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "users": {
-      "type": "array",
-      "description": "Full issuer-prefixed identity subjects `<issuer>#<sub>`, operator-supplied, one per identity granted this tenant. The chart renders one RoleBinding per identity granting that user the provision-identity ClusterRole in this namespace. Empty renders no binding. The prefix is enforced: cluster-protect-security selects tenant-scoped callers by it, so a subject without one would hold the provision-identity verbs while sitting outside the policy's reach. Neither the issuer nor the sub may carry a quote, backslash, control character, or Unicode line or paragraph separator, matching the user command's admission rule.",
-      "items": { "type": "string", "pattern": "^https?://[^#\"\\\\\\p{Cc}\\x{2028}\\x{2029}]+#[^\"\\\\\\p{Cc}\\x{2028}\\x{2029}]+$" }
+    "name": {
+      "type": "string",
+      "description": "The subject's sha256 handle, the command name's suffix. The installer sets it from the command."
+    },
+    "commandCreated": {
+      "type": "string",
+      "description": "The user command's creationTimestamp (RFC 3339). The installer sets it from the command."
+    },
+    "command": {
+      "type": "object",
+      "description": "The user provision command's flat data, verbatim. The installer sets it from the command.",
+      "additionalProperties": {
+        "type": "string"
+      }
     }
   }
 }

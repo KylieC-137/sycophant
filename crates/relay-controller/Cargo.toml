@@ -9,19 +9,12 @@ path = "src/main.rs"
 
 [dependencies]
 async-trait.workspace = true
-base64.workspace = true
-chrono.workspace = true
 rustls.workspace = true
 clap.workspace = true
 futures.workspace = true
-http.workspace = true
-http-body-util.workspace = true
 k8s-openapi.workspace = true
 kube.workspace = true
-p256.workspace = true
-tower.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 serde_yaml.workspace = true
 shared.workspace = true
 relay-proto.workspace = true
@@ -39,9 +32,19 @@ uuid.workspace = true
 [dev-dependencies]
 bytes.workspace = true
 futures.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+serde_json.workspace = true
+tower.workspace = true
 shared = { workspace = true, features = ["test-fixtures"] }
 tokio = { workspace = true, features = ["test-util"] }
 tokio-stream = { workspace = true, features = ["net"] }
+relay-controller = { path = ".", features = ["test-fixtures"] }
+
+[features]
+# Exposes test-only constructors to the crate's integration tests. Unit tests
+# already see them via #[cfg(test)].
+test-fixtures = []
 
 [lints]
 workspace = true

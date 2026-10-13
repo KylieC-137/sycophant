@@ -1,9 +1,8 @@
 pub mod capabilities;
 pub mod gateway;
-pub mod grants;
-pub mod grants_watcher;
 pub mod harness_client;
+pub mod identity;
+pub mod identity_watcher;
 pub mod internal;
-pub mod registered_keys;
-pub mod signature_layer;
+pub mod listener;
 pub mod state;

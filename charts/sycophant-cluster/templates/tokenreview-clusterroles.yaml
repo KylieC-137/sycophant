@@ -1,9 +1,10 @@
 # Shared across all sycophant tenants. The relay controller in each tenant
-# namespace authenticates caller SA tokens via TokenReview, a cluster-scoped
-# API. The `tenant-bindings-kpol.yaml` Kyverno policy creates a
-# per-tenant ClusterRoleBinding pointing each tenant's relay SA at this
-# ClusterRole for any namespace carrying the
-# `app.kubernetes.io/part-of=sycophant-tenant` label.
+# namespace authenticates caller tokens via TokenReview and authorizes every
+# resolved subject via SubjectAccessReview, both cluster-scoped APIs.
+# The `tenant-bindings-kpol.yaml` Kyverno policy creates a per-tenant
+# ClusterRoleBinding pointing each tenant's relay SA at this ClusterRole for
+# any namespace carrying the `app.kubernetes.io/part-of=sycophant-tenant`
+# label.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -14,4 +15,7 @@ metadata:
 rules:
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
+    verbs: ["create"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
     verbs: ["create"]

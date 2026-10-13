@@ -1,30 +1,25 @@
 use clap::Parser;
 use relay_controller::gateway::GatewayService;
 use relay_controller::internal::InternalService;
-use relay_controller::signature_layer::SignatureLayer;
+use relay_controller::listener::{class_layer, ListenerClass};
 use relay_controller::state::GatewayState;
 use relay_proto::relay_gateway_server::RelayGatewayServer;
 use relay_proto::relay_internal_server::RelayInternalServer;
 use shared::auth::{K8sTokenVerifier, TokenVerifier, HARNESS_RELAY_AUDIENCE};
-use shared::client_signature::ClientSignatureVerifier;
-use shared::replay_cache::DEFAULT_WINDOW;
 use std::sync::Arc;
 use tonic::transport::Server;
 
 /// Internal listener: K8s SA token via TokenReview. Bound `0.0.0.0` so
 /// in-cluster workloads (the harness) can reach it.
 const DEFAULT_INTERNAL_GRPC_PORT: u16 = 9090;
-/// App listener: signed-request envelope verified by the
-/// `signature_layer` tower middleware. Bound on the pod network and
-/// admitted only from the app adapter pod by the relay's ingress
-/// CiliumNetworkPolicy.
-const DEFAULT_APP_GRPC_PORT: u16 = 9091;
-/// Adapter listener: the same signed-request envelope, on its own
-/// socket, admitted only from `adapter-class: principal` pods.
+/// App/terminal-client listener: person tokens, authenticated by
+/// TokenReview and authorized per request by SubjectAccessReview.
+const DEFAULT_PERSON_GRPC_PORT: u16 = 9091;
+/// Adapter listener: `adapter-<channel>` ServiceAccount tokens only.
 const DEFAULT_ADAPTER_GRPC_PORT: u16 = 9092;
 
 /// One `tonic` server future, boxed so the listener table can hold the
-/// internal and client-signed servers side by side.
+/// internal and per-class servers side by side.
 type ServerFuture = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<(), tonic::transport::Error>> + Send>,
 >;
@@ -32,19 +27,26 @@ type ServerFuture = std::pin::Pin<
 /// The credential a listener demands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ListenerAuth {
-    /// Kubernetes SA token, verified by TokenReview. The harness link.
-    TokenReview,
-    /// Client-signed envelope, verified by `SignatureLayer`.
-    ClientSignature,
+    /// The harness link: a Kubernetes SA token, verified by TokenReview.
+    Harness,
+    /// An external gateway listener serving one credential class; see
+    /// [`ListenerClass`].
+    Class(ListenerClass),
 }
 
 /// Every socket the relay serves, paired with the credential it demands.
 /// `main` builds its servers by walking this table.
 fn listeners() -> Vec<(std::net::SocketAddr, ListenerAuth)> {
     [
-        (DEFAULT_INTERNAL_GRPC_PORT, ListenerAuth::TokenReview),
-        (DEFAULT_APP_GRPC_PORT, ListenerAuth::ClientSignature),
-        (DEFAULT_ADAPTER_GRPC_PORT, ListenerAuth::ClientSignature),
+        (DEFAULT_INTERNAL_GRPC_PORT, ListenerAuth::Harness),
+        (
+            DEFAULT_PERSON_GRPC_PORT,
+            ListenerAuth::Class(ListenerClass::PersonToken),
+        ),
+        (
+            DEFAULT_ADAPTER_GRPC_PORT,
+            ListenerAuth::Class(ListenerClass::AdapterToken),
+        ),
     ]
     .into_iter()
     .map(|(port, auth)| {
@@ -73,6 +75,13 @@ fn build_internal_verifier(kube_client: Option<&kube::Client>) -> Option<Arc<dyn
     })
 }
 
+/// The services an external listener serves: the gateway and nothing else.
+/// The harness-facing `RelayInternal` surface is served on the internal
+/// listener only.
+fn external_routes(state: Arc<GatewayState>) -> tonic::service::Routes {
+    tonic::service::Routes::new(RelayGatewayServer::new(GatewayService::new(state)))
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().json().with_target(false).init();
@@ -87,12 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let namespace = std::env::var("RELAY_NAMESPACE").unwrap_or_else(|_| "default".into());
 
-    // Shared between the signature middleware (reads on every signed
-    // request), the startup rebuild, and each redemption.
-    let client_verifier = Arc::new(ClientSignatureVerifier::new(DEFAULT_WINDOW));
-
     let state = Arc::new(GatewayState::new(
-        client_verifier.clone(),
         Some(kube_client.clone()),
         namespace.clone(),
     ));
@@ -123,46 +127,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    // Grants watch: the live authorization table. Hot reload is the whole
-    // revocation promise — a removed row must cut access within seconds,
-    // without a pod restart.
-    let grants = state.grants();
-    // Serving past this point is useless and silent: an unsynced grants table
-    // is empty, so it authorizes nobody, and the key load below installs
-    // nothing against it. A timeout crashes the process instead and lets the
-    // kubelet's restart backoff retry.
+    // Identity watch: the relay-identity ConfigMaps. An unsynced table is
+    // empty, so it answers no workspace list and resolves no handle —
+    // serving in that state is silent and useless, so a timeout crashes
+    // the process and lets the kubelet's restart backoff retry.
     shared::watcher_retry::spawn_and_await_ready(
-        "relay-access-grants",
-        "grants",
+        "relay-identity",
+        "identity",
         kube_client.clone(),
         namespace.clone(),
-        grants.clone(),
+        state.identity(),
         |client, ns, table, tx| async move {
-            relay_controller::grants_watcher::watch_grants(client, &ns, table, tx).await
+            relay_controller::identity_watcher::watch_identities(client, &ns, table, tx).await
         },
     )
     .await?;
-
-    // Rebuild the verifier from the relay-owned registered-key Secret, so a
-    // redeemed device survives a pod roll. Narrowed by the live grants
-    // table: a key whose row is gone is never reinstalled.
-    {
-        let table = grants.read().await;
-        match relay_controller::registered_keys::load_into_verifier(
-            &kube_client,
-            &namespace,
-            &table,
-            &client_verifier,
-        )
-        .await
-        {
-            Ok(n) => tracing::info!(installed = n, "registered keys loaded"),
-            // Same reasoning: a failed load leaves every redeemed device
-            // unverifiable with no path back short of a restart, so take
-            // the restart now rather than serving a relay nobody can reach.
-            Err(e) => return Err(format!("loading registered keys: {e}").into()),
-        }
-    }
 
     let table = listeners();
     tracing::info!(
@@ -174,7 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (addr, auth) in table {
         match auth {
-            ListenerAuth::TokenReview => {
+            ListenerAuth::Harness => {
                 let internal_verifier = build_internal_verifier(Some(&kube_client));
                 let internal_service = InternalService::new(state.clone(), internal_verifier);
                 let (health_reporter, health_service) = tonic_health::server::health_reporter();
@@ -192,11 +171,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .serve(addr),
                 ));
             }
-            ListenerAuth::ClientSignature => {
+            ListenerAuth::Class(class) => {
                 servers.push(Box::pin(
                     Server::builder()
-                        .layer(SignatureLayer::new(client_verifier.clone()))
-                        .add_service(RelayGatewayServer::new(GatewayService::new(state.clone())))
+                        .layer(class_layer(class))
+                        .add_routes(external_routes(state.clone()))
                         .serve(addr),
                 ));
             }
@@ -217,9 +196,10 @@ mod tests {
         assert!(build_internal_verifier(None).is_none());
     }
 
-    // `main` builds its servers by walking `listeners()`, wrapping every
-    // `ClientSignature` entry in `SignatureLayer` and no `TokenReview` entry.
-    // The tests below constrain that table rather than describing it.
+    // `main` builds its servers by walking `listeners()`, wrapping the
+    // person and adapter entries in their per-class layer and leaving the
+    // `Harness` entry bare. The tests below constrain that table rather
+    // than describing it.
 
     #[test]
     fn adapter_port_is_9092() {
@@ -232,25 +212,24 @@ mod tests {
     #[test]
     fn three_listeners_are_served_on_three_distinct_sockets() {
         let table = listeners();
-        assert_eq!(table.len(), 3, "internal, app, and adapter");
+        assert_eq!(table.len(), 3, "internal, person, and adapter");
         let mut ports: Vec<u16> = table.iter().map(|(a, _)| a.port()).collect();
         ports.sort_unstable();
         ports.dedup();
         assert_eq!(ports.len(), 3, "listener ports must be distinct");
         assert!(ports.contains(&DEFAULT_INTERNAL_GRPC_PORT));
-        assert!(ports.contains(&DEFAULT_APP_GRPC_PORT));
+        assert!(ports.contains(&DEFAULT_PERSON_GRPC_PORT));
         assert!(ports.contains(&DEFAULT_ADAPTER_GRPC_PORT));
     }
 
-    // The app port binds off loopback and the adapter port is in-cluster from
-    // birth. Both are admitted by the relay's ingress CNP, not by the pod
-    // boundary.
+    // The person and adapter ports bind off loopback and are admitted by the
+    // relay's ingress CNP, not by the pod boundary.
     //
-    // Leave `format!("127.0.0.1:{DEFAULT_APP_GRPC_PORT}")` in place and the app
-    // adapter, a separate Deployment, can never reach the relay. Nothing else in
-    // the Rust suite observes the bind address.
+    // Leave `format!("127.0.0.1:{DEFAULT_PERSON_GRPC_PORT}")` in place and the
+    // app adapter, a separate Deployment, can never reach the relay. Nothing
+    // else in the Rust suite observes the bind address.
     #[test]
-    fn app_and_adapter_listeners_bind_in_cluster_addresses() {
+    fn person_and_adapter_listeners_bind_in_cluster_addresses() {
         for (addr, _) in listeners() {
             assert!(
                 !addr.ip().is_loopback(),
@@ -259,32 +238,81 @@ mod tests {
         }
     }
 
-    // The adapter socket carries the same client-signature verification as the
-    // app port. List it as `TokenReview`, or omit it from the signature-verified
-    // set, and the relay serves an unverified gRPC port to every pod the ingress
-    // CNP admits. A reachability test on the happy path cannot see this; the port
-    // answers either way.
-    #[test]
-    fn client_signature_covers_the_app_and_adapter_listeners_only() {
-        let table = listeners();
-        let signed: Vec<u16> = table
+    /// The ports in `table` that demand `auth`.
+    fn ports_for(table: &[(std::net::SocketAddr, ListenerAuth)], auth: ListenerAuth) -> Vec<u16> {
+        table
             .iter()
-            .filter(|(_, auth)| *auth == ListenerAuth::ClientSignature)
-            .map(|(a, _)| a.port())
-            .collect();
-        assert_eq!(signed.len(), 2, "app and adapter, and nothing else");
-        assert!(signed.contains(&DEFAULT_APP_GRPC_PORT));
-        assert!(signed.contains(&DEFAULT_ADAPTER_GRPC_PORT));
+            .filter(|(_, a)| *a == auth)
+            .map(|(addr, _)| addr.port())
+            .collect()
+    }
 
-        let token_reviewed: Vec<u16> = table
-            .iter()
-            .filter(|(_, auth)| *auth == ListenerAuth::TokenReview)
-            .map(|(a, _)| a.port())
-            .collect();
+    // The person socket carries the person-token class and the adapter socket
+    // the adapter-token class; neither is the internal harness socket, so no
+    // external listener accepts a harness credential.
+    #[test]
+    fn each_external_listener_carries_its_own_credential_class() {
+        let table = listeners();
         assert_eq!(
-            token_reviewed,
+            ports_for(&table, ListenerAuth::Class(ListenerClass::PersonToken)),
+            vec![DEFAULT_PERSON_GRPC_PORT]
+        );
+        assert_eq!(
+            ports_for(&table, ListenerAuth::Class(ListenerClass::AdapterToken)),
+            vec![DEFAULT_ADAPTER_GRPC_PORT]
+        );
+        assert_eq!(
+            ports_for(&table, ListenerAuth::Harness),
             vec![DEFAULT_INTERNAL_GRPC_PORT],
-            "the harness link is the only TokenReview socket"
+            "the internal port is the only harness socket"
+        );
+    }
+
+    /// The gRPC status an external listener's routes answer for `path`, from
+    /// the trailers-only response tonic sends for a refused call.
+    async fn external_status_for(path: &str) -> Option<String> {
+        use tower::ServiceExt;
+
+        let state = Arc::new(GatewayState::new(None, "default".into()));
+        let request = http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/grpc")
+            .header("te", "trailers")
+            // One empty, uncompressed gRPC message.
+            .body(http_body_util::Full::new(bytes::Bytes::from_static(&[
+                0, 0, 0, 0, 0,
+            ])))
+            .unwrap();
+        let response = external_routes(state).oneshot(request).await.unwrap();
+        response
+            .headers()
+            .get("grpc-status")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    }
+
+    // The external listeners carry the gateway only. Add `RelayInternalServer`
+    // to `external_routes` and a person or adapter token reaches the
+    // harness-facing Subscribe surface from outside the cluster.
+    #[tokio::test]
+    async fn external_listeners_do_not_serve_relay_internal() {
+        let unimplemented = (tonic::Code::Unimplemented as i32).to_string();
+        assert_eq!(
+            external_status_for("/relay.v1.RelayInternal/Subscribe")
+                .await
+                .as_deref(),
+            Some(unimplemented.as_str()),
+            "RelayInternal/Subscribe must be unimplemented on an external listener"
+        );
+        // The same routes do serve the gateway: the call reaches its handler,
+        // which refuses the unclassed request for its own reason.
+        assert_eq!(
+            external_status_for("/relay.v1.RelayGateway/ListWorkspaces")
+                .await
+                .as_deref(),
+            Some((tonic::Code::PermissionDenied as i32).to_string().as_str()),
+            "RelayGateway must be served on an external listener"
         );
     }
 
@@ -294,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn app_port_is_9091() {
-        assert_eq!(DEFAULT_APP_GRPC_PORT, 9091);
+    fn person_port_is_9091() {
+        assert_eq!(DEFAULT_PERSON_GRPC_PORT, 9091);
     }
 }

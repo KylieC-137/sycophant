@@ -2,10 +2,9 @@
 
 A Flutter chat client for sycophant. It ships Android only; iOS support is scaffolded but not built.
 
-The client is a single-screen app:
+The client is a single-screen chat app: text input, send button, scrollable message list. On entry the app opens a persistent server-streaming `ChannelReceive` stream; each send is a unary `ChannelIngest`, and the assistant bubble fills in as `ChannelOutbound` reply events arrive on the receive stream.
 
-1. **First launch (no keypair):** the app's sign-in screen — paste server `host:port` + workspace + a grant code from the operator → app generates a P-256 keypair, calls `RedeemCode` with the public half → keypair + workspace + clientName persist via `flutter_secure_storage` (Keychain on iOS / EncryptedSharedPreferences on Android) → transitions to chat.
-2. **Subsequent launches:** chat screen — text input, send button, scrollable message list. On entry the app opens a persistent server-streaming `ChannelReceive` stream; each send is a unary `ChannelIngest` carrying a signed `x-sig-*` metadata envelope, and the assistant bubble fills in as `ChannelOutbound` reply events arrive on the receive stream.
+**The client's OIDC item has not landed.** The app's sign-in flow is being rebuilt around the operator's person token (a Dex-issued OIDC token presented as the gRPC bearer credential); until that item lands, the e2e drives the app path with grpcurl plus the operator's token, not the Flutter app. The code in `client/` predates the migration: it still uses the removed pairing-code sign-in and its old `adapter_hint`. The sections below describe the target state.
 
 ## Prereqs
 
@@ -42,7 +41,7 @@ adb install client/build/app/outputs/flutter-apk/app-debug.apk
 
 If `adb install` fails with `INSTALL_FAILED_USER_RESTRICTED`, enable "Install via USB" in the phone's Developer Options.
 
-## First-time pairing
+## Reaching the relay
 
 Trust flow:
 
@@ -65,16 +64,9 @@ Trust flow:
    syco channel up -f channel.yaml
    ```
    Re-run it after editing the channel values to apply the change.
-2. On the phone, install the official Tailscale Android client (Play Store or `sideload-via-adb` an F-Droid build); set "Use an alternate server" to `https://hs.yourdomain.com`; log in via auth-key minted from headscale.
-3. Invent an unguessable code and write the device's grant row. The code IS the row's identity; the relay mints nothing:
-   ```sh
-   kubectl patch configmap relay-access-grants -n tenant-hello-world --type=merge -p '{"data":{
-     "calebs-iphone": "channel: app\nidentity: kJ8f2QwXnR4tYv6b\nworkspace: hello-world\n"
-   }}'
-   ```
-4. Send the code to the phone out of band (Signal, AirDrop, paste into a note).
-5. Open the sideloaded sycophant app. Fill in server `relay:9090` (the app adapter's MagicDNS hostname), workspace `hello-world`, paste the code. Tap **Enroll**.
-6. App generates a P-256 keypair, calls `RedeemCode` with the public half, persists the keypair + workspace via `flutter_secure_storage`, and lands on the chat screen. The row is now spent: a second presentation of the same code is refused.
+2. On the phone, join the tailnet: install the official Tailscale Android client (Play Store or `sideload-via-adb` an F-Droid build); set "Use an alternate server" to `https://hs.yourdomain.com`; log in via auth-key minted from headscale.
+3. Bind the person to their workspaces with the user command — `syco user up` writes the subject's workspace list and reach RoleBindings; the relay authorizes each request by Kubernetes review from that grant. See the [relay docs](relay.md) for the identity model.
+4. Open the sideloaded sycophant app. Fill in server `relay:9090` (the app adapter's MagicDNS hostname), workspace, and the person token. The app presents the token as the gRPC bearer credential; the relay TokenReviews it and authorizes the named workspace per request.
 
 ## Chat
 
@@ -82,30 +74,18 @@ The chat path uses the **channel-adapter pattern**: the Flutter app behaves as a
 
 Per chat-screen entry:
 
-1. The app opens a persistent server-streaming `ChannelReceive` RPC with `adapter_hint: "flutter-app:<clientName>"`. The `adapter_hint` is free-form, untrusted, and log-only — operators use it to grep ChannelReceive registrations in controller logs; it's never used for routing.
+1. The app opens a persistent server-streaming `ChannelReceive` RPC naming its workspace, with `adapter_hint: "flutter-app"`. The `adapter_hint` is free-form, untrusted, and log-only — operators use it to grep ChannelReceive registrations in controller logs; it's never used for routing.
 2. **The first `ChannelOutbound` event on the response stream is a `ChannelAck` carrying the server-minted `channel_id` (a UUID).** The app stores this id for the rest of the session and echoes it on every subsequent `ChannelIngest`. The id is opaque to the client and valid only within the lifetime of this `ChannelReceive` stream.
-3. On user send, the app issues a unary `ChannelIngest` carrying `channel_id` + the user message. The controller validates the channel_id is bound to the caller's verified workspace (PermissionDenied otherwise — preventing cross-workspace routing-key hijack), stamps the user message's `reply_channel = channel_id`, and routes through the workspace's `Subscribe` stream to the harness. The harness runs the agent loop and emits replies via the workspace outbound channel sink, which the controller forwards to the open `ChannelReceive` stream.
+3. On user send, the app issues a unary `ChannelIngest` carrying `channel_id` + the user message. The controller validates the channel_id is bound to the caller's verified subject and workspace (PermissionDenied otherwise — preventing cross-workspace routing-key hijack), stamps the user message's `reply_channel = channel_id`, and routes through the workspace's `Subscribe` stream to the harness. The harness runs the agent loop and emits replies via the workspace outbound channel sink, which the controller forwards to the open `ChannelReceive` stream.
 4. Subsequent `ChannelOutbound` events are `send_message` variants carrying the agent's reply content.
 
-The `ChannelIngestAck` returns the same `channel_id` plus a `conversation_id`. The conversation_id is the handle the app would use to call `GetConversationHistory(conversation_id, since: last_seen_seq)` on reconnect to fetch any assistant replies missed while the receive stream was down (the conversation log on the harness side is the durable source of truth; the `ChannelReceive` stream is a push-notification optimization on top). This replay path is not yet wired in the app — the field is captured but unused — but the controller-side primitives are in place.
+The `ChannelIngestAck` returns the same `channel_id` plus a `conversation_id`. The conversation_id is the handle the app would use to call `GetConversationHistory` on reconnect to fetch any assistant replies missed while the receive stream was down (the conversation log on the harness side is the durable source of truth; the `ChannelReceive` stream is a push-notification optimization on top). This replay path is not yet wired in the app — the field is captured but unused — but the controller-side primitives are in place.
 
-Both RPCs carry the same `x-sig-*` signed-metadata envelope verified by the controller's external listener middleware. First message takes ~10–30 s (LLM Job cold start); subsequent messages typically arrive within a few hundred ms.
+Every RPC carries the caller's bearer token; the relay authenticates it by TokenReview and authorizes the named workspace by a Kubernetes access review. First message takes ~10–30 s (LLM Job cold start); subsequent messages typically arrive within a few hundred ms.
 
-## Re-inviting a device
+## Revocation and re-invite
 
-Two scenarios:
-
-- **Operator re-invites a single device.** A row is spent once a key is registered against it, so re-invite is delete-and-rewrite: remove the row, then write a new row with a fresh code.
-  ```sh
-  kubectl patch configmap relay-access-grants -n tenant-hello-world --type=json \
-    -p '[{"op":"remove","path":"/data/calebs-iphone"}]'
-  kubectl patch configmap relay-access-grants -n tenant-hello-world --type=merge -p '{"data":{
-    "calebs-iphone": "channel: app\nidentity: <a fresh unguessable string>\nworkspace: hello-world\n"
-  }}'
-  ```
-  The device's existing signed requests start failing within seconds, with no pod restart. Tap the logout icon, confirm, and redeem the fresh code.
-
-- **Operator revokes a device.** Remove the grant row from the `relay-access-grants` ConfigMap; the relay reloads the table within seconds and the device's next request is refused. To re-invite, write a new row with a fresh code — the device generates a new keypair and registers it.
+Revocation is operator-driven and works on the next request: remove the person's reach RoleBinding (re-run `syco user up` without the workspace), and the relay's next authorization review fails. The person's token expires on its own clock; there is no denylist.
 
 ## iOS (kept-in-mind, not shipped)
 
@@ -123,9 +103,10 @@ The generated files in `client/lib/src/generated/` are committed (so a fresh clo
 
 ## Known limitations
 
-- **Per-device revoke is operator-driven** — remove the device's row from the `relay-access-grants` ConfigMap. No in-app refresh or rotate UX.
+- **Revocation is operator-driven** — re-run the user command without the workspace or handle. No in-app refresh or rotate UX.
 - **No multi-conversation support** — single chat thread per device.
 - **No offline queue, no push notifications, no background sync** — when the app isn't foregrounded, the gRPC stream dies.
 - **`tools` field is unused** — the chat sends only text content; the LLM has access to the workspace's tools server-side (configured in the chart), but the Flutter app doesn't render tool-call confirmation flows.
 - **No image content** — `ContentBlock` supports inline images at the proto layer; the Flutter UI doesn't surface them yet.
 - **Connection lifecycle is naive** — the channel stays open for the lifetime of the chat screen; backgrounding/foregrounding may need handling for production.
+- **OIDC sign-in is not yet implemented** — until the app's OIDC client item lands, the app path is driven by grpcurl plus an operator token in the e2e.

@@ -43,10 +43,10 @@ test-unit-rust: ## Inline #[cfg(test)] units across the workspace
 	cargo test --workspace --lib --bins
 
 # The two policy fixtures are rendered from the chart on every run and are not
-# tracked. `--api-versions` stands in for the Kyverno CRDs. The three acceptance
+# tracked. `--api-versions` stands in for the Kyverno CRDs. The acceptance
 # suites render the charts themselves. No cluster is contacted.
 .PHONY: test-unit-k8s
-test-unit-k8s: ## Render the two policy fixtures, run them, then the three chart acceptance suites
+test-unit-k8s: ## Render the two policy fixtures, run them, then the chart acceptance suites
 	@helm template c charts/sycophant-cluster -n kyverno \
 		--api-versions policies.kyverno.io/v1/ValidatingPolicy \
 		--show-only templates/capability-job-gate-kpol.yaml \

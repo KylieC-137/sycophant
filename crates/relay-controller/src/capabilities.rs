@@ -102,12 +102,6 @@ impl CapabilityGrants {
     pub fn for_workspace(&self, workspace: &str) -> Vec<(String, Vec<String>)> {
         self.map.get(workspace).cloned().unwrap_or_default()
     }
-
-    /// Parse from a YAML literal, panicking on error. Test fixture only.
-    #[cfg(test)]
-    pub fn parse_for_tests(yaml: &str) -> Self {
-        Self::parse(yaml).expect("test bindings must parse")
-    }
 }
 
 #[cfg(test)]

@@ -39,6 +39,12 @@ impl HarnessClient {
     }
 }
 
+/// Total budget for one pool dial. The forward path is synchronous with the
+/// caller's RPC: a workspace whose harness is down (or whose Service DNS
+/// does not resolve) must answer `Unavailable` promptly, not hold the caller
+/// through the connect retry loop's full backoff.
+const DIAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Pool of per-workspace harness clients. Returns a cloned client per
 /// call; cloning is cheap and shares the underlying HTTP/2 connection.
 pub struct HarnessClientPool {
@@ -75,7 +81,9 @@ impl HarnessClientPool {
         self.service_template.replace("{workspace}", workspace)
     }
 
-    /// Get-or-connect. Returns a cloned client.
+    /// Get-or-connect. Returns a cloned client. The connect rides the retry
+    /// loop but the whole dial is bounded by [`DIAL_BUDGET`]: a caller whose
+    /// workspace harness is down gets `Unavailable` within the budget.
     pub async fn get(&self, workspace: &str) -> Result<HarnessClient, String> {
         {
             let clients = self.clients.read().await;
@@ -84,7 +92,15 @@ impl HarnessClientPool {
             }
         }
         let addr = self.addr_for(workspace);
-        let channel = shared::grpc_client::connect_with_keepalive(&addr, "harness").await?;
+        let connect = shared::grpc_client::connect_with_keepalive(&addr, "harness");
+        let channel = match tokio::time::timeout(DIAL_BUDGET, connect).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(format!(
+                    "timed out dialing harness at {addr} within the dial budget"
+                ))
+            }
+        };
         let inner = HarnessControlClient::with_interceptor(
             channel,
             SaTokenInterceptor::new(RELAY_HARNESS_TOKEN_PATH),

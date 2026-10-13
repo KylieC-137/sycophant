@@ -329,6 +329,7 @@ mod tests {
         let result = svc
             .cancel_turn(Request::new(CancelTurnRequest {
                 conversation_id: "never-minted".to_string(),
+                ..Default::default()
             }))
             .await;
         let status = result.expect_err("unowned conversation_id must be rejected");
@@ -568,6 +569,7 @@ mod dispatch_await_cancel_tests {
         let conversation_id = svc
             .mint_conversation(Request::new(MintConversationRequest {
                 owner: "test-owner".into(),
+                ..Default::default()
             }))
             .await
             .expect("mint a conversation to attach the dispatch to")
@@ -577,6 +579,7 @@ mod dispatch_await_cancel_tests {
             name: "Bash".into(),
             input_json: "{}".into(),
             conversation_id,
+            ..Default::default()
         }))
         .await
         .expect("dispatch returns Ok")
@@ -593,6 +596,7 @@ mod dispatch_await_cancel_tests {
             .await_tool_result(Request::new(AwaitToolResultRequest {
                 call_id: call_id.to_string(),
                 conversation_id: conversation_id.to_string(),
+                ..Default::default()
             }))
             .await
             .expect("await returns a frame stream")
@@ -633,6 +637,7 @@ mod dispatch_await_cancel_tests {
         let conversation_id = svc
             .mint_conversation(Request::new(MintConversationRequest {
                 owner: "test-owner".into(),
+                ..Default::default()
             }))
             .await
             .expect("mint a conversation to attach the dispatch to")
@@ -644,6 +649,7 @@ mod dispatch_await_cancel_tests {
                 name: "Bash".into(),
                 input_json: "{}".into(),
                 conversation_id,
+                ..Default::default()
             })),
         )
         .await
@@ -808,6 +814,7 @@ mod dispatch_await_cancel_tests {
             .await_tool_result(Request::new(AwaitToolResultRequest {
                 call_id: call_id.clone(),
                 conversation_id: String::new(),
+                ..Default::default()
             }))
             .await
             .expect("await returns a frame stream")
@@ -933,6 +940,7 @@ mod dispatch_await_cancel_tests {
             .await_tool_result(Request::new(AwaitToolResultRequest {
                 call_id: call_id.clone(),
                 conversation_id: String::new(),
+                ..Default::default()
             }))
             .await
             .expect("await returns a frame stream")
@@ -1089,6 +1097,7 @@ mod dispatch_await_cancel_tests {
                 name: "Bash".into(),
                 input_json: "{}".into(),
                 conversation_id: conv_id.clone(),
+                ..Default::default()
             }))
             .await
             .expect("dispatch returns Ok")
@@ -1141,6 +1150,7 @@ mod dispatch_await_cancel_tests {
                 name: "Bash".into(),
                 input_json: "{}".into(),
                 conversation_id: String::new(),
+                ..Default::default()
             }))
             .await
             .expect("an empty conversation_id is accepted (no conversation attach)");
@@ -1171,6 +1181,7 @@ mod dispatch_await_cancel_tests {
                 name: "Bash".into(),
                 input_json: "{}".into(),
                 conversation_id: unowned,
+                ..Default::default()
             }))
             .await
             .expect_err("an unowned conversation_id must be rejected");
@@ -1197,6 +1208,7 @@ mod dispatch_await_cancel_tests {
         let id = svc
             .mint_conversation(Request::new(MintConversationRequest {
                 owner: "test-owner".into(),
+                ..Default::default()
             }))
             .await
             .expect("mint returns Ok")
@@ -1218,6 +1230,7 @@ mod dispatch_await_cancel_tests {
         let (svc, _root, conv_id, _dispatcher) = service_and_conversation(FakeToolset).await;
         svc.delete_conversation(Request::new(DeleteConversationRequest {
             conversation_id: conv_id.clone(),
+            ..Default::default()
         }))
         .await
         .expect("deleting an owned conversation succeeds");
@@ -1238,6 +1251,7 @@ mod dispatch_await_cancel_tests {
         let err = svc
             .delete_conversation(Request::new(DeleteConversationRequest {
                 conversation_id: unowned,
+                ..Default::default()
             }))
             .await
             .expect_err("deleting an unowned conversation must be rejected");
@@ -1254,6 +1268,7 @@ mod dispatch_await_cancel_tests {
         svc.set_conversation_name(Request::new(SetConversationNameRequest {
             conversation_id: conv_id,
             name,
+            ..Default::default()
         }))
         .await
         .expect("a name at the character limit is accepted");
@@ -1270,6 +1285,7 @@ mod dispatch_await_cancel_tests {
             .set_conversation_name(Request::new(SetConversationNameRequest {
                 conversation_id: conv_id,
                 name,
+                ..Default::default()
             }))
             .await
             .expect_err("a name over the character limit must be rejected");
@@ -1296,6 +1312,7 @@ mod dispatch_await_cancel_tests {
                 conversation_id: conv_id,
                 limit: Some(2),
                 owner: "test-owner".into(),
+                ..Default::default()
             }))
             .await
             .expect("history returns Ok")
@@ -1329,6 +1346,7 @@ mod dispatch_await_cancel_tests {
                 conversation_id: conv_id,
                 limit: None,
                 owner: "test-owner".into(),
+                ..Default::default()
             }))
             .await
             .expect("history returns Ok")

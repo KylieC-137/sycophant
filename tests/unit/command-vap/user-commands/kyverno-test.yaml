@@ -1,0 +1,35 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: command-vap-user-commands
+policies:
+  - ../policy.yaml
+resources:
+  - commands.yaml
+userinfo: ../operator.yaml
+variables: ../values.yaml
+results:
+  - policy: command-provision-user
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: pass
+    resources:
+      - tenant-acme/provision-user-4d5e6f7a81
+  - policy: command-provision-user
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: fail
+    resources:
+      - tenant-acme/provision-user-4d5e6f7a82
+  - policy: command-provision-user
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: fail
+    resources:
+      - tenant-acme/provision-user-4d5e6f7a83
+  - policy: command-provision-user
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: fail
+    resources:
+      - tenant-acme/provision-user-4d5e6f7a84

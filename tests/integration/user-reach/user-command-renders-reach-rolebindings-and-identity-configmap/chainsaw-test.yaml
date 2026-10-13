@@ -1,0 +1,512 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: user-command-renders-reach-rolebindings-and-identity-configmap
+spec:
+  description: >
+    An applied user command, written by the operator, binds a person: one reach
+    RoleBinding per listed workspace plus the identity ConfigMap; the bound person
+    can get only the listed workspaces' harness Services; an unlisted workspace stays
+    unreachable; removing the workspace or the handle from the command cuts the
+    reach; a reaped and recreated workspace reaches nobody until re-granted; a
+    command naming a missing workspace, or one created after the command, is
+    refused on every attempt and leaves existing grants untouched; a writer
+    with no namespace write RBAC is denied.
+  timeouts:
+    exec: 300s
+    assert: 120s
+  bindings:
+    - name: tenant_ns
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
+  steps:
+    - name: create-tenant-ns
+      use:
+        template: ../../step-templates/tenant.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+    - name: grant-command-write
+      use:
+        template: ../../step-templates/command-writer.yaml
+        with:
+          bindings:
+            - name: command_ns
+              value: ($tenant_ns)
+    - name: apply-workspaces
+      try:
+        - script:
+            timeout: 120s
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -eu
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              # Each workspace's reach Role, rendered from the workspace chart.
+              # gamma's exists too — a workspace provisioned after the user
+              # command — and must still grant nobody: no RoleBinding,
+              # no reach.
+              for ws in alpha beta gamma; do
+                helm template "ws-$ws" "$REPO_ROOT/charts/sycophant-workspace" \
+                  --set name="$ws" -n "$TENANT_NS" \
+                  --show-only templates/reach-rbac.yaml \
+                  | kubectl apply -f - >/dev/null
+                kubectl create service clusterip "ws-$ws" -n "$TENANT_NS" --tcp=9090 >/dev/null
+              done
+              # Write times are whole seconds and a grant is refused unless its
+              # workspace is strictly older, so let one tick before granting.
+              sleep 1
+              true
+    # The operator writes the command; the person it binds is alice.
+    - name: operator-grants-alice-alpha-and-beta
+      use:
+        template: ../../step-templates/user-command.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+            - name: sub
+              value: alice
+            - name: workspaces
+              value: alpha,beta
+            - name: handle_slack
+              value: "U0123ABCDEF"
+            - name: writer
+              value: operator
+            - name: expect
+              value: admitted
+    - name: wait-for-user-release
+      try:
+        - script:
+            timeout: 300s
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -eu
+              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+              HASH=$(printf '%s' "${ISSUER}#alice" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
+              for i in $(seq 1 120); do
+                kubectl get rolebinding "user-ws-$HASH-alpha" -n "$TENANT_NS" >/dev/null 2>&1 && \
+                  kubectl get rolebinding "user-ws-$HASH-beta" -n "$TENANT_NS" >/dev/null 2>&1 && \
+                  kubectl get configmap "user-$HASH" -n "$TENANT_NS" >/dev/null 2>&1 && exit 0
+                sleep 2
+              done
+              echo "user release did not render within 240s" >&2
+              kubectl get rolebindings,configmaps -n "$TENANT_NS" >&2 || true
+              exit 1
+    - name: assert-reach-rolebindings-and-identity-configmap
+      try:
+        - script:
+            timeout: 60s
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -eu
+              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+              ALICE="${ISSUER}#alice"
+              HASH=$(printf '%s' "$ALICE" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
+              # One reach RoleBinding per listed workspace, binding the raw
+              # subject to that workspace's reach Role.
+              for ws in alpha beta; do
+                rb=$(kubectl get rolebinding "user-ws-$HASH-$ws" -n "$TENANT_NS" -o json)
+                echo "$rb" | jq -e --arg s "$ALICE" \
+                  '.subjects[0].kind == "User" and .subjects[0].name == $s' >/dev/null \
+                  || { echo "subject wrong on $ws: $rb"; exit 1; }
+                echo "$rb" | jq -e \
+                  '.roleRef.kind == "Role" and .roleRef.name == "ws-'"$ws"'-reach"' >/dev/null \
+                  || { echo "roleRef wrong on $ws: $rb"; exit 1; }
+                # Owned by the Role it binds, so the grant dies with it.
+                role_uid=$(kubectl get role "ws-$ws-reach" -n "$TENANT_NS" -o jsonpath='{.metadata.uid}')
+                echo "$rb" | jq -e --arg u "$role_uid" --arg n "ws-$ws-reach" \
+                  '[.metadata.ownerReferences[] | select(.kind == "Role" and .name == $n and .uid == $u)] | length == 1' >/dev/null \
+                  || { echo "reach binding for $ws is not owned by its Role: $rb"; exit 1; }
+              done
+              # The identity ConfigMap carries the command data verbatim.
+              cm=$(kubectl get configmap "user-$HASH" -n "$TENANT_NS" -o json)
+              echo "$cm" | jq -e '.metadata.labels["sycophant.md/type"] == "relay-identity"' >/dev/null \
+                || { echo "identity CM label wrong: $cm"; exit 1; }
+              echo "$cm" | jq -e --arg s "$ALICE" \
+                  '.data.subject == $s and .data.workspaces == "alpha,beta" and .data["handle.slack"] == "U0123ABCDEF"' >/dev/null \
+                || { echo "identity CM data wrong: $cm"; exit 1; }
+              # The provision-identity membership binding survives.
+              kubectl get rolebinding "user-$HASH" -n "$TENANT_NS" >/dev/null \
+                || { echo "membership binding missing"; exit 1; }
+              true
+    - name: listed-workspaces-reachable-unlisted-not
+      try:
+        - script:
+            timeout: 60s
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -eu
+              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+              ALICE="${ISSUER}#alice"
+              for ws in alpha beta; do
+                [ "$(kubectl auth can-i get service/ws-$ws -n "$TENANT_NS" --as="$ALICE")" = yes ] \
+                  || { echo "alice cannot reach listed ws-$ws"; exit 1; }
+              done
+              # The unlisted workspace is unreachable, created after the
+              # grant or not.
+              [ "$(kubectl auth can-i get service/ws-gamma -n "$TENANT_NS" --as="$ALICE")" = no ] \
+                || { echo "alice reached unlisted ws-gamma"; exit 1; }
+              # The user command granted no command-write: alice holds no
+              # ConfigMap verb at all.
+              [ "$(kubectl auth can-i create configmaps -n "$TENANT_NS" --as="$ALICE")" = no ] \
+                || { echo "alice can create configmaps; a user command must not grant command writes"; exit 1; }
+              [ "$(kubectl auth can-i get configmaps -n "$TENANT_NS" --as="$ALICE")" = no ] \
+                || { echo "alice can get configmaps; a user command must not grant command writes"; exit 1; }
+              true
+    # The operator removes beta from the list.
+    - name: re-grant-without-beta
+      use:
+        template: ../../step-templates/user-command.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+            - name: sub
+              value: alice
+            - name: workspaces
+              value: alpha
+            - name: handle_slack
+              value: "U0123ABCDEF"
+            - name: writer
+              value: operator
+            - name: expect
+              value: admitted
+    - name: re-grant-without-the-workspace-cuts-reach
+      try:
+        - script:
+            timeout: 300s
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -eu
+              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+              ALICE="${ISSUER}#alice"
+              HASH=$(printf '%s' "$ALICE" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
+              # The re-grant replaces the release's objects: beta's binding
+              # goes rather than stacking beside the new set.
+              for i in $(seq 1 120); do
+                kubectl get rolebinding "user-ws-$HASH-beta" -n "$TENANT_NS" >/dev/null 2>&1 || break
+                sleep 2
+              done
+              kubectl get rolebinding "user-ws-$HASH-beta" -n "$TENANT_NS" >/dev/null 2>&1 \
+                && { echo "beta reach RoleBinding survived re-grant without it"; exit 1; }
+              [ "$(kubectl auth can-i get service/ws-beta -n "$TENANT_NS" --as="$ALICE")" = no ] \
+                || { echo "beta still reachable after re-grant"; exit 1; }
+              true
+    # The operator removes the slack handle.
+    - name: re-grant-without-the-handle
+      use:
+        template: ../../step-templates/user-command.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+            - name: sub
+              value: alice
+            - name: workspaces
+              value: alpha
+            - name: handle_slack
+              value: ""
+            - name: writer
+              value: operator
+            - name: expect
+              value: admitted
+    - name: re-grant-without-the-handle-drops-the-binding-key
+      try:
+        - script:
+            timeout: 300s
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -eu
+              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+              HASH=$(printf '%s' "${ISSUER}#alice" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
+              for i in $(seq 1 120); do
+                [ -z "$(kubectl get configmap "user-$HASH" -n "$TENANT_NS" \
+                  -o jsonpath='{.data.handle\.slack}' 2>/dev/null)" ] && break
+                sleep 2
+              done
+              [ -z "$(kubectl get configmap "user-$HASH" -n "$TENANT_NS" \
+                -o jsonpath='{.data.handle\.slack}' 2>/dev/null)" ] \
+                || { echo "handle.slack survived re-grant without it"; exit 1; }
+              true
+    # Reaping a workspace deletes its reach Role. Every reach RoleBinding is
+    # owned by that Role, so garbage collection removes the grant, and a
+    # workspace recreated under the same name reaches nobody until re-granted.
+    - name: a-recreated-workspace-reaches-nobody-until-re-granted
+      try:
+        - script:
+            timeout: 300s
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -eu
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+              ALICE="${ISSUER}#alice"
+              HASH=$(printf '%s' "$ALICE" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
+              kubectl delete role ws-alpha-reach -n "$TENANT_NS" --wait=true >/dev/null
+              for i in $(seq 1 60); do
+                kubectl get rolebinding "user-ws-$HASH-alpha" -n "$TENANT_NS" >/dev/null 2>&1 || break
+                sleep 2
+              done
+              kubectl get rolebinding "user-ws-$HASH-alpha" -n "$TENANT_NS" >/dev/null 2>&1 \
+                && { echo "alpha's reach RoleBinding outlived its Role"; exit 1; }
+              helm template ws-alpha "$REPO_ROOT/charts/sycophant-workspace" \
+                --set name=alpha -n "$TENANT_NS" \
+                --show-only templates/reach-rbac.yaml \
+                | kubectl apply -f - >/dev/null
+              [ "$(kubectl auth can-i get service/ws-alpha -n "$TENANT_NS" --as="$ALICE")" = no ] \
+                || { echo "alice reached recreated ws-alpha without a re-grant"; exit 1; }
+              # The re-grant must be written strictly after the new Role.
+              sleep 1
+              true
+    - name: operator-re-grants-alpha
+      use:
+        template: ../../step-templates/user-command.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+            - name: sub
+              value: alice
+            - name: workspaces
+              value: alpha
+            - name: handle_slack
+              value: ""
+            - name: writer
+              value: operator
+            - name: expect
+              value: admitted
+    - name: the-re-grant-restores-reach-to-the-new-workspace
+      try:
+        - script:
+            timeout: 300s
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -eu
+              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+              ALICE="${ISSUER}#alice"
+              HASH=$(printf '%s' "$ALICE" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
+              ROLE_UID=$(kubectl get role ws-alpha-reach -n "$TENANT_NS" -o jsonpath='{.metadata.uid}')
+              for i in $(seq 1 120); do
+                [ "$(kubectl get rolebinding "user-ws-$HASH-alpha" -n "$TENANT_NS" \
+                  -o jsonpath='{.metadata.ownerReferences[0].uid}' 2>/dev/null)" = "$ROLE_UID" ] && break
+                sleep 2
+              done
+              [ "$(kubectl get rolebinding "user-ws-$HASH-alpha" -n "$TENANT_NS" \
+                -o jsonpath='{.metadata.ownerReferences[0].uid}' 2>/dev/null)" = "$ROLE_UID" ] \
+                || { echo "the re-grant did not bind the recreated ws-alpha-reach"; exit 1; }
+              [ "$(kubectl auth can-i get service/ws-alpha -n "$TENANT_NS" --as="$ALICE")" = yes ] \
+                || { echo "alice cannot reach ws-alpha after the re-grant"; exit 1; }
+              true
+    # A grant is judged against the command's write time on every attempt:
+    # a workspace missing at the write, or created after it while the
+    # installer retries, is refused, and the refusal leaves alice's existing
+    # grants untouched.
+    - name: operator-grants-a-missing-workspace
+      use:
+        template: ../../step-templates/user-command.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+            - name: sub
+              value: alice
+            - name: workspaces
+              value: alpha,delta
+            - name: handle_slack
+              value: ""
+            - name: writer
+              value: operator
+            - name: expect
+              value: admitted
+    - name: a-workspace-created-after-the-grant-is-refused
+      try:
+        - script:
+            timeout: 960s
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -eu
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+              ALICE="${ISSUER}#alice"
+              HASH=$(printf '%s' "$ALICE" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
+              ALPHA_UID=$(kubectl get role ws-alpha-reach -n "$TENANT_NS" -o jsonpath='{.metadata.uid}')
+              MISSING=delta
+              # Find the installer by its refusal: of alice's installers in
+              # this namespace, the one whose current or previous container
+              # logged it. A retry replaces the log, so poll both.
+              JOB=""
+              for i in $(seq 1 180); do
+                for j in $(kubectl get jobs -n sycophant-system -o json \
+                  | jq -r --arg c "provision-user-$HASH" --arg t "$TENANT_NS" \
+                  '.items[] | select(.metadata.name | startswith("provision-user-"))
+                   | select(any(.spec.template.spec.containers[].env[]?; .name == "COMMAND" and .value == $c))
+                   | select(any(.spec.template.spec.containers[].env[]?; .name == "TENANT" and .value == $t))
+                   | .metadata.name'); do
+                  { kubectl logs -n sycophant-system "job/$j" 2>/dev/null
+                    kubectl logs -n sycophant-system "job/$j" --previous 2>/dev/null; } \
+                    | grep -q "workspace $MISSING does not exist" && { JOB=$j; break; }
+                done
+                [ -n "$JOB" ] && break
+                sleep 1
+              done
+              [ -n "$JOB" ] || { echo "no installer refused missing ws-$MISSING"; exit 1; }
+              # ws-delta appears while the installer still has retries left.
+              helm template ws-delta "$REPO_ROOT/charts/sycophant-workspace" \
+                --set name=delta -n "$TENANT_NS" \
+                --show-only templates/reach-rbac.yaml \
+                | kubectl apply -f - >/dev/null
+              kubectl create service clusterip ws-delta -n "$TENANT_NS" --tcp=9090 >/dev/null
+              for i in $(seq 1 420); do
+                kubectl get rolebinding "user-ws-$HASH-$MISSING" -n "$TENANT_NS" >/dev/null 2>&1 \
+                  && { echo "a retry of $JOB granted ws-$MISSING"; exit 1; }
+                [ "$(kubectl get job "$JOB" -n sycophant-system \
+                  -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}')" = True ] && break
+                sleep 2
+              done
+              [ "$(kubectl get job "$JOB" -n sycophant-system \
+                -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}')" = True ] \
+                || { echo "installer $JOB did not end failed"; exit 1; }
+              kubectl get rolebinding "user-ws-$HASH-$MISSING" -n "$TENANT_NS" >/dev/null 2>&1 \
+                && { echo "a grant to ws-$MISSING rendered"; exit 1; }
+              # The refused grant changed nothing alice already held.
+              [ "$(kubectl get rolebinding "user-ws-$HASH-alpha" -n "$TENANT_NS" \
+                -o jsonpath='{.metadata.ownerReferences[0].uid}' 2>/dev/null)" = "$ALPHA_UID" ] \
+                || { echo "the refused grant removed alice's alpha binding"; exit 1; }
+              [ "$(kubectl auth can-i get service/ws-alpha -n "$TENANT_NS" --as="$ALICE")" = yes ] \
+                || { echo "the refused grant cut alice's reach to ws-alpha"; exit 1; }
+              [ "$(kubectl get configmap "user-$HASH" -n "$TENANT_NS" -o jsonpath='{.data.workspaces}' 2>/dev/null)" = alpha ] \
+                || { echo "the refused grant changed alice's identity ConfigMap"; exit 1; }
+              kubectl delete configmap "provision-user-$HASH" -n "$TENANT_NS" --ignore-not-found --wait=true >/dev/null
+              kubectl delete job "$JOB" -n sycophant-system --ignore-not-found >/dev/null
+              [ "$(kubectl auth can-i get service/ws-delta -n "$TENANT_NS" --as="$ALICE")" = no ] \
+                || { echo "alice reached ws-delta, created after the grant"; exit 1; }
+              true
+    # A retry that finds its command gone stops before helm instead of
+    # installing an empty release over alice's grants.
+    - name: operator-grants-another-missing-workspace
+      use:
+        template: ../../step-templates/user-command.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+            - name: sub
+              value: alice
+            - name: workspaces
+              value: alpha,epsilon
+            - name: handle_slack
+              value: ""
+            - name: writer
+              value: operator
+            - name: expect
+              value: admitted
+    - name: a-retry-without-its-command-leaves-the-grants
+      try:
+        - script:
+            timeout: 960s
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -eu
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+              ALICE="${ISSUER}#alice"
+              HASH=$(printf '%s' "$ALICE" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
+              ALPHA_UID=$(kubectl get role ws-alpha-reach -n "$TENANT_NS" -o jsonpath='{.metadata.uid}')
+              MISSING=epsilon
+              # Find the installer by its refusal: of alice's installers in
+              # this namespace, the one whose current or previous container
+              # logged it. A retry replaces the log, so poll both.
+              JOB=""
+              for i in $(seq 1 180); do
+                for j in $(kubectl get jobs -n sycophant-system -o json \
+                  | jq -r --arg c "provision-user-$HASH" --arg t "$TENANT_NS" \
+                  '.items[] | select(.metadata.name | startswith("provision-user-"))
+                   | select(any(.spec.template.spec.containers[].env[]?; .name == "COMMAND" and .value == $c))
+                   | select(any(.spec.template.spec.containers[].env[]?; .name == "TENANT" and .value == $t))
+                   | .metadata.name'); do
+                  { kubectl logs -n sycophant-system "job/$j" 2>/dev/null
+                    kubectl logs -n sycophant-system "job/$j" --previous 2>/dev/null; } \
+                    | grep -q "workspace $MISSING does not exist" && { JOB=$j; break; }
+                done
+                [ -n "$JOB" ] && break
+                sleep 1
+              done
+              [ -n "$JOB" ] || { echo "no installer refused missing ws-$MISSING"; exit 1; }
+              kubectl delete configmap "provision-user-$HASH" -n "$TENANT_NS" --wait=true >/dev/null
+              for i in $(seq 1 420); do
+                kubectl get rolebinding "user-ws-$HASH-$MISSING" -n "$TENANT_NS" >/dev/null 2>&1 \
+                  && { echo "a retry of $JOB granted ws-$MISSING"; exit 1; }
+                [ "$(kubectl get job "$JOB" -n sycophant-system \
+                  -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}')" = True ] && break
+                sleep 2
+              done
+              [ "$(kubectl get job "$JOB" -n sycophant-system \
+                -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}')" = True ] \
+                || { echo "installer $JOB did not end failed"; exit 1; }
+              kubectl get rolebinding "user-ws-$HASH-$MISSING" -n "$TENANT_NS" >/dev/null 2>&1 \
+                && { echo "a grant to ws-$MISSING rendered"; exit 1; }
+              # The refused grant changed nothing alice already held.
+              [ "$(kubectl get rolebinding "user-ws-$HASH-alpha" -n "$TENANT_NS" \
+                -o jsonpath='{.metadata.ownerReferences[0].uid}' 2>/dev/null)" = "$ALPHA_UID" ] \
+                || { echo "the refused grant removed alice's alpha binding"; exit 1; }
+              [ "$(kubectl auth can-i get service/ws-alpha -n "$TENANT_NS" --as="$ALICE")" = yes ] \
+                || { echo "the refused grant cut alice's reach to ws-alpha"; exit 1; }
+              [ "$(kubectl get configmap "user-$HASH" -n "$TENANT_NS" -o jsonpath='{.data.workspaces}' 2>/dev/null)" = alpha ] \
+                || { echo "the refused grant changed alice's identity ConfigMap"; exit 1; }
+              kubectl delete configmap "provision-user-$HASH" -n "$TENANT_NS" --ignore-not-found --wait=true >/dev/null
+              kubectl delete job "$JOB" -n sycophant-system --ignore-not-found >/dev/null
+              true
+    # An issuer-prefixed identity holding no write RBAC in this namespace
+    # cannot write a shape-valid command, so the denial is RBAC's, not a
+    # naming rejection.
+    - name: a-writer-without-namespace-write-rbac-is-denied
+      use:
+        template: ../../step-templates/user-command.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+            - name: sub
+              value: mallory
+            - name: workspaces
+              value: alpha
+            - name: handle_slack
+              value: ""
+            - name: writer
+              value: mallory
+            - name: expect
+              value: forbidden
+    - name: cleanup-commands
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -eu || true
+              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+              for sub in alice mallory; do
+                HASH=$(printf '%s' "${ISSUER}#${sub}" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
+                kubectl delete configmap "provision-user-$HASH" -n "$TENANT_NS" --ignore-not-found
+              done
+              true

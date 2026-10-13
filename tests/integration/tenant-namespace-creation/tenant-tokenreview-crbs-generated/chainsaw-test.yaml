@@ -36,10 +36,14 @@ spec:
               kind: ClusterRole
               metadata:
                 name: cluster-relay-tokenreview
-              (length(rules) == `1`): true
+              (length(rules) == `2`): true
               rules:
                 - apiGroups: ["authentication.k8s.io"]
                   resources: ["tokenreviews"]
+                  verbs: ["create"]
+                  (length(verbs) == `1`): true
+                - apiGroups: ["authorization.k8s.io"]
+                  resources: ["subjectaccessreviews"]
                   verbs: ["create"]
                   (length(verbs) == `1`): true
     - name: create-labeled-ns

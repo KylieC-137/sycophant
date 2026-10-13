@@ -39,12 +39,11 @@ rules:
       - "secrets"
     verbs: ["create", "update", "patch", "delete"]
 
-  # The only `get`-able Secret names, pinned so the write-only rule above
-  # still denies reading every other Secret. Each is needed because a tenant
+  # The only `get`-able Secret name, pinned so the write-only rule above
+  # still denies reading every other Secret. It is needed because a tenant
   # chart Role grants `get` on that same name, and creating that Role passes
   # K8s anti-escalation only if the creator already holds the verb (no escalate
   # verb anywhere):
-  #   relay-registered-keys  the relay-controller device public keys.
   #   adapter-state          the app adapter's tailnet node state. Fixed name
   #                          (one app channel per tenant); absent when no app
   #                          channel is configured, and a pinned `get` on an
@@ -52,12 +51,12 @@ rules:
   - apiGroups: [""]
     resources:
       - "secrets"
-    resourceNames: ["relay-registered-keys", "adapter-state"]
+    resourceNames: ["adapter-state"]
     verbs: ["get"]
 
-  # Warning Events. The relay-controller Role grants events create/patch to name
-  # rejected grant rows; the creator must hold the same verbs for the Role
-  # create to pass anti-escalation.
+  # Warning Events. The relay-controller Role grants events create/patch to
+  # name rejected identity rows; the creator must hold the same verbs for the
+  # Role create to pass anti-escalation.
   - apiGroups: ["events.k8s.io"]
     resources: ["events"]
     verbs: ["create", "patch"]

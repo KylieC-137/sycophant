@@ -13,8 +13,9 @@ One test per protected resource:
   `sycophant.md/type=capability-grants`
 - `cilium-network-policy-immutable/` — an in-namespace SA cannot CRUD a
   CiliumNetworkPolicy in its own namespace
-- `grants-configmap-immutable/` — an in-namespace SA cannot create, update, or
-  delete the relay-access-grants ConfigMap
+- `relay-identity-configmap-immutable/` — an in-namespace SA cannot create,
+  update, or delete a ConfigMap labeled
+  `sycophant.md/type=relay-identity`
 - `network-policy-immutable/` — an in-namespace SA cannot create, update, or
   delete a NetworkPolicy
 - `rbac-roles-immutable/` — an in-namespace SA cannot CRUD Roles or

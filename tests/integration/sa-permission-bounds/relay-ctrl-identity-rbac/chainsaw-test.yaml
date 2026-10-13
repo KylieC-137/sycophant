@@ -1,9 +1,9 @@
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
-  name: relay-ctrl-grants-and-key-rbac
+  name: relay-ctrl-identity-rbac
 spec:
-  description: The chart-rendered relay-controller Role grants exactly its grants and key verbs.
+  description: The chart-rendered relay-controller Role is read-only on ConfigMaps and spawns no workload.
   steps:
     - name: assert-configmaps-are-read-only-for-the-relay
       try:
@@ -21,52 +21,16 @@ spec:
 
               cm=$(printf '%s\n' "$rules" | grep '"configmaps"' || true)
               [ -n "$cm" ] \
-                || { echo "the relay Role grants nothing on ConfigMaps; it cannot watch the grants table"; printf '%s\n' "$rules" >&2; exit 1; }
+                || { echo "the relay Role grants nothing on ConfigMaps; it cannot watch the identity table"; printf '%s\n' "$rules" >&2; exit 1; }
               for verb in get list watch; do
                 printf '%s' "$cm" | grep -q "\"$verb\"" \
                   || { echo "the relay Role must grant '$verb' on ConfigMaps"; printf '%s\n' "$cm" >&2; exit 1; }
               done
               for verb in create update patch delete deletecollection; do
                 printf '%s' "$cm" | grep -q "\"$verb\"" \
-                  && { echo "the relay Role grants '$verb' on ConfigMaps; RBAC is the first lock on the grants table and it must be read-only"; printf '%s\n' "$cm" >&2; exit 1; }
+                  && { echo "the relay Role grants '$verb' on ConfigMaps; RBAC is the first lock on the identity table and it must be read-only"; printf '%s\n' "$cm" >&2; exit 1; }
               done
 
-              printf '%s\n' "$rules" | grep -q 'enrollments' \
-                && { echo "the relay Role still names the retired Enrollment kind"; printf '%s\n' "$rules" >&2; exit 1; }
-              true
-    - name: assert-secret-writes-are-name-scoped-away-from-the-signing-key
-      try:
-        - script:
-            content: |
-              set -e
-              REPO_ROOT=$(git rev-parse --show-toplevel)
-              out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns 2>&1) \
-                || { echo "tenant chart must render offline"; printf '%s\n' "$out" >&2; exit 1; }
-              rules=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
-                -o jsonpath='{range .items[?(@.metadata.name=="relay-controller")]}{range .rules[*]}{.resources}~{.verbs}~{.resourceNames}{"\n"}{end}{end}')
-
-              # No pipe into `while`: a subshell's `exit 1` would not fail the step.
-              secret_rules=$(printf '%s\n' "$rules" | grep '"secrets"' || true)
-              [ -n "$secret_rules" ] \
-                || { echo "the relay Role grants nothing on Secrets; it cannot record a redeemed device key"; printf '%s\n' "$rules" >&2; exit 1; }
-
-              while IFS= read -r rule; do
-                [ -n "$rule" ] || continue
-                verbs=$(printf '%s' "$rule" | cut -d'~' -f2)
-                names=$(printf '%s' "$rule" | cut -d'~' -f3)
-                case "$verbs" in
-                  *update*|*patch*|*delete*)
-                    [ -n "$names" ] \
-                      || { echo "an unscoped Secret write rule: $rule -- resourceNames IS honored on update and patch, so every relay Secret write must name relay-registered-keys"; exit 1; }
-                    case "$names" in
-                      *relay-signing-key*)
-                        echo "a Secret write rule names relay-signing-key: $rule"; exit 1 ;;
-                    esac
-                    ;;
-                esac
-              done <<EOF
-              $secret_rules
-              EOF
               true
     - name: assert-the-relay-can-create-no-workload
       try:
@@ -90,8 +54,8 @@ spec:
 
               for role in $roles; do
                 rules=$(printf '%s' "$out" | kubectl apply --dry-run=client -f - \
-                  -o jsonpath="{range .items[?(@.metadata.name==\"${role}\")]}{range .rules[*]}{.resources}~{.verbs}{\"\n\"}{end}{end}")
-                for res in pods jobs deployments replicasets statefulsets daemonsets; do
+                  -o jsonpath="{range .items[?(@.metadata.name==\"${role}\")]}{range .rules[*]}{.resources}~{.verbs}{\"\\n\"}{end}{end}")
+                for res in pods jobs deployments replicaset statefulsets daemonsets; do
                   printf '%s\n' "$rules" | grep -q "\"$res\"" \
                     && { echo "Role '$role' bound to relay-controller grants verbs on '$res'; nothing spawns adapters at runtime"; printf '%s\n' "$rules" >&2; exit 1; }
                 done

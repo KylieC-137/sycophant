@@ -11,9 +11,9 @@ namespace:
 # your own registry refs to pull instead.
 
 # Relay controller -- the client-facing gateway.
-# Watches the relay-access-grants ConfigMap, verifies client-signed requests
-# against the grant row that signed them, and relays inbound user messages to
-# the per-workspace harness.
+# Watches the relay-identity ConfigMaps, authenticates every caller by
+# TokenReview, authorizes every request by a Kubernetes access review, and
+# relays inbound user messages to the per-workspace harness.
 relay:
   image: relay-controller
   tag: local

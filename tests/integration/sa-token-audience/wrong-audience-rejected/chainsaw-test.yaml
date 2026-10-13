@@ -14,7 +14,7 @@ spec:
          with spec.audiences=[B], returns authenticated=false.
       2. Token minted for audience A, presented with
          spec.audiences=[A], returns authenticated=true AND echoes
-         status.audiences (defense-in-depth: workspace_from_review
+         status.audiences (defense-in-depth: username_from_review
          in crates/shared/src/auth.rs reads status.audiences to
          detect a non-audience-aware authenticator).
       3. A workspace-audience token used as a kubectl bearer is
@@ -24,7 +24,7 @@ spec:
     audience-rejection property is tested at the K8s contract layer,
     not via a real controller dial. Controller-side audience
     handling (the K8sTokenVerifier reads status.audiences for the
-    echo check) is covered by workspace_from_review unit tests at
+    echo check) is covered by username_from_review unit tests at
     crates/shared/src/auth.rs::tests.
   bindings:
     - name: probe_sa
@@ -117,7 +117,7 @@ spec:
               fi
               if [ "$ECHOED" -lt 1 ]; then
                 echo "FAIL: status.audiences did not echo harness.relay.sycophant.md" >&2
-                echo "(workspace_from_review's defense-in-depth check would reject this)" >&2
+                echo "(username_from_review's defense-in-depth check would reject this)" >&2
                 echo "Response: $RESP" >&2
                 exit 1
               fi

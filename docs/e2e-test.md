@@ -2,9 +2,9 @@
 
 Stand up sycophant from nothing and assert the security clauses hold — driven by the `syco` CLI. Agent-executed tool code runs in gVisor-isolated toolset pods (capability-job); the workspace/harness pod itself runs on the kubelet-default runtime with the seccomp/caps/read-only-rootfs + egress-policy envelope.
 
-The e2e is the CLI plus the [examples](../examples/README.md): `syco setup` brings up the cluster and builds the images; the example values provision the tenant and its workspace, which you exercise from the Flutter client; `syco tenant audit` asserts the security clauses. This doc covers the prereqs, what each phase lays down, the architecture rationale behind those steps, and how to debug when something breaks.
+The e2e is the CLI plus the [examples](../examples/README.md): `syco setup` brings up the cluster and builds the images; the example values provision the tenant and its workspace, which the script exercises over the app path with the operator's Dex token (grpcurl, until the Flutter app has its own login); `syco tenant audit` asserts the security clauses. This doc covers the prereqs, what each phase lays down, the architecture rationale behind those steps, and how to debug when something breaks.
 
-> [`scripts/e2e.sh`](../scripts/e2e.sh) is the legacy maintainer harness — it also drives the Flutter client, which the CLI does not. It's retained until the CLI bring-up (`syco setup`'s image build + `syco tenant audit`) is verified on a live cluster, then retired.
+> [`scripts/e2e.sh`](../scripts/e2e.sh) is the legacy maintainer harness — it also drives the app path over the tailnet and compile-checks the Flutter app, which the CLI does not. It's retained until the CLI bring-up (`syco setup`'s image build + `syco tenant audit`) is verified on a live cluster, then retired.
 
 ## Prerequisites
 
@@ -28,7 +28,7 @@ To skip the scans entirely, add your terminal to System Settings → Privacy & S
 
 Follow the examples end to end:
 
-- [examples](../examples/README.md) — the reference run: `setup` → `tenant up` → exercise (Flutter client) → `audit`, including the secret-scrubber assertion.
+- [examples](../examples/README.md) — the reference run: `setup` → `tenant up` → exercise (grpcurl over the app path with the operator's Dex token) → `audit`, including the secret-scrubber assertion.
 
 The shape:
 
@@ -36,7 +36,7 @@ The shape:
 syco setup                                            # cluster + images (idempotent)
 # … models, toolsets, workspace and user per the examples …
 syco tenant up    -f examples/tenants/e2e-test.yaml
-# … from the Flutter client, send a tool-calling message (see the examples) …
+# … over the app path with the operator's Dex token, run a tool call and one model turn with the demo-key grant (see the examples) …
 syco tenant audit <workspace> --ns tenant-e2e-test     # 7-check pass/fail (the threat model's six security clauses + the workspace-SA provisioning probe)
 ```
 
@@ -48,14 +48,14 @@ syco tenant audit <workspace> --ns tenant-e2e-test     # 7-check pass/fail (the 
 | Images | `syco setup` (from a checkout) | Cross-compile Rust → Docker build all images → `k3d image import` + push toolsets to the in-cluster registry |
 | Content | `syco tenant secret set` | LLM creds and grant Secrets, applied from outside the tenant |
 | Deploy | `syco tenant up` | Prompts for the operator password, then renders the tenant provision command from its values file and writes it under a fresh 10-minute Dex ID token (`tenant` and `capacity`; Kyverno generates the `part-of=sycophant-tenant` namespace, its quota, and the base-release installer Job, which installs chart defaults; its install-wait hook holds that Job until the relay-controller is Available). `syco inference up -f`, `syco toolset up -f`, `syco workspace up -f`, `syco user up -f` and `syco channel up -f` then render and write one provision command per model, toolset, workspace, bound user and channel, each waiting on its installer Job |
-| Exercise | Flutter client | A tool-calling message (sent from an enrolled client) lazy-spawns the stdlib toolset pod the audit probes |
+| Exercise | grpcurl + operator token | Over the app path with the operator's Dex token: a Shell call inside a fresh conversation (no model; lazy-spawns the stdlib toolset pod the audit probes), a denied call on an ungranted workspace, and one model turn carrying the `ssh-credentials/demo-key` grant. Step 6 inspects exactly those two conversations |
 | Audit | `syco tenant audit` | gVisor `dmesg`, secret-scrubbing count, tool `exit_code=0`, egress timeout, L7 DNS block, no LLM creds in the sandbox, workspace SA |
 
 ## Architecture notes
 
 **Why the preflight + disk budget.** `syco setup`'s `check_prereqs` runs first and fails fast with one fix line per missing prerequisite (macOS + Linux): always docker/k3d/helm/grpcurl, and — when building from a checkout — the musl cross-build chain (the rustup target, `<arch>-linux-musl-gcc`, and the `~/.cargo/config.toml` linker line, since the build links against the host `cc` and fails without it) plus protoc/cmake. It also gates Docker-VM free disk: **the VM is the constraint, not RAM.** A near-full VM trips kubelet imagefs eviction (~85%) and a Kyverno eviction storm that reads like a memory problem but isn't — keep ≳15 GB free (`setup` fails under 8 GB). The supported host-musl → `FROM scratch` build keeps the heavy build cache on the host, not the VM.
 
-**Why `FLUTTER_TARGET=none` (backend-only).** Step 5 normally launches a local Flutter client; `none` skips that (and its toolchain in the preflight), deploys + runs the Step 6 security checks, and prints the connect details (server address, workspace, grant code) so a client can attach from another machine over Tailscale. This is the path for a headless host like a Mac mini with no Xcode.
+**Why `FLUTTER_TARGET` is only a compile check.** The Flutter app has no Dex login yet, so it cannot connect and the e2e never launches it. Step 5 drives the app path itself with the operator's token; `macos` additionally builds the macOS app to catch compile breaks, and `none` skips the build (and its toolchain in the preflight) for a headless host like a Mac mini with no Xcode. Either way the host joins the run's tailnet (Tailscale CLI and one sudo prompt), since the app path is reached only over it.
 
 **Why gVisor before Cilium.** The gVisor installer writes a containerd template and `HUP`s k3s to reload it. K3s embeds containerd as a subprocess, so the HUP restarts both. If Cilium is installed first, its agent's CRI socket disappears mid-restart and the DaemonSet enters CrashLoopBackOff. Installing gVisor first means the HUP fires when no DaemonSets depend on the CRI yet.
 
@@ -69,7 +69,7 @@ syco tenant audit <workspace> --ns tenant-e2e-test     # 7-check pass/fail (the 
 
 **Why `--port "9090:9090@loadbalancer"`.** The cluster's serverlb maps host:9090 → cluster Service `relay-controller:9090` (the internal listener). That's enough for the Layer 1 chat sanity.
 
-**Why the Flutter app uses `relay:9090` over the tailnet.** The relay's app port is never forwarded to the host, so the only way in is the app adapter's tsnet node, reached by its MagicDNS name. Step 5 forwards headscale's HTTP API alone, which is what lets the host's Tailscale join the in-cluster control plane. A client that could dial the relay directly would skip the adapter and leave the assertions that cover it untested.
+**Why the app path uses `relay:9090` over the tailnet.** The relay's app port is never forwarded to the host, so the only way in is the app adapter's tsnet node, reached by its MagicDNS name. Step 5 forwards headscale's HTTP API alone, which is what lets the host's Tailscale join the in-cluster control plane. A client that could dial the relay directly would skip the adapter and leave the assertions that cover it untested.
 
 ## Deferred — Layer 3 phone-on-cellular
 

@@ -182,19 +182,35 @@ the second install; decide whether to reject such names here instead.
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-user" "prefix" true
   "command" (include "sycophant.userProvisionCommandName" .) "noun" "user" "action" "bind a framework user"
-  "keys" (list "user")
+  "keys" (list "user" "workspaces")
+  "keyPattern" `^handle\.[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+  "keyHelp" "handle.<channel>"
   "shape" `
 - expression: >-
     variables.suffix.matches('^[a-f0-9]{10}$')
   message: "a user command name must be provision-user-<handle> with a 10-character hex handle"
-# The installer prints the subject into a double-quoted YAML scalar, so a quote,
-# backslash, control character, or Unicode line or paragraph separator, any of
-# which escapes or folds that scalar, is refused. Same pattern as the user
-# chart's users schema.
+# A quote, backslash, control character, or Unicode line or paragraph
+# separator is refused in the subject. The renderers already escape these
+# (installer JSON, the user chart's quote function); the rule keeps them out
+# of the value whatever renders it.
 - expression: >-
     has(object.data) && 'user' in object.data &&
     object.data['user'].matches(r'^https?://[^#"\\\p{Cc}\x{2028}\x{2029}]+#[^"\\\p{Cc}\x{2028}\x{2029}]+$')
-  message: "a user command's 'user' must be an issuer-prefixed subject <issuer>#<sub> with no quote, backslash, control character, or line separator"` ) }}
+  message: "a user command's 'user' must be an issuer-prefixed subject <issuer>#<sub> with no quote, backslash, control character, or line separator"
+# The workspace list: a comma list of DNS-safe names, each at most 49
+# characters so the per-workspace objects the user release renders stay inside
+# the name limits.
+- expression: >-
+    !has(object.data) || !('workspaces' in object.data) ||
+    object.data['workspaces'].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(,[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$') &&
+    object.data['workspaces'].split(',').all(w, size(w) <= 49)
+  message: "a user command's 'workspaces' must be a comma list of DNS-safe names of at most 49 characters each"
+# Every handle value is that channel's own platform user ID. The same
+# defense-in-depth character rule as the subject applies: non-empty, no quote, backslash, or control character.
+- expression: >-
+    !has(object.data) || object.data.all(k, !k.startsWith('handle.') ||
+    (object.data[k] != '' && object.data[k].matches(r'^[^"\\\p{Cc}\x{2028}\x{2029}]+$')))
+  message: "each handle value in a user command must be a non-empty platform user ID with no quote, backslash, or control character"` ) }}
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-toolset" "prefix" true
   "command" (include "sycophant.toolsetProvisionCommandName" .) "noun" "toolset" "action" "install a toolset"

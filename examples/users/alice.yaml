@@ -1,4 +1,8 @@
-# Binds an issuer-prefixed subject, <issuer>#<sub>, in the tenant.
+# Binds an issuer-prefixed subject, <issuer>#<sub>, in the tenant: the
+# workspace list it reaches and its channel handle bindings.
 user:
   tenant: e2e-test
   subject: "https://127.0.0.1:30443/dex#alice"
+  workspaces: [hello-world]
+  handles:
+    slack: U0123ABCDEF

@@ -1,5 +1,8 @@
 use async_trait::async_trait;
 use k8s_openapi::api::authentication::v1::{TokenReview, TokenReviewSpec};
+use k8s_openapi::api::authorization::v1::{
+    ResourceAttributes, SubjectAccessReview, SubjectAccessReviewSpec,
+};
 use kube::api::PostParams;
 use kube::{Api, Client};
 use tonic::{Request, Status};
@@ -23,15 +26,18 @@ impl K8sTokenVerifier {
     }
 }
 
-/// Build the TokenReview that `K8sTokenVerifier::verify_token` would submit.
+/// Build a TokenReview for `token`, pinned to `audience` when one is given.
+/// A person token rides on an unpinned review: the apiserver's OIDC
+/// authenticator enforces the issuer audience at authentication time.
+///
 /// Pure function — separated from the API call so the spec construction
 /// (token + audiences) is unit-testable without a kube client.
-fn build_token_review(token: &str, audience: &str) -> TokenReview {
+fn build_token_review(token: &str, audience: Option<&str>) -> TokenReview {
     TokenReview {
         metadata: Default::default(),
         spec: TokenReviewSpec {
             token: Some(token.to_string()),
-            audiences: Some(vec![audience.to_string()]),
+            audiences: audience.map(|a| vec![a.to_string()]),
         },
         status: None,
     }
@@ -40,50 +46,18 @@ fn build_token_review(token: &str, audience: &str) -> TokenReview {
 #[async_trait]
 impl TokenVerifier for K8sTokenVerifier {
     async fn verify_token(&self, token: &str) -> Result<String, Status> {
-        let tr = build_token_review(token, &self.audience);
-        let token_reviews: Api<TokenReview> = Api::all(self.client.clone());
-        let result = token_reviews
-            .create(&PostParams::default(), &tr)
-            .await
-            .map_err(|e| Status::internal(format!("TokenReview API error: {e}")))?;
-
-        workspace_from_review(result, &self.audience)
+        let username = review_token_username(&self.client, token, Some(&self.audience)).await?;
+        workspace_from_username(&username)
     }
 }
 
-/// Extract the workspace name from a completed `TokenReview`.
+/// Map an authenticated ServiceAccount username to its workspace name.
 ///
-/// Pure function over the review payload — separated from the API call so the
-/// authentication decision logic is unit-testable without a kube client.
+/// Pure function — separated from the API call so the SA-name mapping is
+/// unit-testable without a kube client.
 #[allow(clippy::result_large_err)]
-fn workspace_from_review(review: TokenReview, expected_audience: &str) -> Result<String, Status> {
-    let status = review
-        .status
-        .ok_or_else(|| Status::internal("no TokenReview status"))?;
-    if !status.authenticated.unwrap_or(false) {
-        return Err(Status::permission_denied("invalid token"));
-    }
-
-    // Defense-in-depth: a non-audience-aware authenticator could return
-    // `authenticated=true` without checking audience. Require the apiserver to
-    // echo back our requested audience in `status.audiences` before trusting
-    // the verdict.
-    let audience_ok = status
-        .audiences
-        .as_ref()
-        .is_some_and(|auds| auds.iter().any(|a| a == expected_audience));
-    if !audience_ok {
-        return Err(Status::permission_denied("audience echo mismatch"));
-    }
-
-    let username = status
-        .user
-        .and_then(|u| u.username)
-        .ok_or_else(|| Status::internal("no username in TokenReview"))?;
-
-    let sa_name = username
-        .strip_prefix("system:serviceaccount:")
-        .and_then(|rest| rest.split_once(':'))
+fn workspace_from_username(username: &str) -> Result<String, Status> {
+    let sa_name = serviceaccount_from_username(username)
         .map(|(_, sa)| sa)
         .ok_or_else(|| Status::permission_denied("caller is not a ServiceAccount"))?;
 
@@ -104,6 +78,18 @@ pub fn extract_bearer_token<T>(request: &Request<T>) -> Result<&str, Status> {
         .map_err(|_| Status::permission_denied("invalid authorization encoding"))?
         .strip_prefix("Bearer ")
         .ok_or_else(|| Status::permission_denied("authorization must be Bearer token"))
+}
+
+/// The apiserver's username prefix for a ServiceAccount token:
+/// `system:serviceaccount:<namespace>:<name>`.
+const SERVICEACCOUNT_USERNAME_PREFIX: &str = "system:serviceaccount:";
+
+/// Split a ServiceAccount username `system:serviceaccount:<ns>:<name>` into
+/// `(namespace, name)`. `None` when `username` is not a ServiceAccount.
+pub fn serviceaccount_from_username(username: &str) -> Option<(&str, &str)> {
+    username
+        .strip_prefix(SERVICEACCOUNT_USERNAME_PREFIX)
+        .and_then(|rest| rest.split_once(':'))
 }
 
 /// Every workspace object name starts with this prefix. The harness pod's
@@ -207,6 +193,112 @@ pub const HARNESS_RELAY_TOKEN_PATH: &str = "/var/run/secrets/harness/relay/token
 /// when forwarding external `CallTool`/`WatchTools` calls.
 pub const RELAY_HARNESS_TOKEN_PATH: &str = "/var/run/secrets/relay/harness/token";
 
+/// Audience a channel adapter's SA token is minted for and the relay pins on
+/// TokenReview, per the `<sender>.<recipient>.sycophant.md` convention.
+pub const ADAPTER_RELAY_AUDIENCE: &str = "adapter.relay.sycophant.md";
+
+/// Build the SubjectAccessReview checking `subject` for `get` on the named
+/// workspace's harness Service in the relay's own namespace. The namespace is
+/// the relay's, never a caller-supplied one, so a request naming a workspace
+/// outside the tenant namespace finds a Service the caller holds no grant on.
+///
+/// Pure function — separated from the API call so the spec construction is
+/// unit-testable without a kube client.
+pub fn build_subject_access_review(
+    subject: &str,
+    workspace: &str,
+    namespace: &str,
+) -> SubjectAccessReview {
+    SubjectAccessReview {
+        metadata: Default::default(),
+        spec: SubjectAccessReviewSpec {
+            extra: None,
+            groups: None,
+            non_resource_attributes: None,
+            resource_attributes: Some(ResourceAttributes {
+                group: Some(String::new()),
+                name: Some(format!("{WORKSPACE_PREFIX}{workspace}")),
+                namespace: Some(namespace.to_string()),
+                resource: Some("services".to_string()),
+                subresource: None,
+                verb: Some("get".to_string()),
+                version: None,
+                field_selector: None,
+                label_selector: None,
+            }),
+            uid: None,
+            user: Some(subject.to_string()),
+        },
+        status: None,
+    }
+}
+
+/// Submit a TokenReview for `token` and return the raw authenticated username,
+/// without the SA-name→workspace mapping.
+///
+/// With `audience` set the review is pinned to it and the apiserver must echo
+/// it back in `status.audiences`, because a non-audience-aware authenticator
+/// could otherwise answer `authenticated=true` for a token minted elsewhere.
+/// With `None` (the person-token path) no audience is pinned.
+pub async fn review_token_username(
+    client: &Client,
+    token: &str,
+    audience: Option<&str>,
+) -> Result<String, Status> {
+    let tr = build_token_review(token, audience);
+    let token_reviews: Api<TokenReview> = Api::all(client.clone());
+    let result = token_reviews
+        .create(&PostParams::default(), &tr)
+        .await
+        .map_err(|e| Status::internal(format!("TokenReview API error: {e}")))?;
+
+    username_from_review(result, audience)
+}
+
+/// Extract the authenticated username from a completed `TokenReview`. With
+/// `expected_audience` set, the audience echo is required before trusting the
+/// verdict.
+///
+/// Pure function over the review payload — separated from the API call so the
+/// authentication decision logic is unit-testable without a kube client.
+#[allow(clippy::result_large_err)]
+fn username_from_review(
+    review: TokenReview,
+    expected_audience: Option<&str>,
+) -> Result<String, Status> {
+    let status = review
+        .status
+        .ok_or_else(|| Status::internal("no TokenReview status"))?;
+    if !status.authenticated.unwrap_or(false) {
+        return Err(Status::permission_denied("invalid token"));
+    }
+
+    // Defense-in-depth: a non-audience-aware authenticator could return
+    // `authenticated=true` without checking audience. Require the apiserver to
+    // echo back our requested audience in `status.audiences` before trusting
+    // the verdict.
+    if let Some(expected) = expected_audience {
+        let audience_ok = status
+            .audiences
+            .as_ref()
+            .is_some_and(|auds| auds.iter().any(|a| a == expected));
+        if !audience_ok {
+            return Err(Status::permission_denied("audience echo mismatch"));
+        }
+    }
+
+    let username = status
+        .user
+        .and_then(|u| u.username)
+        .ok_or_else(|| Status::internal("no username in TokenReview"))?;
+    if username.is_empty() {
+        return Err(Status::permission_denied(
+            "authenticated token carries no username",
+        ));
+    }
+    Ok(username)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,113 +370,99 @@ mod tests {
     }
 
     #[test]
-    fn workspace_from_review_unauthenticated_returns_permission_denied() {
+    fn pinned_review_unauthenticated_returns_permission_denied() {
         let review = review_with(
             Some(false),
             Some("system:serviceaccount:ns:ws-alice"),
             Some(vec![TEST_AUDIENCE]),
         );
-        let err = workspace_from_review(review, TEST_AUDIENCE).unwrap_err();
+        let err = username_from_review(review, Some(TEST_AUDIENCE)).unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
         assert!(err.message().contains("invalid token"));
     }
 
     #[test]
-    fn workspace_from_review_missing_authenticated_field_denies() {
+    fn pinned_review_missing_authenticated_field_denies() {
         // `authenticated: None` defaults to false via `unwrap_or(false)`.
         let review = review_with(
             None,
             Some("system:serviceaccount:ns:ws-alice"),
             Some(vec![TEST_AUDIENCE]),
         );
-        let err = workspace_from_review(review, TEST_AUDIENCE).unwrap_err();
+        let err = username_from_review(review, Some(TEST_AUDIENCE)).unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
 
-    /// The full review path, not only the prefix-strip helper.
+    /// The full username mapping, not only the prefix-strip helper.
     #[test]
-    fn workspace_from_review_unprivileged_subject_resolves_workspace() {
-        let review = review_with(
-            Some(true),
-            Some("system:serviceaccount:ns:ws-hello-world-unprivileged"),
-            Some(vec![TEST_AUDIENCE]),
-        );
-        let ws = workspace_from_review(review, TEST_AUDIENCE).unwrap();
+    fn workspace_from_username_unprivileged_subject_resolves_workspace() {
+        let ws = workspace_from_username("system:serviceaccount:ns:ws-hello-world-unprivileged")
+            .unwrap();
         assert_eq!(ws, "hello-world");
     }
 
     #[test]
-    fn workspace_from_review_harness_subject_resolves_workspace() {
-        let review = review_with(
-            Some(true),
-            Some("system:serviceaccount:ns:ws-hello-world"),
-            Some(vec![TEST_AUDIENCE]),
-        );
-        let ws = workspace_from_review(review, TEST_AUDIENCE).unwrap();
+    fn workspace_from_username_harness_subject_resolves_workspace() {
+        let ws = workspace_from_username("system:serviceaccount:ns:ws-hello-world").unwrap();
         assert_eq!(ws, "hello-world");
     }
 
     #[test]
-    fn workspace_from_review_authenticated_non_workspace_sa_denies() {
-        let review = review_with(
-            Some(true),
-            Some("system:serviceaccount:ns:default"),
-            Some(vec![TEST_AUDIENCE]),
-        );
-        let err = workspace_from_review(review, TEST_AUDIENCE).unwrap_err();
+    fn workspace_from_username_non_workspace_sa_denies() {
+        let err = workspace_from_username("system:serviceaccount:ns:default").unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
         assert!(err.message().contains("not a workspace SA"));
     }
 
     #[test]
-    fn workspace_from_review_no_status_is_internal_error() {
+    fn pinned_review_no_status_is_internal_error() {
         let review = TokenReview {
             metadata: Default::default(),
             spec: TokenReviewSpec::default(),
             status: None,
         };
-        let err = workspace_from_review(review, TEST_AUDIENCE).unwrap_err();
+        let err = username_from_review(review, Some(TEST_AUDIENCE)).unwrap_err();
         assert_eq!(err.code(), tonic::Code::Internal);
     }
 
     #[test]
-    fn workspace_from_review_rejects_missing_audiences_echo() {
+    fn pinned_review_rejects_missing_audiences_echo() {
         let review = review_with(
             Some(true),
             Some("system:serviceaccount:ns:ws-hello-world"),
             None,
         );
-        let err = workspace_from_review(review, TEST_AUDIENCE).unwrap_err();
+        let err = username_from_review(review, Some(TEST_AUDIENCE)).unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
         assert!(err.message().contains("audience echo mismatch"));
     }
 
     #[test]
-    fn workspace_from_review_rejects_empty_audiences_echo() {
+    fn pinned_review_rejects_empty_audiences_echo() {
         let review = review_with(
             Some(true),
             Some("system:serviceaccount:ns:ws-hello-world"),
             Some(vec![]),
         );
-        let err = workspace_from_review(review, TEST_AUDIENCE).unwrap_err();
+        let err = username_from_review(review, Some(TEST_AUDIENCE)).unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
         assert!(err.message().contains("audience echo mismatch"));
     }
 
     #[test]
-    fn workspace_from_review_rejects_audiences_echo_without_requested() {
+    fn pinned_review_rejects_audiences_echo_without_requested() {
         let review = review_with(
             Some(true),
             Some("system:serviceaccount:ns:ws-hello-world"),
             Some(vec!["unrelated.sycophant.md", "other.example.com"]),
         );
-        let err = workspace_from_review(review, TEST_AUDIENCE).unwrap_err();
+        let err = username_from_review(review, Some(TEST_AUDIENCE)).unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
         assert!(err.message().contains("audience echo mismatch"));
     }
 
     #[test]
-    fn workspace_from_review_accepts_audiences_echo_containing_requested() {
+    fn pinned_review_accepts_audiences_echo_containing_requested() {
         // Multi-audience echo with the requested audience among others — must
         // succeed (catches a future mutant that flips `any` → strict equality).
         let review = review_with(
@@ -392,13 +470,13 @@ mod tests {
             Some("system:serviceaccount:ns:ws-hello-world"),
             Some(vec!["other.example.com", TEST_AUDIENCE]),
         );
-        let ws = workspace_from_review(review, TEST_AUDIENCE).unwrap();
-        assert_eq!(ws, "hello-world");
+        let username = username_from_review(review, Some(TEST_AUDIENCE)).unwrap();
+        assert_eq!(username, "system:serviceaccount:ns:ws-hello-world");
     }
 
     #[test]
     fn build_token_review_includes_toolset_toolset_audience() {
-        let tr = build_token_review("the-token", TOOL_TOOLSET_AUDIENCE);
+        let tr = build_token_review("the-token", Some(TOOL_TOOLSET_AUDIENCE));
         assert_eq!(
             tr.spec.audiences,
             Some(vec![TOOL_TOOLSET_AUDIENCE.to_string()]),
@@ -409,7 +487,7 @@ mod tests {
 
     #[test]
     fn build_token_review_includes_harness_relay_audience() {
-        let tr = build_token_review("the-token", HARNESS_RELAY_AUDIENCE);
+        let tr = build_token_review("the-token", Some(HARNESS_RELAY_AUDIENCE));
         assert_eq!(
             tr.spec.audiences,
             Some(vec![HARNESS_RELAY_AUDIENCE.to_string()]),
@@ -425,6 +503,7 @@ mod tests {
             TOOL_TOOLSET_AUDIENCE,
             RELAY_HARNESS_AUDIENCE,
             HARNESS_RELAY_AUDIENCE,
+            ADAPTER_RELAY_AUDIENCE,
         ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {
@@ -435,7 +514,54 @@ mod tests {
 
     #[test]
     fn build_token_review_includes_token() {
-        let tr = build_token_review("the-token", TOOL_TOOLSET_AUDIENCE);
+        let tr = build_token_review("the-token", Some(TOOL_TOOLSET_AUDIENCE));
         assert_eq!(tr.spec.token, Some("the-token".to_string()));
+    }
+
+    // --- Person-token reviews and the username they yield ---
+
+    #[test]
+    fn subject_review_targets_the_service_in_the_relay_namespace() {
+        let sar =
+            build_subject_access_review("https://issuer.example#alice", "beta", "tenant-acme");
+        assert_eq!(
+            sar.spec.user.as_deref(),
+            Some("https://issuer.example#alice")
+        );
+        let ra = sar.spec.resource_attributes.expect("must carry attributes");
+        assert_eq!(ra.verb.as_deref(), Some("get"));
+        assert_eq!(ra.resource.as_deref(), Some("services"));
+        assert_eq!(ra.name.as_deref(), Some("ws-beta"));
+        assert_eq!(ra.namespace.as_deref(), Some("tenant-acme"));
+        // Identity maps as username only: no groups, no uid, no extra.
+        assert!(sar.spec.groups.is_none());
+        assert!(sar.spec.uid.is_none());
+        assert!(sar.spec.extra.is_none());
+    }
+
+    #[test]
+    fn unpinned_review_carries_no_audiences() {
+        let tr = build_token_review("the-token", None);
+        assert_eq!(tr.spec.token, Some("the-token".to_string()));
+        assert!(
+            tr.spec.audiences.is_none(),
+            "the person-token review pins no audience"
+        );
+    }
+
+    #[test]
+    fn username_from_review_returns_the_raw_username() {
+        let review = review_with(Some(true), Some("https://issuer.example#alice"), None);
+        assert_eq!(
+            username_from_review(review, None).unwrap(),
+            "https://issuer.example#alice"
+        );
+    }
+
+    #[test]
+    fn username_from_review_empty_username_denies() {
+        let review = review_with(Some(true), Some(""), None);
+        let err = username_from_review(review, None).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
 }
