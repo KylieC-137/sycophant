@@ -52,6 +52,10 @@ spec:
       expression: '"{{ include "sycophant.tenantNsPrefix" . }}" + object.data["tenant"]'
     - name: capacity
       expression: 'object.data["capacity"]'
+    - name: owner
+      expression: 'object.data["owner"]'
+    - name: ownerHash
+      expression: 'object.data["owner-hash"]'
   generate:
     - template:
         interpolate: cel
@@ -60,12 +64,15 @@ spec:
           kind: Namespace
           metadata:
             name: (( variables.tenant ))
+            annotations:
+              sycophant.md/owner: (( variables.owner ))
             labels:
               {{- include "sycophant.baseLabels" . | nindent 14 }}
               app.kubernetes.io/part-of: sycophant-tenant
               pod-security.kubernetes.io/enforce: restricted
               pod-security.kubernetes.io/warn: restricted
               pod-security.kubernetes.io/audit: restricted
+              sycophant.md/owner: (( variables.ownerHash ))
           ---
           apiVersion: v1
           kind: ResourceQuota

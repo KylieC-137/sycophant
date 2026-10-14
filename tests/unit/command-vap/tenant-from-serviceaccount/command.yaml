@@ -9,3 +9,5 @@ metadata:
 data:
   tenant: acme
   capacity: 2Gi
+  owner: "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#operator"
+  owner-hash: "027164b38d531173"

@@ -56,6 +56,19 @@ spec:
         has(request.userInfo.username) &&
         request.userInfo.username.startsWith('{{ include "sycophant.idpUserPrefix" $ctx }}')
       message: "a {{ .noun }} command is admitted only for an issuer-prefixed user identity; standing cluster credentials cannot {{ .action }}"
+    {{- if .system }}
+    - expression: >-
+        has(object.data) && 'owner' in object.data &&
+        object.data['owner'].startsWith('{{ include "sycophant.idpUserPrefix" $ctx }}')
+      message: "a provision command must carry an 'owner' that starts with the IdP issuer prefix"
+    {{- end }}
+    {{- if not .system }}
+    - expression: >-
+        namespaceObject.metadata.?annotations['sycophant.md/owner'].orValue('') == '' ||
+        (has(request.userInfo.username) &&
+         request.userInfo.username == namespaceObject.metadata.annotations['sycophant.md/owner'])
+      message: "a {{ .noun }} command is admitted only for the tenant owner recorded in the namespace's sycophant.md/owner annotation"
+    {{- end }}
     {{- $known := printf "k in %s" (.keys | toJson | replace "\"" "'") }}
     {{- if .keyPattern }}{{ $known = printf "(%s || k.matches(r'%s'))" $known .keyPattern }}{{ end }}
     - expression: >-
@@ -102,7 +115,7 @@ the second install; decide whether to reject such names here instead.
 */ -}}
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-tenant" "system" true
   "command" (include "sycophant.provisionCommandName" .) "noun" "provision" "action" "provision"
-  "keys" (list "tenant" "capacity")
+  "keys" (list "tenant" "capacity" "owner" "owner-hash")
   "shape" `
 - expression: >-
     has(object.data) && 'tenant' in object.data &&
@@ -112,7 +125,11 @@ the second install; decide whether to reject such names here instead.
 - expression: >-
     has(object.data) && 'capacity' in object.data &&
     isQuantity(object.data['capacity'])
-  message: "a provision command must carry a valid 'capacity' quantity"` ) }}
+  message: "a provision command must carry a valid 'capacity' quantity"
+- expression: >-
+    has(object.data) && 'owner-hash' in object.data &&
+    object.data['owner-hash'].matches('^[a-f0-9]{16}$')
+  message: "a provision command must carry an 'owner-hash' that is 16 lowercase hex characters"` ) }}
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-workspace" "prefix" true
   "command" (include "sycophant.workspaceProvisionCommandName" .) "noun" "workspace" "action" "mint a workspace"

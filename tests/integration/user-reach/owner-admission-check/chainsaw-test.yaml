@@ -1,0 +1,109 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: owner-admission-check
+spec:
+  description: >
+    The owner recorded in the namespace's sycophant.md/owner annotation is the
+    only issuer-prefixed identity that may write tenant-namespace commands.
+    A non-owner with ConfigMap create RBAC is denied by the VAP.
+  timeouts:
+    exec: 120s
+    assert: 60s
+  bindings:
+    - name: tenant_ns
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
+  steps:
+    - name: create-tenant-ns-with-owner
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -eu
+              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+              OWNER="${ISSUER}#operator"
+              OWNER_HASH=$(printf '%s' "$OWNER" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-16)
+              cat <<EOF | kubectl apply -f -
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: $TENANT_NS
+                labels:
+                  app.kubernetes.io/part-of: sycophant-tenant
+                  pod-security.kubernetes.io/enforce: restricted
+                  pod-security.kubernetes.io/enforce-version: latest
+                  pod-security.kubernetes.io/warn: restricted
+                  pod-security.kubernetes.io/audit: restricted
+                  sycophant.md/owner: "$OWNER_HASH"
+                annotations:
+                  sycophant.md/owner: "$OWNER"
+              EOF
+      cleanup:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Namespace
+              name: ($tenant_ns)
+    - name: grant-owner-and-nonowner-write
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -eu
+              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+              # Owner gets configmap create
+              kubectl create role owner-writer -n "$TENANT_NS" --verb=create --resource=configmaps
+              kubectl create rolebinding owner-writer -n "$TENANT_NS" --role=owner-writer --user="${ISSUER}#operator"
+              # Non-owner also gets configmap create
+              kubectl create rolebinding nonowner-writer -n "$TENANT_NS" --role=owner-writer --user="${ISSUER}#mallory"
+      cleanup:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              kubectl delete rolebinding,role owner-writer nonowner-writer -n "$TENANT_NS" --ignore-not-found
+    - name: owner-writes-a-workspace-command
+      try:
+        - script:
+            timeout: 30s
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -eu
+              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+              kubectl create configmap provision-workspace-ownertest -n "$TENANT_NS" \
+                --from-literal=toolsets=stdlib \
+                --dry-run=client -o yaml \
+                | kubectl label --local -f - -o yaml \
+                    app.kubernetes.io/part-of=sycophant sycophant.md/command=true \
+                | kubectl create --as="${ISSUER}#operator" -f - >/dev/null
+              kubectl delete configmap provision-workspace-ownertest -n "$TENANT_NS" --ignore-not-found >/dev/null
+              true
+    - name: nonowner-denied-a-workspace-command
+      try:
+        - script:
+            timeout: 30s
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -eu
+              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+              err=$(kubectl create configmap provision-workspace-mallorytest -n "$TENANT_NS" \
+                --from-literal=toolsets=stdlib \
+                --dry-run=client -o yaml \
+                | kubectl label --local -f - -o yaml \
+                    app.kubernetes.io/part-of=sycophant sycophant.md/command=true \
+                | kubectl create --as="${ISSUER}#mallory" -f - 2>&1 >/dev/null) && {
+                echo "non-owner mallory was admitted"; exit 1; }
+              case "$err" in
+                *"tenant owner"*) ;;
+                *) echo "denied, but not by the owner check: $err"; exit 1 ;;
+              esac
+              true

@@ -61,7 +61,7 @@ want = ("provision-workspace-hello-world", "tenant-acme", {
 check("workspace values flatten to command data", summary("workspace-provision") == want,
       f"got: {summary('workspace-provision')}")
 
-want = ("provision-tenant", "sycophant-system", {"tenant": "acme", "capacity": "2Gi"})
+want = ("provision-tenant", "sycophant-system", {"tenant": "acme", "capacity": "2Gi", "owner": "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#operator", "owner-hash": "027164b38d531173"})
 check("tenant values flatten to command data", summary("tenant-provision") == want,
       f"got: {summary('tenant-provision')}")
 
@@ -155,6 +155,9 @@ expect tenant-from-serviceaccount provision-tenant issuer-prefixed
 expect tenant-token-at-cap provision-tenant ""
 expect tenant-token-over-cap provision-tenant "at most 46"
 expect tenant-missing-capacity provision-tenant capacity
+expect tenant-missing-owner provision-tenant owner
+expect tenant-missing-owner-hash provision-tenant owner-hash
+expect tenant-bad-owner-hash provision-tenant owner-hash
 expect tenant-values-key provision-tenant "'values'"
 expect inference-commands provision-inference-deepseek ""
 expect inference-commands provision-inference-format format

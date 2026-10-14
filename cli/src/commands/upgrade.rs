@@ -232,10 +232,11 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
 
     if !plans.is_empty() {
         let op = Operator::login(&scope.oidc_dir())?;
+        let identity = &op.kubeconfig()?.identity;
         for (ns, capacity) in &plans {
             step(&format!("Re-provisioning tenant `{ns}`"));
             let tenant = Scope::for_tenant(ns)?;
-            let manifest = up::tenant_manifest(&tenant, capacity)?;
+            let manifest = up::tenant_manifest(&tenant, capacity, identity)?;
             up::provision(&tenant, &op, &manifest, capacity)?;
             ok(&format!("tenant `{ns}` re-provisioned"));
         }

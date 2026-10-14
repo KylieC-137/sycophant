@@ -103,13 +103,9 @@ Sycophant runs on any conformant Kubernetes cluster. It relies on three cluster 
 
 ## Local development
 
-The local target is a k3d cluster. To exercise the full stack end to end:
+`make` with no arguments lists every target. The local target is a k3d cluster.
 
-```sh
-OPENROUTER_API_KEY=... scripts/e2e.sh
-```
-
-This spins up a clean k3d cluster, builds and loads all images, deploys the Helm charts, and runs the security assertions. Charts live under [`charts/`](charts/) (`sycophant-quickstart` is the install bundle). Per-component design docs live under [`docs/`](docs/): [toolset](docs/toolset.md), [harness](docs/harness.md), [relay](docs/relay.md), and [secrets](docs/secrets.md).
+Charts live under [`charts/`](charts/) (`sycophant-quickstart` is the install bundle). Per-component design docs live under [`docs/`](docs/): [toolset](docs/toolset.md), [harness](docs/harness.md), [relay](docs/relay.md), and [secrets](docs/secrets.md).
 
 ## Security
 

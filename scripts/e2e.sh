@@ -2056,9 +2056,16 @@ prove_gate() {
   printf '%s' "$err" | grep -qi "command-provision-${kind}" \
     || { warn "SA ${kind} provision command was refused, but not by the ${kind} identity VAP: ${err}"; exit 1; }
   ok "a standing ServiceAccount credential cannot write a ${kind} provision command"
-  kubectl --kubeconfig="$op_kube" create --dry-run=server -f "$file" >/dev/null \
-    || { warn "the ${kind} VAP refused an IdP identity Dex never signed"; exit 1; }
-  ok "${kind} provision command admitted for an IdP identity Dex never signed"
+  # The tenant provision command lives in sycophant-system (no owner
+  # annotation), so a second-issuer identity is admitted. Tenant-namespace
+  # commands carry an owner check: the dry-run identity must match the
+  # namespace's owner, and only the Dex operator is the owner, so the
+  # second-issuer admit check is skipped for those kinds.
+  if [ "$kind" = "tenant" ]; then
+    kubectl --kubeconfig="$op_kube" create --dry-run=server -f "$file" >/dev/null \
+      || { warn "the ${kind} VAP refused an IdP identity Dex never signed"; exit 1; }
+    ok "${kind} provision command admitted for an IdP identity Dex never signed"
+  fi
 }
 
 # The lifecycle workspace's harness pod name and Deployment generation, which a
@@ -2131,8 +2138,11 @@ verify_tenant_lifecycle() {
     "kubectl --kubeconfig='$op_kube' auth whoami -o jsonpath='{.status.userInfo.username}' 2>/dev/null | grep -qFx '$operator_identity'" \
     || { warn "operator token did not authenticate as ${operator_identity}"; exit 1; }
 
+  local owner_hash
+  owner_hash="$(printf '%s' "$operator_identity" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-16)"
   local tenant_values=(-f "$REPO_ROOT/examples/tenants/e2e-test.yaml"
-    --set "tenant.name=$LIFECYCLE_TENANT_TOKEN" --set tenant.capacity=512Mi)
+    --set "tenant.name=$LIFECYCLE_TENANT_TOKEN" --set tenant.capacity=512Mi
+    --set "tenant.owner=$operator_identity" --set "tenant.ownerHash=$owner_hash")
   prove_gate tenant "${tenant_values[@]}"
 
   # The operator's real path: syco writes the tenant provision command under its

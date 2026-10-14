@@ -29,6 +29,16 @@ spec:
         'pod-security.kubernetes.io/enforce' in object.metadata.labels &&
         object.metadata.labels['pod-security.kubernetes.io/enforce'] == 'restricted'
       message: "a sycophant-tenant namespace must set pod-security.kubernetes.io/enforce=restricted"
+    - expression: >-
+        request.operation != 'UPDATE' ||
+        object.metadata.?annotations['sycophant.md/owner'].orValue('') ==
+        oldObject.metadata.?annotations['sycophant.md/owner'].orValue('')
+      message: "the sycophant.md/owner annotation on a tenant namespace is immutable after creation"
+    - expression: >-
+        request.operation != 'UPDATE' ||
+        object.metadata.?labels['sycophant.md/owner'].orValue('') ==
+        oldObject.metadata.?labels['sycophant.md/owner'].orValue('')
+      message: "the sycophant.md/owner label on a tenant namespace is immutable after creation"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
