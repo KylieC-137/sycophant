@@ -95,6 +95,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl patch configmap user-0a1b2c3d4e -n "$TENANT_NS" --type=merge \
                 -p '{"data":{"workspaces":"alpha,beta,gamma"}}' \
                 --as="system:serviceaccount:${TENANT_NS}:attacker"
@@ -108,6 +109,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl patch configmap user-0a1b2c3d4e -n "$TENANT_NS" --type=merge \
                 -p '{"data":{"handle.slack":"attacker"}}' \
                 --as="system:serviceaccount:${TENANT_NS}:relay-controller"
@@ -121,6 +123,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl delete configmap user-0a1b2c3d4e -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:attacker"
             check:
@@ -133,6 +136,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               cat <<MANIFEST | kubectl apply --as="system:serviceaccount:${TENANT_NS}:attacker" -n "$TENANT_NS" -f -
               apiVersion: v1
               kind: ConfigMap
@@ -154,6 +158,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl patch configmap user-0a1b2c3d4e -n "$TENANT_NS" --type=merge \
                 -p '{"data":{"handle.email":"alice@example.com"}}'
             check:

@@ -12,10 +12,11 @@ spec:
       try:
         - script:
             content: |
+              set -euo pipefail
               REPO_ROOT=$(git rev-parse --show-toplevel)
               err=$(helm template probe "$REPO_ROOT/charts/sycophant-cluster" \
                 -n sycophant-system 2>&1)
-              rc=$?
+               && rc=0 || rc=$?
               [ "$rc" -ne 0 ] \
                 || { echo "missing Kyverno CRDs must fail render, got rc=0"; printf '%s\n' "$err" >&2; exit 1; }
               printf '%s' "$err" | grep -q 'policies.kyverno.io/v1/ValidatingPolicy' \

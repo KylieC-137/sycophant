@@ -57,7 +57,7 @@ spec:
               - name: TOKEN
                 value: ($token)
             content: |
-              set -eu
+              set -euo pipefail
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
               UID_=$(kubectl create configmap provision-tenant -n sycophant-system \
                 --from-literal=tenant="$TOKEN" --from-literal=capacity=2Gi \
@@ -114,6 +114,7 @@ spec:
               - name: TOKEN
                 value: ($token)
             content: |
+              set -euo pipefail
               NAME=$(kubectl get rolebinding -n "tenant-${TOKEN}" -l app.kubernetes.io/component=provision-tenant \
                 -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
               kubectl delete configmap provision-tenant -n sycophant-system --ignore-not-found

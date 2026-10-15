@@ -21,6 +21,7 @@ spec:
         # operator namespace, so the test must never delete it on cleanup.
         - script:
             content: |
+              set -euo pipefail
               kubectl get namespace sycophant-system >/dev/null 2>&1 \
                 || kubectl create namespace sycophant-system
     - name: seed-capability-grants
@@ -40,6 +41,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:ws-probe" -n "$TENANT_NS" -f -
               apiVersion: batch/v1
               kind: Job
@@ -90,6 +92,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:ws-probe" -n "$TENANT_NS" -f -
               apiVersion: batch/v1
               kind: Job
@@ -138,6 +141,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               cat <<MANIFEST | kubectl create --as="system:serviceaccount:${TENANT_NS}:ws-probe" -n "$TENANT_NS" -f -
               apiVersion: batch/v1
               kind: Job
@@ -164,6 +168,7 @@ spec:
               - name: OPERATOR_NS
                 value: ($operator_ns)
             content: |
+              set -euo pipefail
               kubectl delete policyexception.policies.kyverno.io allow-capability-job-shape \
                 -n "$OPERATOR_NS" --ignore-not-found
         - script:
@@ -171,4 +176,5 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

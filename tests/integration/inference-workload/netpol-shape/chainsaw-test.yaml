@@ -18,7 +18,9 @@ spec:
         env:
           - name: TENANT_NS
             value: ($tenant_ns)
-        content: kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
+        content: |
+          set -euo pipefail
+          kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
   steps:
     - name: render-and-apply-the-inference-policy
       try:
@@ -27,7 +29,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -e
+              set -euo pipefail
               kubectl create namespace "$TENANT_NS"
               REPO_ROOT=$(git rev-parse --show-toplevel)
               COMMAND=$(cat "$REPO_ROOT/tests/integration/fixtures/model-inference-local.json")
@@ -91,4 +93,5 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

@@ -36,7 +36,9 @@ spec:
         env:
           - name: TENANT_NS
             value: ($tenant_ns)
-        content: kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
+        content: |
+          set -euo pipefail
+          kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
   steps:
     - name: create-tenant-ns-and-apply-floor
       try:
@@ -45,7 +47,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -e
+              set -euo pipefail
               kubectl create namespace "$TENANT_NS"
               REPO_ROOT=$(git rev-parse --show-toplevel)
               helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
@@ -82,4 +84,5 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

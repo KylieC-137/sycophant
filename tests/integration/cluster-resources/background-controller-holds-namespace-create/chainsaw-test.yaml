@@ -9,6 +9,7 @@ spec:
       try:
         - script:
             content: |
+              set -euo pipefail
               out=$(helm template probe "$(git rev-parse --show-toplevel)/charts/sycophant-cluster" -n sycophant-system \
                 --api-versions policies.kyverno.io/v1/ValidatingPolicy 2>&1) || { printf '%s\n' "$out" >&2; exit 1; }
 

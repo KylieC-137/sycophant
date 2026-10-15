@@ -25,7 +25,7 @@ spec:
           - name: EXPECT
             value: ($expect)
         content: |
-          set -u
+          set -euo pipefail
           ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
           USER_SUB="${ISSUER}#${SUB}"
           HASH=$(printf '%s' "$USER_SUB" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
@@ -37,7 +37,7 @@ spec:
             | kubectl label --local -f - -o yaml \
                 app.kubernetes.io/part-of=sycophant sycophant.md/command=true \
             | kubectl create --as="${ISSUER}#${WRITER}" -f - 2>&1 >/dev/null)
-          rc=$?
+           && rc=0 || rc=$?
           case "$EXPECT" in
             admitted)
               [ "$rc" -eq 0 ] || { echo "user command for $SUB refused: $err"; exit 1; } ;;

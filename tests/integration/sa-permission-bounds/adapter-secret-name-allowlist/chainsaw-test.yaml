@@ -81,6 +81,7 @@ spec:
               - name: FOREIGN_NS
                 value: ($foreign_ns)
             content: |
+              set -euo pipefail
               kubectl create secret generic adapter-state \
                 --from-literal=state=fake -n "$TENANT_NS" \
                 --as="system:serviceaccount:${FOREIGN_NS}:adapter-app"
@@ -94,6 +95,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl create secret generic adapter-state \
                 --from-literal=state=fake -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:adapter-app"
@@ -106,6 +108,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl create secret generic adapter-telegram-state \
                 --from-literal=state=fake -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:adapter-app"
@@ -119,6 +122,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               cat <<EOF | kubectl create -f - -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:adapter-app"
               apiVersion: v1
@@ -139,6 +143,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl create secret generic cluster-admin-secret \
                 --from-literal=k=v -n "$TENANT_NS"
             check:

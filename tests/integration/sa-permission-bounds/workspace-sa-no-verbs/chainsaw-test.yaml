@@ -17,6 +17,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl create namespace "$TENANT_NS"
     - name: setup-workspace-sa
       try:
@@ -37,6 +38,7 @@ spec:
               - name: WS_SA
                 value: ($ws_sa)
             content: |
+              set -euo pipefail
               kubectl auth whoami -o jsonpath='{.status.userInfo.username}' \
                 --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
             check:
@@ -51,6 +53,7 @@ spec:
               - name: WS_SA
                 value: ($ws_sa)
             content: |
+              set -euo pipefail
               kubectl get secrets -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
             check:
@@ -65,6 +68,7 @@ spec:
               - name: WS_SA
                 value: ($ws_sa)
             content: |
+              set -euo pipefail
               kubectl get secrets -A \
                 --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
             check:
@@ -79,6 +83,7 @@ spec:
               - name: WS_SA
                 value: ($ws_sa)
             content: |
+              set -euo pipefail
               kubectl get secrets -n sycophant-system \
                 --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
             check:
@@ -93,6 +98,7 @@ spec:
               - name: WS_SA
                 value: ($ws_sa)
             content: |
+              set -euo pipefail
               kubectl get pods -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
             check:
@@ -107,6 +113,7 @@ spec:
               - name: WS_SA
                 value: ($ws_sa)
             content: |
+              set -euo pipefail
               kubectl get pods -A \
                 --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
             check:
@@ -121,6 +128,7 @@ spec:
               - name: WS_SA
                 value: ($ws_sa)
             content: |
+              set -euo pipefail
               kubectl get --raw="/api/v1/namespaces/${TENANT_NS}/pods/x/log" \
                 --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
             check:
@@ -135,6 +143,7 @@ spec:
               - name: WS_SA
                 value: ($ws_sa)
             content: |
+              set -euo pipefail
               kubectl exec -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:${WS_SA}" \
                 any-pod -- echo hi
@@ -150,6 +159,7 @@ spec:
               - name: WS_SA
                 value: ($ws_sa)
             content: |
+              set -euo pipefail
               kubectl patch pod x -n "$TENANT_NS" \
                 --subresource=ephemeralcontainers --type=strategic \
                 -p='{"spec":{"ephemeralContainers":[]}}' \
@@ -166,6 +176,7 @@ spec:
               - name: WS_SA
                 value: ($ws_sa)
             content: |
+              set -euo pipefail
               kubectl run probe -n "$TENANT_NS" \
                 --image=registry.k8s.io/pause:3.9 \
                 --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
@@ -181,6 +192,7 @@ spec:
               - name: WS_SA
                 value: ($ws_sa)
             content: |
+              set -euo pipefail
               kubectl create job probe -n "$TENANT_NS" \
                 --image=registry.k8s.io/pause:3.9 \
                 --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
@@ -196,6 +208,7 @@ spec:
               - name: WS_SA
                 value: ($ws_sa)
             content: |
+              set -euo pipefail
               kubectl create secret generic probe \
                 --from-literal=k=v -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:${WS_SA}"
@@ -208,4 +221,5 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

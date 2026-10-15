@@ -45,7 +45,7 @@ spec:
       try:
         - script:
             content: |
-              set -e
+              set -euo pipefail
               kubectl get clusterrole provision-write -o json | python3 -c '
               import json, sys
               reads = {"get", "list", "watch"}
@@ -71,6 +71,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl auth can-i get secrets -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:provision-probe"
             check:
@@ -83,6 +84,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl auth can-i create secrets -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:provision-probe"
             check:
@@ -95,6 +97,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl create deployment chainsaw-probe \
                 --image=registry.k8s.io/pause:3.9 -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:provision-probe"
@@ -107,6 +110,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl create deployment chainsaw-probe \
                 --image=registry.k8s.io/pause:3.9 -n default \
                 --as="system:serviceaccount:${TENANT_NS}:provision-probe"
@@ -120,6 +124,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl create deployment chainsaw-probe \
                 --image=registry.k8s.io/pause:3.9 -n kube-system \
                 --as="system:serviceaccount:${TENANT_NS}:provision-probe"

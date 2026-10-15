@@ -8,9 +8,16 @@
 # which must be on your PATH (most modern shells include it by default).
 set -euo pipefail
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly REPO_ROOT
+source "$REPO_ROOT/lib/shell.sh"
+
 CHAINSAW_VERSION="${CHAINSAW_VERSION:-0.2.15}"
+readonly CHAINSAW_VERSION
 KYVERNO_CLI_VERSION="${KYVERNO_CLI_VERSION:-1.19.1}"
+readonly KYVERNO_CLI_VERSION
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
+readonly BIN_DIR
 
 mkdir -p "$BIN_DIR"
 

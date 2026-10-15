@@ -7,11 +7,9 @@
 #   bash tests/unit/command-vap/acceptance.sh
 set -uo pipefail
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$HERE/../../.." && pwd)"
-
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly HERE
+source "$HERE/../lib.sh"
 cp -R "$HERE/." "$WORK/"
 
 helm template c "$ROOT/charts/sycophant-cluster" -n kyverno \
@@ -123,10 +121,6 @@ yaml.safe_dump({"apiVersion": "cli.kyverno.io/v1alpha1", "kind": "Test",
                open(os.path.join(case, "kyverno-test.yaml"), "w"))
 PY
 
-pass=0
-fail=0
-ok()  { pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
-bad() { fail=$((fail+1)); printf 'FAIL %s\n    %s\n' "$1" "$2"; }
 
 results() {
   [ -f "$WORK/$1.json" ] || kyverno test "$WORK/$1" -o json --detailed-results --remove-color 2>/dev/null \
@@ -223,5 +217,4 @@ PY
 )"
 if [ -z "$open" ]; then ok "every command VAP fails closed"; else bad "every command VAP fails closed" "$open"; fi
 
-printf '\n%d passed, %d failed\n' "$pass" "$fail"
-[ "$fail" -eq 0 ]
+summary

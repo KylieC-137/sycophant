@@ -41,6 +41,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               cat <<MANIFEST | kubectl apply --as="system:serviceaccount:${TENANT_NS}:attacker" -n "$TENANT_NS" -f -
               apiVersion: v1
               kind: ServiceAccount

@@ -15,6 +15,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               cat <<EOF | kubectl apply -f - 2>&1
               apiVersion: v1
               kind: Namespace
@@ -33,6 +34,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               cat <<EOF | kubectl apply -f -
               apiVersion: v1
               kind: Namespace
@@ -53,6 +55,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
   catch:
     - script:
@@ -60,4 +63,5 @@ spec:
           - name: TENANT_NS
             value: ($tenant_ns)
         content: |
+          set -euo pipefail
           kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

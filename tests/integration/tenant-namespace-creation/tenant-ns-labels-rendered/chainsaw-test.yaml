@@ -27,7 +27,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -e
+              set -euo pipefail
               REPO_ROOT=$(git rev-parse --show-toplevel)
               helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
                 --show-only templates/tenant-ns.yaml \
@@ -54,6 +54,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               REPO_ROOT=$(git rev-parse --show-toplevel)
               out=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-tenant" \
                 --show-only templates/tenant-ns.yaml \
@@ -71,6 +72,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
   catch:
     - script:
@@ -78,4 +80,5 @@ spec:
           - name: TENANT_NS
             value: ($tenant_ns)
         content: |
+          set -euo pipefail
           kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

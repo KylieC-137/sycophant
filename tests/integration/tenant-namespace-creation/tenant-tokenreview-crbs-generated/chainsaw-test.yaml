@@ -53,6 +53,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl create namespace "$TENANT_NS"
               kubectl label namespace "$TENANT_NS" \
                 app.kubernetes.io/part-of=sycophant-tenant \
@@ -68,6 +69,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               for i in $(seq 1 240); do
                 if kubectl get clusterrolebinding \
                      "${TENANT_NS}-relay-tokenreview" \
@@ -138,6 +140,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=true
               kubectl delete clusterrolebinding \
                 "${TENANT_NS}-relay-tokenreview" \
@@ -150,6 +153,7 @@ spec:
           - name: TENANT_NS
             value: ($tenant_ns)
         content: |
+          set -euo pipefail
           kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=true
           kubectl delete clusterrolebinding \
             "${TENANT_NS}-relay-tokenreview" \

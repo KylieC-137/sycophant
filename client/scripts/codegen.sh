@@ -13,10 +13,15 @@
 # Prereqs: `dart pub global activate protoc_plugin` and `protoc` on PATH.
 set -euo pipefail
 
-REPO_ROOT="$(git rev-parse --show-toplevel)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+readonly REPO_ROOT
+source "$REPO_ROOT/lib/shell.sh"
 RELAY_PROTO_ROOT="$REPO_ROOT/crates/relay-proto/proto"
+readonly RELAY_PROTO_ROOT
 COMMON_PROTO_ROOT="$REPO_ROOT/crates/proto-common/proto"
+readonly COMMON_PROTO_ROOT
 OUT_DIR="$REPO_ROOT/client/lib/src/generated"
+readonly OUT_DIR
 
 export PATH="$PATH:$HOME/.pub-cache/bin"
 

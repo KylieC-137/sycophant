@@ -21,7 +21,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -eu
+              set -euo pipefail
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
               OWNER="${ISSUER}#operator"
               OWNER_HASH=$(printf '%s' "$OWNER" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-16)
@@ -53,7 +53,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -eu
+              set -euo pipefail
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
               # Owner gets configmap create
               kubectl create role owner-writer -n "$TENANT_NS" --verb=create --resource=configmaps
@@ -66,6 +66,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl delete rolebinding,role owner-writer nonowner-writer -n "$TENANT_NS" --ignore-not-found
     - name: owner-writes-a-workspace-command
       try:
@@ -75,7 +76,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -eu
+              set -euo pipefail
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
               kubectl create configmap provision-workspace-ownertest -n "$TENANT_NS" \
                 --from-literal=toolsets=stdlib \
@@ -93,7 +94,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -eu
+              set -euo pipefail
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
               err=$(kubectl create configmap provision-workspace-mallorytest -n "$TENANT_NS" \
                 --from-literal=toolsets=stdlib \

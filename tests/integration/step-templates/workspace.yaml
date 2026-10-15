@@ -15,7 +15,7 @@ spec:
           - name: TENANT_NS
             value: ($tenant_ns)
         content: |
-          set -e
+          set -euo pipefail
           kubectl create namespace "$TENANT_NS"
           REPO_ROOT=$(git rev-parse --show-toplevel)
           helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-workspace" \

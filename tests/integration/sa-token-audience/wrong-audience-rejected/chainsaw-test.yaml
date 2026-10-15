@@ -48,6 +48,7 @@ spec:
               - name: SA_NAME
                 value: ($probe_sa)
             content: |
+              set -euo pipefail
               TOKEN=$(kubectl create token "$SA_NAME" -n "$SA_NS" \
                         --audience=harness.relay.sycophant.md)
               if [ -z "$TOKEN" ]; then
@@ -91,6 +92,7 @@ spec:
               - name: SA_NAME
                 value: ($probe_sa)
             content: |
+              set -euo pipefail
               TOKEN=$(kubectl create token "$SA_NAME" -n "$SA_NS" \
                         --audience=harness.relay.sycophant.md)
               if [ -z "$TOKEN" ]; then
@@ -132,6 +134,7 @@ spec:
               - name: SA_NAME
                 value: ($probe_sa)
             content: |
+              set -euo pipefail
               TOKEN=$(kubectl create token "$SA_NAME" -n "$SA_NS" \
                         --audience=harness.relay.sycophant.md)
               if [ -z "$TOKEN" ]; then

@@ -11,17 +11,16 @@
 # prints every unmet expectation.
 set -uo pipefail
 
-ROOT="$(git rev-parse --show-toplevel)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly HERE
+source "$HERE/../lib.sh"
 CHART="$ROOT/charts/sycophant-cluster"
+readonly CHART
+# shellcheck disable=SC2034  # SCHEMA reserved for future schema validation.
+{
 SCHEMA="$CHART/values.schema.json"
-
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
-
-pass=0
-fail=0
-ok()   { pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
-bad()  { fail=$((fail+1)); printf 'FAIL %s\n    %s\n' "$1" "$2"; }
+readonly SCHEMA
+}
 
 render() { helm template c "$CHART" -n sycophant --api-versions policies.kyverno.io/v1/ValidatingPolicy --show-only templates/apiserver-auth-config.yaml "$@" 2>&1; }
 
@@ -37,8 +36,8 @@ YAML
 # The chart renders AuthenticationConfiguration unconditionally from `idp`,
 # with no authEngine selector.
 t_always_renders_authconfig() {
-  local out; out="$(render -f "$WORK/one.yaml")"
-  if [ $? -ne 0 ]; then
+  local out
+  if ! out="$(render -f "$WORK/one.yaml")"; then
     bad always_renders_authconfig "chart failed to render with no authEngine set; the render must be unconditional off idp: $(tail -1 <<<"$out")"
   elif ! grep -q 'kind: AuthenticationConfiguration' <<<"$out"; then
     bad always_renders_authconfig "no 'kind: AuthenticationConfiguration' rendered; the auth config must render off idp with no authEngine gate"
@@ -51,9 +50,8 @@ t_always_renders_authconfig() {
 # defaulted. Set on an otherwise-valid config, it must fail on authEngine
 # itself (not on some other property).
 t_schema_rejects_authengine() {
-  local out rc
-  out="$(render -f "$WORK/one.yaml" --set authEngine=oidc)"; rc=$?
-  if [ $rc -eq 0 ]; then
+  local out
+  if out="$(render -f "$WORK/one.yaml" --set authEngine=oidc)"; then
     bad schema_rejects_authengine "an authEngine key was accepted; the schema must reject it (authEngine is removed, not defaulted)"
   elif ! grep -qi 'authengine' <<<"$out"; then
     bad schema_rejects_authengine "render failed but not on authEngine; the rejection must name authEngine: $(tail -1 <<<"$out")"
@@ -66,8 +64,8 @@ t_schema_rejects_authengine() {
 # reserved system: prefix on the RAW sub, and no userValidationRules block.
 # The guard runs before the prefix is applied.
 t_system_claim_validation_rule() {
-  local out; out="$(render -f "$WORK/one.yaml")"
-  if [ $? -ne 0 ]; then
+  local out
+  if ! out="$(render -f "$WORK/one.yaml")"; then
     bad system_claim_validation_rule "single-issuer config failed to render: $(tail -1 <<<"$out")"
     return
   fi
@@ -85,8 +83,8 @@ t_system_claim_validation_rule() {
 
 # Claim mapping is username/sub only: no groups, uid, or extra mapping.
 t_no_groups_uid_extra_mapping() {
-  local out; out="$(render -f "$WORK/one.yaml")"
-  if [ $? -ne 0 ]; then
+  local out
+  if ! out="$(render -f "$WORK/one.yaml")"; then
     bad no_groups_uid_extra_mapping "single-issuer config failed to render: $(tail -1 <<<"$out")"
     return
   fi
@@ -106,8 +104,8 @@ t_no_groups_uid_extra_mapping() {
 # The issuer block sets its audience and an issuer-derived username prefix
 # (<issuer>#), so the subject namespace is the issuer's own.
 t_audience_and_prefix() {
-  local out; out="$(render -f "$WORK/one.yaml")"
-  if [ $? -ne 0 ]; then
+  local out
+  if ! out="$(render -f "$WORK/one.yaml")"; then
     bad audience_and_prefix "single-issuer config failed to render: $(tail -1 <<<"$out")"
     return
   fi
@@ -126,5 +124,4 @@ t_system_claim_validation_rule
 t_no_groups_uid_extra_mapping
 t_audience_and_prefix
 
-printf '\n%d passed, %d failed\n' "$pass" "$fail"
-[ "$fail" -eq 0 ]
+summary

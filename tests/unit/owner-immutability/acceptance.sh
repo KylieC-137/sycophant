@@ -6,8 +6,9 @@
 #   bash tests/unit/owner-immutability/acceptance.sh
 set -uo pipefail
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$HERE/../../.." && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly HERE
+source "$HERE/../lib.sh"
 
 rendered="$(helm template c "$ROOT/charts/sycophant-cluster" \
   --api-versions policies.kyverno.io/v1/ValidatingPolicy \
@@ -15,11 +16,7 @@ rendered="$(helm template c "$ROOT/charts/sycophant-cluster" \
   printf 'FAIL render tenant-ns-psa-required-vap.yaml\n    %s\n' "$rendered"
   exit 1
 }
-
-pass=0
-fail=0
-ok()  { pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
-bad() { fail=$((fail+1)); printf 'FAIL %s\n    %s\n' "$1" "$2"; }
+readonly rendered
 
 # AC4a: the rendered VAP must deny UPDATE that changes the sycophant.md/owner annotation.
 if printf '%s' "$rendered" | grep -q "sycophant.md/owner.*annotation.*immutable"; then
@@ -37,5 +34,4 @@ else
       "the rendered tenant-ns-psa-required VAP does not contain an immutability validation for the sycophant.md/owner label"
 fi
 
-printf '\n%d passed, %d failed\n' "$pass" "$fail"
-[ "$fail" -eq 0 ]
+summary

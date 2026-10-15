@@ -10,8 +10,11 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+readonly REPO_ROOT
+source "$REPO_ROOT/lib/shell.sh"
 CHART_DIR="$REPO_ROOT/charts/sycophant-tenant"
+readonly CHART_DIR
 FAILURES=0
 
 rendered=$(helm template test-release "$CHART_DIR" \
@@ -21,6 +24,7 @@ rendered=$(helm template test-release "$CHART_DIR" \
   echo "FAIL: helm template exited non-zero (chart likely rejects unknown idp values)"
   exit 1
 }
+readonly rendered
 
 # Check for IDP_ISSUER env var
 if echo "$rendered" | grep -q 'IDP_ISSUER'; then

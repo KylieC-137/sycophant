@@ -5,11 +5,9 @@
 #   bash tests/unit/tenant-chart/acceptance.sh
 set -uo pipefail
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$HERE/../../.." && pwd)"
-
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly HERE
+source "$HERE/../lib.sh"
 
 LOCAL='{"format":"openai","model":"liquid/lfm2.5-8b-a1b","server.image":"llama-server:local","server.weights":"ghcr.io/example/weights:1","server.weightsPath":"/weights/model.gguf"}'
 REMOTE='{"format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","image":"inference-runtime:local","secret":"llm-openrouter"}'
@@ -22,6 +20,7 @@ HASH="$(printf '%s' "$SUBJECT" | openssl dgst -sha256 | awk '{print $NF}' | cut 
 # chart must refuse it. The positive shape is rendered with no workspaces.
 USER_COMMAND="$(printf '{"user":"%s","handle.slack":"U12345"}' "$SUBJECT")"
 USER_MISSING_WS="$(printf '{"user":"%s","workspaces":"alpha,beta","handle.slack":"U12345"}' "$SUBJECT")"
+readonly LOCAL REMOTE TOOLSET WORKSPACE CHANNEL SUBJECT HASH USER_COMMAND USER_MISSING_WS
 
 render() {
   local out="$1" chart="$2"; shift 2

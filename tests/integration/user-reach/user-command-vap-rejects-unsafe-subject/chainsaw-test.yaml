@@ -34,7 +34,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -u
+              set -euo pipefail
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
               OPERATOR="${ISSUER}#operator"
               # Write a user command for subject $1 as the operator, dry run.

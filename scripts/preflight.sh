@@ -20,18 +20,28 @@
 set -uo pipefail
 
 ARCH="${ARCH:-aarch64}"
+readonly ARCH
 RUST_TARGET="${ARCH}-unknown-linux-musl"
+readonly RUST_TARGET
 CROSS_LINKER="${ARCH}-linux-musl-gcc"
+readonly CROSS_LINKER
 FLUTTER_TARGET="${FLUTTER_TARGET:-macos}"
+readonly FLUTTER_TARGET
 CLEAN="${CLEAN:-0}"
+readonly CLEAN
 
 # Disk thresholds (GB).
 VM_DISK_FAIL=8
+readonly VM_DISK_FAIL
 VM_DISK_WARN=15
+readonly VM_DISK_WARN
 HOST_DISK_WARN=20
+readonly HOST_DISK_WARN
 
 OS="$(uname -s)"   # Darwin | Linux
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+readonly OS
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly REPO_ROOT
 
 red()  { printf '\033[1;31m%s\033[0m' "$*"; }
 grn()  { printf '\033[1;32m%s\033[0m' "$*"; }
@@ -99,10 +109,10 @@ if [ "$CLEAN" = "1" ]; then
     "install a ${ARCH}-linux-musl cross toolchain (e.g. musl-cross) providing ${CROSS_LINKER}"
   # The target + compiler are useless to cargo without the linker wired in
   # ~/.cargo/config.toml; the build links against the host cc otherwise and fails.
-  need "~/.cargo/config.toml linker for ${RUST_TARGET}" \
+  need "$HOME/.cargo/config.toml linker for ${RUST_TARGET}" \
     "grep -q 'target.${RUST_TARGET}' \"\${CARGO_HOME:-\$HOME/.cargo}/config.toml\"" \
-    "add to ~/.cargo/config.toml:  [target.${RUST_TARGET}]\\n             linker = \"${CROSS_LINKER}\"" \
-    "add to ~/.cargo/config.toml:  [target.${RUST_TARGET}]\\n             linker = \"${CROSS_LINKER}\""
+    "add to $HOME/.cargo/config.toml:  [target.${RUST_TARGET}]\\n             linker = \"${CROSS_LINKER}\"" \
+    "add to $HOME/.cargo/config.toml:  [target.${RUST_TARGET}]\\n             linker = \"${CROSS_LINKER}\""
 else
   echo "-- musl cross-build: skipped (reuse run — images already loaded) --"
 fi

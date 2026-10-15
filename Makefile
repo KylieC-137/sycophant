@@ -12,7 +12,7 @@ help: ## List every target
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  \033[1m%-22s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 .PHONY: lint
-lint: lint-rust lint-go lint-k8s ## All static checks
+lint: lint-rust lint-go lint-k8s lint-shell ## All static checks
 
 .PHONY: lint-rust
 lint-rust: ## rustfmt + clippy, warnings are errors
@@ -38,6 +38,10 @@ lint-k8s: ## helm lint + zero-match sweep gates
 	helm lint charts/sycophant-cluster
 	helm lint charts/sycophant-commands
 	@for g in $(SWEEP_GATES); do echo "== $$g =="; bash "$$g" || exit 1; done
+
+.PHONY: lint-shell
+lint-shell: ## shellcheck on all tracked .sh files
+	git ls-files '*.sh' | xargs shellcheck -x -S warning
 
 .PHONY: test-unit
 test-unit: test-unit-rust test-unit-go test-unit-k8s ## All unit tests (hermetic, seconds)

@@ -15,6 +15,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl create namespace "$TENANT_NS"
     - name: install-rendered-relay-ctrl-rbac
       try:
@@ -23,7 +24,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -e
+              set -euo pipefail
               REPO_ROOT=$(git rev-parse --show-toplevel)
               helm template probe "$REPO_ROOT/charts/sycophant-tenant" \
                 -n "$TENANT_NS" -s templates/relay-ctrl-rbac.yaml \
@@ -35,6 +36,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl create secret generic anything \
                 --from-literal=k=v -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:relay-controller"
@@ -48,6 +50,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl create secret generic bystander \
                 --from-literal=k=v -n "$TENANT_NS"
               kubectl patch secret bystander -n "$TENANT_NS" \
@@ -63,7 +66,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -u
+              set -euo pipefail
               for verb in get list watch; do
                 [ "$(kubectl auth can-i "$verb" secrets -n "$TENANT_NS" \
                   --as="system:serviceaccount:${TENANT_NS}:relay-controller")" = no ] \
@@ -76,6 +79,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl create secret generic bystander-two \
                 --from-literal=k=v -n "$TENANT_NS"
               kubectl delete secret bystander-two -n "$TENANT_NS" \
@@ -89,6 +93,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
   # The step-level `finally` above only runs when the run reaches the last
   # step. A failure in any earlier step would otherwise leak the namespace
@@ -100,4 +105,5 @@ spec:
           - name: TENANT_NS
             value: ($tenant_ns)
         content: |
+          set -euo pipefail
           kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

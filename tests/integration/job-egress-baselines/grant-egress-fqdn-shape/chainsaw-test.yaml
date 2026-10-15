@@ -47,7 +47,7 @@ spec:
               - name: GRANT_COMMAND
                 value: ($grant_command)
             content: |
-              set -e
+              set -euo pipefail
               kubectl create namespace "$TENANT_NS"
               REPO_ROOT=$(git rev-parse --show-toplevel)
               rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-workspace" \
@@ -105,4 +105,5 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false

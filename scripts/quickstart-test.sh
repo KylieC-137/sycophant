@@ -7,12 +7,11 @@
 # validation path; this script is the hobbyist one-command validation path.
 set -euo pipefail
 
-REPO_ROOT="$(git rev-parse --show-toplevel)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly REPO_ROOT
+source "$REPO_ROOT/lib/shell.sh"
 SYCO=(cargo run -p sycoadm --release --quiet --)
-
-step() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
-ok()   { printf '\033[1;32m ✓\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33m ⚠\033[0m %s\n' "$*" >&2; }
+readonly -a SYCO
 
 # Kill leftover sycophant processes from prior runs (leaked cargo test
 # binaries, abandoned kubectl port-forwards, etc.) before doing anything.
@@ -32,6 +31,7 @@ step "Step 1+2: syco setup (k3d cluster sycophant + gVisor + Cilium + Kyverno + 
 ok "syco setup complete"
 
 step "Step 3: Verify CRDs Established"
+# shellcheck disable=SC2043 # loop intentional — more CRDs will be added
 for crd in validatingpolicies.policies.kyverno.io; do
   kubectl wait --for=condition=Established "crd/$crd" --timeout=30s >/dev/null
   ok "crd/$crd Established"
@@ -57,35 +57,7 @@ fi
 ok "baseline: probe pod can reach google.com (no policy)"
 
 # Apply the toolset-shaped CNP: allow only github.com:443 + DNS for github.com.
-kubectl apply -f - >/dev/null <<'EOF'
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: fqdn-probe-policy
-spec:
-  endpointSelector:
-    matchLabels:
-      sycophant.md/toolset: fqdn-probe
-  egress:
-    - toEndpoints:
-        - matchLabels:
-            io.kubernetes.pod.namespace: kube-system
-            k8s-app: kube-dns
-      toPorts:
-        - ports:
-            - { port: "53", protocol: UDP }
-            - { port: "53", protocol: TCP }
-          rules:
-            dns:
-              - matchName: github.com
-              - matchPattern: "*.github.com"
-    - toFQDNs:
-        - matchName: github.com
-        - matchPattern: "*.github.com"
-      toPorts:
-        - ports:
-            - { port: "443", protocol: TCP }
-EOF
+kubectl apply -f "$REPO_ROOT/scripts/fixtures/fqdn-probe-policy.yaml" >/dev/null
 # Wait for Cilium to validate + compile the policy.
 kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Valid")].status}'=True \
   ciliumnetworkpolicy/fqdn-probe-policy --timeout=30s >/dev/null
@@ -147,28 +119,13 @@ step "Step 6: helm uninstall preserves user-data CRDs and policies"
 # Plant a witness policy authored by the user (not by helm).
 # If it survives helm uninstall, the sibling kyverno-crds chart is
 # doing its job.
-kubectl apply -f - >/dev/null <<'EOF'
-apiVersion: policies.kyverno.io/v1
-kind: ValidatingPolicy
-metadata:
-  name: test-uninstall-witness
-spec:
-  validationActions: [Audit]
-  matchConstraints:
-    resourceRules:
-      - apiGroups: [""]
-        apiVersions: ["v1"]
-        operations: ["CREATE"]
-        resources: ["pods"]
-  validations:
-    - expression: "has(object.metadata.name)"
-      message: noop
-EOF
+kubectl apply -f "$REPO_ROOT/scripts/fixtures/test-uninstall-witness.yaml" >/dev/null
 ok "user-authored policy planted"
 
 # Capture diagnostics if the assertions below fail (cleanup trap nukes
 # the cluster on exit).
 DIAG="/tmp/quickstart-test-uninstall-diag.$$"
+# shellcheck disable=SC2154 # rc is assigned inside the trap string
 trap 'rc=$?; if [ $rc -ne 0 ]; then kubectl get all,vpol,mpol,gpol,dpol,validatingwebhookconfiguration,mutatingwebhookconfiguration -A > "$DIAG" 2>&1 || true; warn "diagnostics captured at $DIAG"; fi; cleanup' EXIT
 
 helm uninstall sycophant -n sycophant-system --timeout=5m >/dev/null

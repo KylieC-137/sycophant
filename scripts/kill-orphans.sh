@@ -11,7 +11,9 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly REPO_ROOT
 SELF_PID=$$
+readonly SELF_PID
 
 # Order matters: kill wrappers BEFORE kubectl children so the wrapper
 # doesn't respawn the child mid-sweep.
@@ -20,6 +22,7 @@ patterns=(
   "kubectl.*port-forward.*(headscale|e2e-test)"
   "${REPO_ROOT}/target/(debug|release)/deps/"
 )
+readonly -a patterns
 
 found=0
 sweep() {

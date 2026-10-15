@@ -41,7 +41,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -eu
+              set -euo pipefail
               REPO_ROOT=$(git rev-parse --show-toplevel)
               # Each workspace's reach Role, rendered from the workspace chart.
               # gamma's exists too — a workspace provisioned after the user
@@ -84,7 +84,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -eu
+              set -euo pipefail
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
               HASH=$(printf '%s' "${ISSUER}#alice" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
               for i in $(seq 1 120); do
@@ -104,7 +104,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -eu
+              set -euo pipefail
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
               ALICE="${ISSUER}#alice"
               HASH=$(printf '%s' "$ALICE" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
@@ -143,7 +143,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -eu
+              set -euo pipefail
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
               ALICE="${ISSUER}#alice"
               for ws in alpha beta; do
@@ -187,7 +187,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -eu
+              set -euo pipefail
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
               ALICE="${ISSUER}#alice"
               HASH=$(printf '%s' "$ALICE" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
@@ -228,7 +228,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -eu
+              set -euo pipefail
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
               HASH=$(printf '%s' "${ISSUER}#alice" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
               for i in $(seq 1 120); do
@@ -251,7 +251,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -eu
+              set -euo pipefail
               REPO_ROOT=$(git rev-parse --show-toplevel)
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
               ALICE="${ISSUER}#alice"
@@ -297,7 +297,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -eu
+              set -euo pipefail
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
               ALICE="${ISSUER}#alice"
               HASH=$(printf '%s' "$ALICE" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
@@ -342,7 +342,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -eu
+              set -euo pipefail
               REPO_ROOT=$(git rev-parse --show-toplevel)
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
               ALICE="${ISSUER}#alice"
@@ -426,7 +426,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -eu
+              set -euo pipefail
               REPO_ROOT=$(git rev-parse --show-toplevel)
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
               ALICE="${ISSUER}#alice"
@@ -503,7 +503,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
-              set -eu || true
+              set -euo pipefail
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
               for sub in alice mallory; do
                 HASH=$(printf '%s' "${ISSUER}#${sub}" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)

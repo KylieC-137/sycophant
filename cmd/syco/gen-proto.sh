@@ -2,7 +2,9 @@
 # Regenerate Go protobuf stubs from the shared .proto files.
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+readonly REPO_ROOT
+source "$REPO_ROOT/lib/shell.sh"
 cd "$REPO_ROOT"
 
 protoc \

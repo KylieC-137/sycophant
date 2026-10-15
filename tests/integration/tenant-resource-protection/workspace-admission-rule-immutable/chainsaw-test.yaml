@@ -55,6 +55,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl auth can-i create deployments.apps -n "$TENANT_NS" \
                 --as="system:serviceaccount:${TENANT_NS}:provision-probe"
             check:
@@ -67,6 +68,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl auth can-i delete validatingadmissionpolicies.admissionregistration.k8s.io/cluster-gvisor-pod-policy \
                 --as="system:serviceaccount:${TENANT_NS}:provision-probe"
             check:
@@ -79,6 +81,7 @@ spec:
               - name: TENANT_NS
                 value: ($tenant_ns)
             content: |
+              set -euo pipefail
               kubectl auth can-i patch validatingadmissionpolicies.admissionregistration.k8s.io/cluster-gvisor-pod-policy \
                 --as="system:serviceaccount:${TENANT_NS}:provision-probe"
             check:

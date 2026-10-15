@@ -9,7 +9,7 @@ spec:
       try:
         - script:
             content: |
-              set -e
+              set -euo pipefail
               REPO_ROOT=$(git rev-parse --show-toplevel)
               out=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns 2>&1) \
                 || { echo "tenant chart must render offline"; printf '%s\n' "$out" >&2; exit 1; }
@@ -36,7 +36,7 @@ spec:
       try:
         - script:
             content: |
-              set -e
+              set -euo pipefail
               REPO_ROOT=$(git rev-parse --show-toplevel)
               base=$(helm template probe "$REPO_ROOT/charts/sycophant-tenant" -n probe-ns 2>&1) \
                 || { echo "tenant chart must render offline"; printf '%s\n' "$base" >&2; exit 1; }

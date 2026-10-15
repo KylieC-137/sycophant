@@ -19,7 +19,7 @@ spec:
               - name: WORKSPACE_COMMAND
                 value: ($workspace_command)
             content: |
-              set -e
+              set -euo pipefail
               REPO_ROOT=$(git rev-parse --show-toplevel)
               out=$(helm template probe "$REPO_ROOT/charts/sycophant-workspace" -n probe-ns \
                 --set name="$WS" --set-json "command=$WORKSPACE_COMMAND")

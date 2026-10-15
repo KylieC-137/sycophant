@@ -6,12 +6,11 @@
 #   bash tests/unit/provision-installer/acceptance.sh
 set -uo pipefail
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$HERE/../../.." && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly HERE
+source "$HERE/../lib.sh"
 CHART="$ROOT/charts/sycophant-cluster"
-
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+readonly CHART
 
 render() { helm template c "$CHART" -n kyverno --api-versions policies.kyverno.io/v1/ValidatingPolicy "$@"; }
 

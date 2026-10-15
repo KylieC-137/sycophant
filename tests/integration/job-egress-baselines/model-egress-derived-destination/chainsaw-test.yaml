@@ -49,7 +49,7 @@ spec:
               - name: TENANT_NS
                 value: ($domain_ns)
             content: |
-              set -e
+              set -euo pipefail
               kubectl create namespace "$TENANT_NS"
               REPO_ROOT=$(git rev-parse --show-toplevel)
               rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-inference" \
@@ -98,6 +98,7 @@ spec:
               - name: TENANT_NS
                 value: ($domain_ns)
             content: |
+              set -euo pipefail
               kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
     # -------------------------------------------------------------------- IP arm
     - name: ip-literal-derives-cidr-and-no-dns
@@ -107,7 +108,7 @@ spec:
               - name: TENANT_NS
                 value: ($ip_ns)
             content: |
-              set -e
+              set -euo pipefail
               kubectl create namespace "$TENANT_NS"
               REPO_ROOT=$(git rev-parse --show-toplevel)
               rendered=$(helm template "$TENANT_NS" "$REPO_ROOT/charts/sycophant-inference" \
@@ -147,13 +148,14 @@ spec:
               - name: TENANT_NS
                 value: ($ip_ns)
             content: |
+              set -euo pipefail
               kubectl delete namespace "$TENANT_NS" --ignore-not-found --wait=false
     # ------------------------------------------------- fail-closed on the label
     - name: model-label-gates-the-provider-hole
       try:
         - script:
             content: |
-              set -e
+              set -euo pipefail
               REPO_ROOT=$(git rev-parse --show-toplevel)
 
               # Every rendered inference-egress CNP selects its pod on
