@@ -12,12 +12,16 @@ help: ## List every target
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  \033[1m%-22s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 .PHONY: lint
-lint: lint-rust lint-k8s ## All static checks
+lint: lint-rust lint-go lint-k8s ## All static checks
 
 .PHONY: lint-rust
 lint-rust: ## rustfmt + clippy, warnings are errors
 	cargo fmt --all --check
 	cargo clippy --workspace -- -D warnings
+
+.PHONY: lint-go
+lint-go: ## go vet on the syco CLI
+	cd cmd/syco && go vet ./...
 
 # The default idp keeps the always-on apiserver-trust render valid, so lint the
 # same shape. A component chart is linted with the name and minimal command its
@@ -36,11 +40,15 @@ lint-k8s: ## helm lint + zero-match sweep gates
 	@for g in $(SWEEP_GATES); do echo "== $$g =="; bash "$$g" || exit 1; done
 
 .PHONY: test-unit
-test-unit: test-unit-rust test-unit-k8s ## All unit tests (hermetic, seconds)
+test-unit: test-unit-rust test-unit-go test-unit-k8s ## All unit tests (hermetic, seconds)
 
 .PHONY: test-unit-rust
 test-unit-rust: ## Inline #[cfg(test)] units across the workspace
 	cargo test --workspace --lib --bins
+
+.PHONY: test-unit-go
+test-unit-go: ## Go unit tests for the syco CLI
+	cd cmd/syco && go test ./...
 
 # The two policy fixtures are rendered from the chart on every run and are not
 # tracked. `--api-versions` stands in for the Kyverno CRDs. The acceptance
@@ -70,6 +78,14 @@ test-integration-rust: ## crates/*/tests/ composition tests (hermetic, in-proces
 .PHONY: test-integration-k8s
 test-integration-k8s: ## Chainsaw suite against the local cluster
 	chainsaw test tests/integration --config tests/integration/.chainsaw.yaml
+
+.PHONY: syco
+syco: ## Build the Go syco CLI binary
+	cd cmd/syco && go build -o ../../target/syco .
+
+.PHONY: sycoadm
+sycoadm: ## Build the Rust sycoadm operator CLI binary
+	cargo build -p sycoadm
 
 .PHONY: test-e2e
 test-e2e: ## Full install, real turn, security audit, client in the loop (CLEAN=1 rebuilds the cluster)

@@ -1,6 +1,8 @@
 syntax = "proto3";
 package relay.v1;
 
+option go_package = "github.com/sycophant-md/sycophant/cmd/syco/internal/proto/relay/v1";
+
 import "sycophant/common/v1/common.proto";
 
 // --- External client-facing gateway ---
@@ -10,6 +12,7 @@ import "sycophant/common/v1/common.proto";
 // through the listeners that demand the matching credential class.
 
 service RelayGateway {
+  rpc Discover (DiscoverRequest) returns (DiscoverResponse);
   rpc ListWorkspaces (sycophant.common.v1.ListWorkspacesRequest) returns (sycophant.common.v1.ListWorkspacesResponse);
   rpc ListGrants (sycophant.common.v1.ListGrantsRequest) returns (sycophant.common.v1.ListGrantsResponse);
   rpc MintConversation (sycophant.common.v1.MintConversationRequest) returns (sycophant.common.v1.MintConversationResponse);
@@ -75,4 +78,12 @@ message ChannelReply {
 
 message DeliverOutboundResponse {
   bool delivered = 1;
+}
+
+message DiscoverRequest {}
+
+message DiscoverResponse {
+  string issuer = 1;
+  string client_id = 2;
+  string certificate_authority = 3;
 }

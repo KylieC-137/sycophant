@@ -45,7 +45,7 @@ If `adb install` fails with `INSTALL_FAILED_USER_RESTRICTED`, enable "Install vi
 
 Trust flow:
 
-1. Operator (you) deploys headscale plus the app channel with ACME enabled, as the `sycophant-channel` chart, installed into the provisioned tenant by `syco channel up`:
+1. Operator (you) deploys headscale plus the app channel with ACME enabled, as the `sycophant-channel` chart, installed into the provisioned tenant by `sycoadm channel up`:
    ```yaml
    # channel.yaml
    channel:
@@ -61,11 +61,11 @@ Trust flow:
          email: you@yourdomain.com
    ```
    ```sh
-   syco channel up -f channel.yaml
+   sycoadm channel up -f channel.yaml
    ```
    Re-run it after editing the channel values to apply the change.
 2. On the phone, join the tailnet: install the official Tailscale Android client (Play Store or `sideload-via-adb` an F-Droid build); set "Use an alternate server" to `https://hs.yourdomain.com`; log in via auth-key minted from headscale.
-3. Bind the person to their workspaces with the user command — `syco user up` writes the subject's workspace list and reach RoleBindings; the relay authorizes each request by Kubernetes review from that grant. See the [relay docs](relay.md) for the identity model.
+3. Bind the person to their workspaces with the user command — `sycoadm user up` writes the subject's workspace list and reach RoleBindings; the relay authorizes each request by Kubernetes review from that grant. See the [relay docs](relay.md) for the identity model.
 4. Open the sideloaded sycophant app. Fill in server `relay:9090` (the app adapter's MagicDNS hostname), workspace, and the person token. The app presents the token as the gRPC bearer credential; the relay TokenReviews it and authorizes the named workspace per request.
 
 ## Chat
@@ -85,7 +85,7 @@ Every RPC carries the caller's bearer token; the relay authenticates it by Token
 
 ## Revocation and re-invite
 
-Revocation is operator-driven and works on the next request: remove the person's reach RoleBinding (re-run `syco user up` without the workspace), and the relay's next authorization review fails. The person's token expires on its own clock; there is no denylist.
+Revocation is operator-driven and works on the next request: remove the person's reach RoleBinding (re-run `sycoadm user up` without the workspace), and the relay's next authorization review fails. The person's token expires on its own clock; there is no denylist.
 
 ## iOS (kept-in-mind, not shipped)
 

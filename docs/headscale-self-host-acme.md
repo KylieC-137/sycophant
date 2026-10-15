@@ -11,7 +11,7 @@ This is the most operationally heavy of the deployment shapes. **For DevOps depl
 - Home router admin access for port-forwarding
 - Residential ISP that doesn't block inbound :80 / :443 (Orange France works; some US ISPs block these on residential)
 - macOS with `kubectl`, `helm`, `k3d`, `flutter` (for Flutter testing) — see [`e2e-test.md`](e2e-test.md) for the full e2e-side prereqs
-- Sycophant cluster and a tenant deployed with `syco setup` and `syco tenant up` (see `e2e-test.md`)
+- Sycophant cluster and a tenant deployed with `sycoadm setup` and `sycoadm tenant up` (see `e2e-test.md`)
 
 ## DNS setup
 
@@ -44,7 +44,7 @@ ISP sanity check: from a phone on cellular data (NOT your home WiFi), browse to 
 
 ## Deploy with ACME enabled
 
-Headscale and the app channel are the `sycophant-channel` chart, installed into a provisioned tenant by `syco channel up`. Write their values to `channel.yaml` (the settings are listed in [`charts/sycophant-commands/values.yaml`](../charts/sycophant-commands/values.yaml)):
+Headscale and the app channel are the `sycophant-channel` chart, installed into a provisioned tenant by `sycoadm channel up`. Write their values to `channel.yaml` (the settings are listed in [`charts/sycophant-commands/values.yaml`](../charts/sycophant-commands/values.yaml)):
 
 ```yaml
 channel:
@@ -63,7 +63,7 @@ channel:
 Then install it, or re-run the same command to apply a change. It prompts for the operator password:
 
 ```sh
-syco channel up -f channel.yaml
+sycoadm channel up -f channel.yaml
 ```
 
 The chart will:
@@ -147,7 +147,7 @@ For a phone: install the official Tailscale Android app, **Settings** → kebab 
 The Flutter app (sycophant's e2e-testing client) inherits the host's network when run on the emulator, so once the Mac is on your headscale tailnet, `relay.ts.local:9090` (the app adapter's MagicDNS hostname) resolves and routes through the tailnet. Authorize the person by binding their subject to the workspace list with the user command:
 
 ```sh
-syco user up -f user.yaml   # writes the identity ConfigMap and the reach RoleBindings
+sycoadm user up -f user.yaml   # writes the identity ConfigMap and the reach RoleBindings
 ```
 
 Present the person's token as the gRPC bearer credential. See [`flutter-app.md`](flutter-app.md) for build/sideload of the app itself.

@@ -51,8 +51,8 @@ The Harness spawns the matching capability Job and dials it over a headless per-
 ## Toolset Configuration
 
 Each toolset is one provision command, `provision-toolset-<name>`, applied with
-`syco toolset up -f <values.yaml>` and removed with
-`syco toolset down <name> --tenant <t>`. Its installer renders one
+`sycoadm toolset up -f <values.yaml>` and removed with
+`sycoadm toolset down <name> --tenant <t>`. Its installer renders one
 `ts-<name>` ConfigMap whose data is the provision command's data. The Harness watches
 those ConfigMaps and lists the tools of each toolset named in its workspace's
 `toolsets`, with no restart. A toolset whose tool shadows a built-in Harness
@@ -86,10 +86,10 @@ docker build --label md.sycophant.tools="$label" ...
 ```
 
 Each toolset's values sit beside its image, for example
-[`examples/toolsets/ssh-credentials/values.yaml`](../examples/toolsets/ssh-credentials/values.yaml).
+[`examples/sycoadm/toolsets/ssh-credentials/values.yaml`](../examples/sycoadm/toolsets/ssh-credentials/values.yaml).
 The operator passes the image digest and the label, as `toolset.image` and
-`toolset.tools`, in a second values file to `syco toolset up -f` (see
-[`examples/README.md`](../examples/README.md)).
+`toolset.tools`, in a second values file to `sycoadm toolset up -f` (see
+[`examples/sycoadm/README.md`](../examples/sycoadm/README.md)).
 
 The Harness generates each tool's JSON Schema `parameters` from its args and
 validates the model's input against them before dispatch.
@@ -105,7 +105,7 @@ operator-approved credential scoped to that (workspace, toolset) pair: it names
 a Kubernetes Secret, and optionally a `path` where the credential file lands and
 one `egress` domain. A grant may name only a toolset in `toolsets`.
 
-[`examples/workspaces/hello-world.yaml`](../examples/workspaces/hello-world.yaml)
+[`examples/sycoadm/workspaces/hello-world.yaml`](../examples/sycoadm/workspaces/hello-world.yaml)
 carries one secret-only grant.
 
 A tool call selects one grant by name from those grants; a name outside it is
@@ -154,7 +154,7 @@ job at the declared path; the Harness never reads it. See
 authenticates nobody, so its provision command omits `secret` and the inference job spawns with no
 credential volume and nothing registered to scrub. A local model (inference
 values with a `server` block,
-[`examples/inference/local.yaml`](../examples/inference/local.yaml))
+[`examples/sycoadm/inference/local.yaml`](../examples/sycoadm/inference/local.yaml))
 carries no `baseUrl` and takes no job at all: the harness dials its warm
 `inf-<key>` Service directly on the fixed port 8080.
 

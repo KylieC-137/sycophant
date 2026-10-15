@@ -1,0 +1,6 @@
+[default]
+profile = "e2e"
+
+[profile.e2e]
+server = "${TAILNET_RELAY_ADDR}"
+workspace = "hello-world"

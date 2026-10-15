@@ -35,6 +35,15 @@
           "enum": ["Always", "IfNotPresent", "Never"]
         }
       }
+    },
+    "idp": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "issuer": { "type": "string" },
+        "audience": { "type": "string" },
+        "certificateAuthority": { "type": "string" }
+      }
     }
   }
 }

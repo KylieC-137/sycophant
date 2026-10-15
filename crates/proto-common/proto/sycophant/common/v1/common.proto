@@ -1,6 +1,8 @@
 syntax = "proto3";
 package sycophant.common.v1;
 
+option go_package = "github.com/sycophant-md/sycophant/cmd/syco/internal/proto/sycophant/common/v1";
+
 // --- Core types ---
 
 message ContentBlock {

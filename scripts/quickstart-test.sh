@@ -8,7 +8,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-SYCO=(cargo run -p syco --release --quiet --)
+SYCO=(cargo run -p sycoadm --release --quiet --)
 
 step() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 ok()   { printf '\033[1;32m ✓\033[0m %s\n' "$*"; }

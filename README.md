@@ -53,10 +53,10 @@ Sycophant uses Chainsaw integration tests against a live cluster to validate sec
 
 Sycophant ships as Helm charts. There are two ways in.
 
-**CLI — local, secure by default.** The `syco` CLI stands up a local [k3d](https://k3d.io) cluster with the full capability stack ([see Requirements](#requirements)) already wired in:
+**CLI — local, secure by default.** The `sycoadm` CLI stands up a local [k3d](https://k3d.io) cluster with the full capability stack ([see Requirements](#requirements)) already wired in:
 
 ```sh
-syco setup
+sycoadm setup
 ```
 
 **DevOps — your own cluster.** Install the charts with Helm. The `sycophant-quickstart` chart bundles the gVisor RuntimeClass and Kyverno CRDs, so one command gives you a working cluster:
@@ -89,7 +89,7 @@ Three components, each with a single, well-defined job. The harness is the broke
 | **Relay** | The client gateway. Authenticated people and channel adapters (person or adapter tokens) dial in through it to reach their agent, and it relays messages to and from the harness. |
 | **Toolset** | The tool runtime. Runs one tool call inside a throwaway gVisor sandbox the harness creates and tears down. |
 
-Built as a Rust monorepo on gRPC (tonic/prost), Kubernetes CRDs (kube-rs), and Helm charts. The `syco` CLI drives it. Images target Linux arm64 and amd64.
+Built as a Rust monorepo on gRPC (tonic/prost), Kubernetes CRDs (kube-rs), and Helm charts. The `sycoadm` CLI drives it. Images target Linux arm64 and amd64.
 
 ## Requirements
 
@@ -99,7 +99,7 @@ Sycophant runs on any conformant Kubernetes cluster. It relies on three cluster 
 - **Network egress control:** Cilium (default-deny egress with an L7 DNS allowlist).
 - **Admission policy engine:** Kyverno 3.9.x, with its CRDs.
 
-`syco setup` installs this default set on a local k3d cluster for you. Running it needs a local toolchain: k3d, helm, kubectl, cargo (rustup), protoc, cmake, and a C compiler.
+`sycoadm setup` installs this default set on a local k3d cluster for you. Running it needs a local toolchain: k3d, helm, kubectl, cargo (rustup), protoc, cmake, and a C compiler.
 
 ## Local development
 

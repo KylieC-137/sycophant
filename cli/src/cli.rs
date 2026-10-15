@@ -1,7 +1,7 @@
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "syco", about = "Sycophant CLI", version)]
+#[command(name = "sycoadm", about = "Sycophant CLI", version)]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn values_keep_file_order_then_sets() {
         let cli = Cli::try_parse_from([
-            "syco",
+            "sycoadm",
             "toolset",
             "up",
             "-f",

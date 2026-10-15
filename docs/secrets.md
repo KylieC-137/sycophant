@@ -19,7 +19,7 @@ data:
   sycophant-llm-openrouter: <base64-encoded-token>
 ```
 
-The data key is not configurable. `syco tenant secret set <name>` writes this shape; hand-rolled Secrets must match it.
+The data key is not configurable. `sycoadm tenant secret set <name>` writes this shape; hand-rolled Secrets must match it.
 
 Every credential reaches its pod as a file, never as an environment variable: env leaks through `/proc/<pid>/environ`, child process inheritance, and logs.
 
@@ -30,7 +30,7 @@ How that Secret arrives is out of framework scope. The recipes below are equival
 Simplest. Right for small private deployments and local development.
 
 ```sh
-printf '%s' "$OPENROUTER_API_KEY" | syco tenant secret set sycophant-llm-openrouter --ns tenant-foo
+printf '%s' "$OPENROUTER_API_KEY" | sycoadm tenant secret set sycophant-llm-openrouter --ns tenant-foo
 ```
 
 The `kubectl` equivalent, if you are not using the CLI — note the data key repeats the Secret name:
@@ -42,8 +42,8 @@ kubectl create secret generic sycophant-llm-openrouter \
 ```
 
 Then name it as the model's `secret`, as
-[`examples/inference/deepseek-v4-flash.yaml`](../examples/inference/deepseek-v4-flash.yaml)
-does, and install it with `syco inference up -f`.
+[`examples/sycoadm/inference/deepseek-v4-flash.yaml`](../examples/sycoadm/inference/deepseek-v4-flash.yaml)
+does, and install it with `sycoadm inference up -f`.
 
 A model's provision command names the Secret only. Kubelet mounts it read-only at
 `/run/secrets/provider/credential`, the path the inference image reads, and no
@@ -51,7 +51,7 @@ component reads the value itself.
 
 A tool job's credential comes from a workspace grant instead, which names the
 Secret the same way; see the `demo-key` grant in
-[`examples/workspaces/hello-world.yaml`](../examples/workspaces/hello-world.yaml).
+[`examples/sycoadm/workspaces/hello-world.yaml`](../examples/sycoadm/workspaces/hello-world.yaml).
 
 A toolset provision command names no Secret at all. Its `env.<NAME>` keys (the values' `env` map) forward verbatim to the tool job as environment variables.
 

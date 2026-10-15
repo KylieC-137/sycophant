@@ -151,7 +151,7 @@ pub(crate) fn run(_cmd: SetupCmd) -> Result<(), String> {
         install_operator(&scope, need_dex, email, password)?;
     }
     eprintln!(
-        "\n\x1b[1;32m==> Cluster ready.\x1b[0m Next: `syco tenant up -f <tenant values.yaml>`."
+        "\n\x1b[1;32m==> Cluster ready.\x1b[0m Next: `sycoadm tenant up -f <tenant values.yaml>`."
     );
     Ok(())
 }
@@ -179,7 +179,7 @@ fn install_operator(
     if install {
         if !operator::dex_tls_present() {
             return Err(
-                "Dex TLS Secret missing from sycophant-system; run `syco destroy` then `syco setup`"
+                "Dex TLS Secret missing from sycophant-system; run `sycoadm destroy` then `sycoadm setup`"
                     .into(),
             );
         }
@@ -459,7 +459,7 @@ fn ensure_cluster(scope: &Scope) -> Result<(), String> {
     if cluster_exists(&list, CLUSTER) {
         if !auth_config.is_file() {
             return Err(format!(
-                "cluster `sycophant` exists but {} is missing, so its apiserver trusts no Dex issuer; run `syco destroy` then `syco setup`",
+                "cluster `sycophant` exists but {} is missing, so its apiserver trusts no Dex issuer; run `sycoadm destroy` then `sycoadm setup`",
                 auth_config.display()
             ));
         }

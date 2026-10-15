@@ -119,7 +119,7 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
         &mut cluster_fails,
         "cluster helm release `sycophant`",
         run_silent("helm", &["status", "sycophant", "-n", "sycophant-system"]),
-        "no cluster release \u{2014} run `syco setup`",
+        "no cluster release \u{2014} run `sycoadm setup`",
     );
     require(
         &mut cluster_fails,
@@ -161,11 +161,11 @@ pub(crate) fn run(cmd: UpgradeCmd) -> Result<(), String> {
         let cli_ver = env!("CARGO_PKG_VERSION");
         require(
             &mut cluster_fails,
-            "syco not older than the cluster",
+            "sycoadm not older than the cluster",
             version_gte(cli_ver, &cluster_ver),
             &format!(
-                "cluster is v{cluster_ver} but this syco is v{cli_ver} \u{2014} `syco upgrade` \
-                 would downgrade the platform; update syco instead"
+                "cluster is v{cluster_ver} but this sycoadm is v{cli_ver} \u{2014} `sycoadm upgrade` \
+                 would downgrade the platform; update sycoadm instead"
             ),
         );
     }
@@ -392,9 +392,9 @@ mod tests {
     #[test]
     fn version_gte_orders_numerically_not_lexically() {
         assert!(version_gte("0.1.0", "0.1.0"), "equal is allowed");
-        assert!(version_gte("0.2.0", "0.1.0"), "newer syco is allowed");
+        assert!(version_gte("0.2.0", "0.1.0"), "newer sycoadm is allowed");
         // Mutant using string compare would pass this (downgrade slips through).
-        assert!(!version_gte("0.1.0", "0.2.0"), "older syco must be blocked");
+        assert!(!version_gte("0.1.0", "0.2.0"), "older sycoadm must be blocked");
         assert!(
             version_gte("0.10.0", "0.9.0"),
             "numeric, not lexical (0.10 > 0.9)"

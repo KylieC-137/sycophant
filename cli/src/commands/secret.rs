@@ -16,11 +16,11 @@ pub(crate) fn run(scope: &Scope, cmd: SecretCmd) -> Result<(), String> {
 }
 
 #[derive(Debug, Serialize, PartialEq)]
-pub(crate) struct SecretEntry {
+struct SecretEntry {
     pub name: String,
 }
 
-pub(crate) fn parse_secret_list(kubectl_output: &str) -> Vec<SecretEntry> {
+fn parse_secret_list(kubectl_output: &str) -> Vec<SecretEntry> {
     kubectl_output
         .lines()
         .map(str::trim)
@@ -36,8 +36,8 @@ fn do_set(scope: &Scope, name: &str) -> Result<(), String> {
 
     if io::stdin().is_terminal() {
         return Err("Secret value must be provided via stdin.\n  \
-             API key:  echo $API_KEY | syco secret set <name>\n  \
-             File:     syco secret set <name> < path/to/file"
+             API key:  echo $API_KEY | sycoadm secret set <name>\n  \
+             File:     sycoadm secret set <name> < path/to/file"
             .into());
     }
 

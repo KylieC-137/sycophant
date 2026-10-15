@@ -292,9 +292,19 @@ for i in $(seq 1 60); do
   kubectl get namespace "$TENANT" >/dev/null 2>&1 && break
   sleep 2
 done
+{{- if $ctx.Values.idp.certificateAuthority }}
+cat > /tmp/idp-ca.pem <<'IDPCA'
+{{ $ctx.Values.idp.certificateAuthority }}
+IDPCA
+{{- end }}
 helm upgrade --install "$TENANT" {{ $ctx.Values.provisioner.chartsDir }}/sycophant-tenant \
   --namespace "$TENANT" \
   --set namespace.create=false \
+  --set-string idp.issuer={{ $ctx.Values.idp.issuer }} \
+  --set-string idp.audience={{ $ctx.Values.idp.audience }} \
+{{- if $ctx.Values.idp.certificateAuthority }}
+  --set-file idp.certificateAuthority=/tmp/idp-ca.pem \
+{{- end }}
   --take-ownership \
   --timeout 10m
 kubectl delete configmap "$COMMAND" -n sycophant-system

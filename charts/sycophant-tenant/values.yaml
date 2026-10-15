@@ -26,3 +26,8 @@ installWait:
   image: sycophant-kubectl
   tag: local
   pullPolicy: Never
+
+idp:
+  issuer: ""
+  audience: ""
+  certificateAuthority: ""

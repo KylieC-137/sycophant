@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oidc2-fixture
+  labels: { app.kubernetes.io/name: oidc2-fixture }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: oidc2-fixture }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: oidc2-fixture }
+      annotations: { checksum/jwks: "${jwks_sum}" }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: static-server
+          # Same pinned static-web-server the object-store OIDC fixture uses,
+          # here fronted with TLS so the apiserver fetches discovery over HTTPS.
+          image: joseluisq/static-web-server@sha256:c6704bc8f1fe05378d91c3288495ce2e0131cf31cf8956f117cb1c7d83c49c31
+          args:
+            - --port=8443
+            - --root=/public
+            - --ignore-hidden-files=false
+            - --disable-symlinks=false
+            - --http2=true
+            - --http2-tls-cert=/tls/tls.crt
+            - --http2-tls-key=/tls/tls.key
+          ports: [ { name: https, containerPort: 8443 } ]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          readinessProbe:
+            httpGet: { path: /.well-known/openid-configuration, port: 8443, scheme: HTTPS }
+            initialDelaySeconds: 1
+            periodSeconds: 2
+          volumeMounts:
+            - { name: well-known, mountPath: /public/.well-known, readOnly: true }
+            - { name: tls, mountPath: /tls, readOnly: true }
+      volumes:
+        - name: well-known
+          configMap:
+            name: oidc2-fixture
+            items:
+              - { key: openid-configuration, path: openid-configuration }
+              - { key: jwks.json, path: jwks.json }
+        - name: tls
+          secret: { secretName: oidc2-fixture-tls }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oidc2-fixture
+  labels: { app.kubernetes.io/name: oidc2-fixture }
+spec:
+  type: NodePort
+  selector: { app.kubernetes.io/name: oidc2-fixture }
+  ports:
+    - name: https
+      port: 8443
+      targetPort: 8443
+      nodePort: ${APISERVER_OIDC2_NODEPORT}

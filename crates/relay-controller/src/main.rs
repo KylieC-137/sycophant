@@ -95,10 +95,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let kube_client = shared::try_init_kube_client().await?;
 
     let namespace = std::env::var("RELAY_NAMESPACE").unwrap_or_else(|_| "default".into());
+    let idp_issuer = std::env::var("IDP_ISSUER").unwrap_or_default();
+    let idp_audience = std::env::var("IDP_AUDIENCE").unwrap_or_default();
+    let idp_certificate_authority = std::env::var("IDP_CERTIFICATE_AUTHORITY").unwrap_or_default();
 
-    let state = Arc::new(GatewayState::new(
+    let state = Arc::new(GatewayState::new_with_idp(
         Some(kube_client.clone()),
         namespace.clone(),
+        idp_issuer,
+        idp_audience,
+        idp_certificate_authority,
     ));
 
     // The live ListGrants table. An unsynced table serves an empty ListGrants

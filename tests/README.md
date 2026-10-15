@@ -35,6 +35,18 @@ Run offline policy logic checks:
 make test-unit-k8s
 ```
 
+Run Go CLI unit tests:
+
+```bash
+make test-unit-go
+```
+
+Run all unit tests (Rust + Go + k8s):
+
+```bash
+make test-unit
+```
+
 Run the full e2e (k3d cluster bring-up + chainsaw + smoke):
 
 ```bash

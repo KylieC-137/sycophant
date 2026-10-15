@@ -13,16 +13,16 @@ jobs:
         include:
           - target: x86_64-apple-darwin
             os: macos-latest
-            artifact: syco-darwin-amd64
+            artifact: sycoadm-darwin-amd64
           - target: aarch64-apple-darwin
             os: macos-latest
-            artifact: syco-darwin-arm64
+            artifact: sycoadm-darwin-arm64
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            artifact: syco-linux-amd64
+            artifact: sycoadm-linux-amd64
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
-            artifact: syco-linux-arm64
+            artifact: sycoadm-linux-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -39,9 +39,9 @@ jobs:
           echo '[target.aarch64-unknown-linux-musl]' >> ~/.cargo/config.toml
           echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} -p syco
+        run: cargo build --release --target ${{ matrix.target }} -p sycoadm
       - name: Rename artifact
-        run: cp target/${{ matrix.target }}/release/syco ${{ matrix.artifact }}
+        run: cp target/${{ matrix.target }}/release/sycoadm ${{ matrix.artifact }}
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: ${{ matrix.artifact }}

@@ -3,7 +3,7 @@
 #
 # Deploys the Helm charts (in-cluster headscale plus the app-channel adapter),
 # drives the app path over the run's tailnet with the operator's Dex token
-# (grpcurl), optionally builds the Flutter macOS app as a compile check, and
+# (syco CLI), optionally builds the Flutter macOS app as a compile check, and
 # runs the Step 6 security assertions. Unattended apart from one sudo prompt
 # for the tailnet join.
 #
@@ -24,21 +24,38 @@
 # Optional env:
 #   CLUSTER_NAME (default sycophant),
 #   ARCH (default aarch64), DOCKER_ARCH (default arm64), and the SYCO_* inputs
-#   `syco setup` and the tenant commands read (see "syco inputs" below). syco's
+#   `sycoadm setup` and the tenant commands read (see "sycoadm inputs" below). sycoadm's
 #   config root is SYCO_CONFIG_DIR (default tmp/syco-config), never ~/.config.
 #
-# The bootstrap is `syco setup`, the main tenant is provisioned with `syco
-# tenant up`, and the lifecycle proof drives `syco tenant up/down/remove`. A
+# The bootstrap is `sycoadm setup`, the main tenant is provisioned with `sycoadm
+# tenant up`, and the lifecycle proof drives `sycoadm tenant up/down/remove`. A
 # cluster without the Dex operator login needs one run with --clean.
 set -euo pipefail
+set -o errtrace
+export PS4='+ ${BASH_SOURCE}:${LINENO} ${FUNCNAME[0]:-main}: '
+
+on_error() {
+  local line=$1 cmd="$2"
+  echo "FAIL at line $line: $cmd" >&2
+  echo "call stack:" >&2
+  for ((i=${#FUNCNAME[@]}-1; i>=0; i--)); do
+    echo "  ${FUNCNAME[$i]}() at ${BASH_SOURCE[$i]:-}:${BASH_LINENO[$i-1]:-}" >&2
+  done
+}
+trap 'on_error $LINENO "$BASH_COMMAND"' ERR
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
+readonly REPO_ROOT
 CLUSTER_NAME="${CLUSTER_NAME:-sycophant}"
-# The main tenant, as examples/tenants/e2e-test.yaml names it.
-NAMESPACE="tenant-e2e-test"
+readonly CLUSTER_NAME
+# The main tenant, as examples/sycoadm/tenants/e2e-test.yaml names it.
+readonly NAMESPACE="tenant-e2e-test"
 ARCH="${ARCH:-aarch64}"
+readonly ARCH
 DOCKER_ARCH="${DOCKER_ARCH:-arm64}"
+readonly DOCKER_ARCH
 RUST_TARGET="${ARCH}-unknown-linux-musl"
+readonly RUST_TARGET
 
 # ---- flags ----
 # --clean forces a fresh cluster + full image rebuild. Default reuses an
@@ -56,46 +73,47 @@ for arg in "$@"; do
   esac
 done
 # The app path is driven by the operator's person token: a Dex-signed ID
-# token whose subject `syco user up` bound to the workspace list. The relay
+# token whose subject `sycoadm user up` bound to the workspace list. The relay
 # mints nothing; the operator's live RBAC is the whole authorization.
-HEADSCALE_USER="e2e"
+readonly HEADSCALE_USER="e2e"
 # The client reaches the relay through the app adapter's tailnet node, at the
 # adapter's MagicDNS hostname. Nothing dials the relay's app port directly.
-TAILNET_RELAY_ADDR="relay:9090"
+export TAILNET_RELAY_ADDR="relay:9090"
+readonly TAILNET_RELAY_ADDR
 # The gateway serves no reflection: grpcurl reads the service from the protos.
-RELAY_GRPC_PROTO="-import-path $REPO_ROOT/crates/relay-proto/proto -import-path $REPO_ROOT/crates/proto-common/proto -proto relay/v1/relay.proto"
-ADAPTER_AUTHKEY_SECRET="relay-tsnet-authkey"
+readonly RELAY_GRPC_PROTO="-import-path $REPO_ROOT/crates/relay-proto/proto -import-path $REPO_ROOT/crates/proto-common/proto -proto relay/v1/relay.proto"
+readonly ADAPTER_AUTHKEY_SECRET="relay-tsnet-authkey"
 # Object-storage instructions delivery. The store lives in the system namespace
 # and its operator credential never leaves it; the e2e host reaches it over
 # `kubectl port-forward` and mints each harness a read-only, prefix-scoped one.
-INSTRUCTIONS_BUCKET="sycophant-instructions"
-INSTRUCTIONS_CREDENTIAL_NAME="instructions-reader"
-INSTRUCTIONS_READ_ACCESS="e2e-instructions-reader"
-INSTRUCTIONS_READ_SECRET="e2e-instructions-reader-secret"
-S3_PF_PORT=9900
+readonly INSTRUCTIONS_BUCKET="sycophant-instructions"
+readonly INSTRUCTIONS_CREDENTIAL_NAME="instructions-reader"
+readonly INSTRUCTIONS_READ_ACCESS="e2e-instructions-reader"
+readonly INSTRUCTIONS_READ_SECRET="e2e-instructions-reader-secret"
+readonly S3_PF_PORT=9900
 # SeaweedFS server image (Alpine, multi-arch), pinned by index digest to match
 # the chart default. SEAWEEDFS_IMAGE is imported + installed by
 # install_object_store. RCLONE_IMAGE (the harness sync client, a neutral S3
 # client run against the SeaweedFS s3 gateway) is a tenant workload image loaded
 # in step_1_build. Both are multi-arch indexes: export one arch to a tar to
 # import.
-SEAWEEDFS_IMAGE="chrislusf/seaweedfs@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882"
-RCLONE_IMAGE="rclone/rclone:1.75.1"
+readonly SEAWEEDFS_IMAGE="chrislusf/seaweedfs@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882"
+readonly RCLONE_IMAGE="rclone/rclone:1.75.1"
 # Marker the macOS tailnet join writes immediately before its sudo prompt and
 # removes once the join returns. An external monitor watches this path to alert
 # the operator that a password entry is imminent (the run is otherwise headless
 # until Step 5).
-SUDO_PENDING_SENTINEL="/tmp/sycophant-e2e-sudo-pending"
-# The in-cluster inference model key, examples/inference/local.yaml. Its
+readonly SUDO_PENDING_SENTINEL="/tmp/sycophant-e2e-sudo-pending"
+# The in-cluster inference model key, examples/sycoadm/inference/local.yaml. Its
 # `server` block makes the chart render the llama.cpp Deployment, its Service and
 # its ingress fence (CNP inf-<key>). Every local model serves on the fixed
 # port 8080.
-INFERENCE_PROFILE="local"
-INFERENCE_PORT="8080"
+readonly INFERENCE_PROFILE="local"
+readonly INFERENCE_PORT="8080"
 # The remote model the hello-world workspace also lists, reached through a
 # per-call inference job holding the vendor key:
-# examples/inference/deepseek-v4-flash.yaml.
-REMOTE_MODEL="deepseek-v4-flash"
+# examples/sycoadm/inference/deepseek-v4-flash.yaml.
+readonly REMOTE_MODEL="deepseek-v4-flash"
 # Flutter app compile check. Until the app's own OIDC login lands it cannot
 # connect, so the e2e only builds it; the app path is driven from here with
 # the operator's Dex token. macos = build the macOS app; none = skip.
@@ -117,11 +135,19 @@ case "$FLUTTER_TARGET" in
 esac
 # Exported so the preflight child sees a prompted answer too.
 export FLUTTER_TARGET
+readonly FLUTTER_TARGET
 
 : "${OPENROUTER_API_KEY:?must be set}"
 
 # ---- ui helpers ----
-step()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
+_step_start=0
+step()  {
+  if [ "$_step_start" -gt 0 ]; then
+    printf '\033[1;34m    ⏱  previous step took %ds\033[0m\n' "$(( SECONDS - _step_start ))"
+  fi
+  _step_start=$SECONDS
+  printf '\n\033[1;36m==> %s\033[0m\n' "$*"
+}
 ok()    { printf '\033[1;32m ✓\033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33m ⚠\033[0m %s\n' "$*" >&2; }
 # wait_for <description> <timeout-seconds> <shell-condition>
@@ -130,7 +156,8 @@ warn()  { printf '\033[1;33m ⚠\033[0m %s\n' "$*" >&2; }
 # unbounded `until ... ; do sleep N; done` so hangs surface as failures.
 wait_for() {
   local desc="$1"; local timeout="$2"; shift 2
-  local deadline=$(( $(date +%s) + timeout ))
+  local deadline
+  deadline=$(( $(date +%s) + timeout ))
   while ! eval "$*"; do
     if [ "$(date +%s)" -ge "$deadline" ]; then
       warn "timeout after ${timeout}s waiting for: ${desc}"
@@ -138,6 +165,17 @@ wait_for() {
     fi
     sleep 2
   done
+}
+
+# Decode a single claim from a compact JWT (no verification).
+jwt_claim() {
+  local token="$1" claim="$2"
+  printf '%s' "$token" \
+    | cut -d. -f2 \
+    | tr '\-_' '+/' \
+    | awk '{ m = length($0) % 4; pad = ""; if (m) for (i = 0; i < 4 - m; i++) pad = pad "="; print $0 pad }' \
+    | base64 -d 2>/dev/null \
+    | jq -r ".${claim}"
 }
 
 # Release $1 has a deployed record in namespace $2. The provision command
@@ -148,6 +186,47 @@ release_deployed() {
   local out
   out="$(kubectl get configmap -n "$2" -l "owner=helm,name=$1,status=deployed" -o name 2>/dev/null)" || true
   [ -n "$out" ]
+}
+
+# assert_command_consumed <configmap> <namespace>
+# The named provision-command ConfigMap must have been deleted by the installer.
+assert_command_consumed() {
+  local cm="$1" ns="$2"
+  if kubectl get configmap "$cm" -n "$ns" >/dev/null 2>&1; then
+    warn "provision command ${cm} survived a successful install"
+    exit 1
+  fi
+}
+
+# assert_installed <kind> <name> <namespace> [desc]
+# The resource must exist after its installer finished.
+assert_installed() {
+  local kind="$1" name="$2" ns="$3"
+  local desc="${4:-$kind/$name}"
+  if ! kubectl get "$kind" "$name" -n "$ns" >/dev/null 2>&1; then
+    warn "${desc} missing after install"
+    exit 1
+  fi
+}
+
+# assert_field <kind> <name> <namespace> <jsonpath> <expected> <desc>
+# A single jsonpath field must equal the expected value.
+assert_field() {
+  local kind="$1" name="$2" ns="$3" jp="$4" expected="$5" desc="$6"
+  if ! kubectl get "$kind" "$name" -n "$ns" -o "jsonpath=${jp}" 2>/dev/null | grep -qFx "$expected"; then
+    warn "${desc}"
+    exit 1
+  fi
+}
+
+# assert_path_absent <pod> <namespace> <path> <desc>
+# The file must NOT exist inside the pod.
+assert_path_absent() {
+  local pod="$1" ns="$2" path="$3" desc="$4"
+  if kubectl exec -n "$ns" "$pod" -- cat "$path" >/dev/null 2>&1; then
+    warn "${path} exists inside ${pod}: ${desc}"
+    exit 1
+  fi
 }
 
 # ---- background cleanup (port-forwards, receive streams) ----
@@ -174,11 +253,11 @@ trap cleanup EXIT
 "$REPO_ROOT/scripts/kill-orphans.sh"
 
 # Generate the second, non-Dex JWT issuer the apiserver trusts beside the Dex
-# issuer `syco setup` renders, so the lifecycle proof can admit a command written
+# issuer `sycoadm setup` renders, so the lifecycle proof can admit a command written
 # by an identity Dex never signed. Generates the issuer's self-signed TLS cert
 # (the CA the apiserver trusts when it fetches the issuer's JWKS) and an RSA
 # signing keypair (its public half the runtime fixture publishes, its private
-# half mints the caller token offline), and writes the jwt: list entry `syco
+# half mints the caller token offline), and writes the jwt: list entry `sycoadm
 # setup` appends to its rendered auth config before the node boots
 # (SYCO_AUTH_CONFIG_APPEND). Its username prefix matches the Dex issuer's, so
 # its tokens land in the trusted subject namespace.
@@ -209,13 +288,13 @@ gen_second_issuer_trust() {
 }
 
 # ---- step 0: bootstrap ----
-# `syco setup` does the operator's bootstrap: k3d cluster, gVisor, Cilium,
+# `sycoadm setup` does the operator's bootstrap: k3d cluster, gVisor, Cilium,
 # CoreDNS registry wiring, Kyverno, the cluster chart, and Dex with the operator
 # as its one password user. The SYCO_* inputs set above add e2e's audit policy,
 # relay port, second issuer, Kyverno and reap tuning, and skip its image build
 # (step 1 builds the full e2e set).
 step_0_bootstrap() {
-  step "Step 0: Bootstrap cluster (syco setup)"
+  step "Step 0: Bootstrap cluster (sycoadm setup)"
 
   # The apiserver reads its OIDC trust config at process start, so the second
   # issuer is generated before the node boots.
@@ -226,14 +305,14 @@ step_0_bootstrap() {
   syco_credentials
 
   "$SYCO" setup
-  ok "syco setup: cluster, gVisor, Cilium, Kyverno, cluster chart, Dex"
+  ok "sycoadm setup: cluster, gVisor, Cilium, Kyverno, cluster chart, Dex"
   assert_registry_dns
   smoke_gvisor
   install_object_store
 }
 
 # Tool job pods pull their toolset images from the in-cluster
-# `sycophant-registry` container, which `syco setup` maps into CoreDNS
+# `sycophant-registry` container, which `sycoadm setup` maps into CoreDNS
 # NodeHosts. The Corefile reloads NodeHosts on its own (up to ~60s), so gate on
 # the actual resolution from a workload pod, non-fatally: without it the
 # hostname is NXDOMAIN and Step 6 can't run any toolset tool.
@@ -291,7 +370,7 @@ install_object_store() {
   k3d image import "$tar" --cluster "$CLUSTER_NAME" >/dev/null
   rm -f "$tar"
   # Create the PSA-restricted system namespace first (helm --create-namespace
-  # would land it bare). Same manifest `syco setup` applies; idempotent.
+  # would land it bare). Same manifest `sycoadm setup` applies; idempotent.
   kubectl apply -f "$REPO_ROOT/charts/sycophant-cluster/system-ns.yaml" >/dev/null
   helm upgrade --install sycophant-objectstore "$REPO_ROOT/charts/sycophant-objectstore" \
     -n sycophant-system \
@@ -310,6 +389,11 @@ step_1_build() {
     -p inference-runtime \
     -p toolset-runtime \
     -p harness -p relay-controller
+
+  # Go syco CLI binary, used in Step 5 to drive the app path.
+  (cd "$REPO_ROOT/cmd/syco" && go build -o "$REPO_ROOT/target/syco" .) \
+    || { warn "go build of cmd/syco failed"; return 1; }
+  ok "Built the Go syco binary"
 
   local bin
   for bin in toolset-runtime relay-controller inference-runtime; do
@@ -336,7 +420,7 @@ step_1_build() {
   # md.sycophant.tools label; its toolset provision command is built from that
   # label. Every value must already be a string. A non-string aborts the build.
   local ctx tag label
-  for ctx in images/toolset:toolset images/git:toolset-git examples/toolsets/ssh-credentials:toolset-ssh-credentials; do
+  for ctx in images/toolset:toolset images/git:toolset-git examples/sycoadm/toolsets/ssh-credentials:toolset-ssh-credentials; do
     tag="${ctx#*:}"; ctx="${ctx%%:*}"
     label=$(python3 -c 'import json,sys,yaml; m=yaml.safe_load(open(sys.argv[1])); assert all(isinstance(v,str) for v in m.values()), "non-string value in "+sys.argv[1]; print(json.dumps(m,separators=(",",":")))' "$ctx/tools.yaml")
     docker build -q --build-arg "BASE_IMAGE=toolset-base:local" \
@@ -350,13 +434,13 @@ step_1_build() {
   docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" -f images/provisioner/Dockerfile "$REPO_ROOT" -t sycophant-provisioner:local >/dev/null
 
   # llama-server is a third-party engine: pulled by digest from trusted upstream,
-  # never built here. --platform pins one arch so k3d import gets a single-arch
-  # manifest, not a multi-arch index with absent per-platform blobs.
+  # never built here.
+  # Multi-arch index -- export one arch (see SEAWEEDFS_IMAGE comment).
   # Operator places this GGUF here; source: https://huggingface.co/unsloth/Qwen3.5-2B-GGUF (Qwen3.5-2B-Q4_K_M.gguf)
   local GGUF_PATH="${GGUF_PATH:-${HOME}/.cache/sycophant/weights/Qwen3.5-2B-Q4_K_M.gguf}"
   # The inference container limit must clear the mmap'd model plus its KV cache
   # and runtime, or llama.cpp OOMKills mid-load (exit 137). The model default
-  # lives here; the limit is server.memory in examples/inference/local.yaml.
+  # lives here; the limit is server.memory in examples/sycoadm/inference/local.yaml.
   # The two must move together -- assert it now so a model bump that forgets the
   # limit fails at preflight, not fifteen minutes into the run.
   if [ ! -f "$GGUF_PATH" ]; then
@@ -367,10 +451,10 @@ step_1_build() {
   model_mib=$(( $(wc -c < "$GGUF_PATH") / 1024 / 1024 ))
   floor_mib=$(( model_mib * 14 / 10 ))
   memory_mib="$(python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["inference"]["server"]["memory"])' \
-    "$REPO_ROOT/examples/inference/local.yaml")"
+    "$REPO_ROOT/examples/sycoadm/inference/local.yaml")"
   memory_mib="${memory_mib%Mi}"
   if [ "$memory_mib" -lt "$floor_mib" ]; then
-    printf '\n\033[1;31m✗ server.memory (%dMiB) is below the floor for %s (%dMiB on disk).\n   llama.cpp mmaps the model + KV + runtime; set server.memory >= %dMi (model x 1.4) in examples/inference/local.yaml.\033[0m\n' \
+    printf '\n\033[1;31m✗ server.memory (%dMiB) is below the floor for %s (%dMiB on disk).\n   llama.cpp mmaps the model + KV + runtime; set server.memory >= %dMi (model x 1.4) in examples/sycoadm/inference/local.yaml.\033[0m\n' \
       "$memory_mib" "$(basename "$GGUF_PATH")" "$model_mib" "$floor_mib" >&2
     exit 1
   fi
@@ -392,19 +476,13 @@ step_1_build() {
              weights:local toolset-git:local; do
     k3d image import "$img" --cluster "$CLUSTER_NAME" >/dev/null
   done
-  # llama-server is a multi-arch index under the containerd store; a plain import
-  # saves manifests for absent platforms and fails. Export one arch to a tarball.
+  # Multi-arch index -- export one arch (see SEAWEEDFS_IMAGE comment).
   local llama_tar; llama_tar="$(mktemp -t llama-server.XXXXXX).tar"
   docker image save --platform "linux/${DOCKER_ARCH}" -o "$llama_tar" llama-server:local
   k3d image import "$llama_tar" --cluster "$CLUSTER_NAME" >/dev/null
   rm -f "$llama_tar"
 
-  # The harness instructions-sync init container's client (rclone, a neutral S3
-  # client). A tenant-workload image pulled from Docker Hub, not a built artifact,
-  # imported under the chart's default reference. Multi-arch index, so export one
-  # arch to a tar (a plain import saves manifests for absent platforms and
-  # fails). The SeaweedFS server image is handled separately by
-  # install_object_store.
+  # Multi-arch index -- export one arch (see SEAWEEDFS_IMAGE comment).
   docker pull -q --platform "linux/${DOCKER_ARCH}" "$RCLONE_IMAGE" >/dev/null
   local rclone_tar; rclone_tar="$(mktemp -t rclone.XXXXXX).tar"
   docker image save --platform "linux/${DOCKER_ARCH}" -o "$rclone_tar" "$RCLONE_IMAGE"
@@ -432,8 +510,8 @@ provision_instructions_content() {
   step "Uploading instructions + minting read-only sync credential (${workspace} -> ${target_ns})"
 
   local instructions_src; instructions_src="$(mktemp -d)"
-  cp "$REPO_ROOT/examples/instructions/simple/AGENTS.md" "$instructions_src/AGENTS.md"
-  cp -r "$REPO_ROOT/examples/instructions/simple/agents" "$instructions_src/agents"
+  cp "$REPO_ROOT/examples/sycoadm/instructions/simple/AGENTS.md" "$instructions_src/AGENTS.md"
+  cp -r "$REPO_ROOT/examples/sycoadm/instructions/simple/agents" "$instructions_src/agents"
   sed "s/^model:.*/model: ${INFERENCE_PROFILE}/" "$instructions_src/AGENTS.md" > "$instructions_src/AGENTS.md.tmp" \
     && mv "$instructions_src/AGENTS.md.tmp" "$instructions_src/AGENTS.md"
 
@@ -454,7 +532,7 @@ provision_instructions_content() {
 
   kubectl port-forward -n sycophant-system "svc/seaweedfs" "${S3_PF_PORT}:8333" >/dev/null 2>&1 &
   local pf_pid=$!
-  trap 'kill '"$pf_pid"' 2>/dev/null || true' RETURN
+  trap 'kill '"$pf_pid"' 2>/dev/null || true; trap - RETURN' RETURN
 
   local url="http://127.0.0.1:${S3_PF_PORT}"
   wait_for "store API reachable" 60 \
@@ -467,22 +545,9 @@ provision_instructions_content() {
     aws s3 sync "$instructions_src" "s3://${INSTRUCTIONS_BUCKET}/${prefix}" --endpoint-url "$url" --delete >/dev/null
   rm -rf "$instructions_src"
 
-  # Mint the read-only, prefix-scoped reader with weed shell inside the store
-  # pod: a static S3 identity scoped to this <ns>/<workspace> prefix. rclone sync
-  # first stats the bare prefix key (a HeadObject on <prefix> with no trailing
-  # slash), then lists, then downloads, so the reader needs List and Read that
-  # cover the bare key too (SeaweedFS Read does not imply ListBucket). Both
-  # actions end in a bare "*" (no slash): SeaweedFS 4.47 authorizes the stat with
-  # target "Read:bucket/<prefix>", and a slash-star glob "bucket/<prefix>/*"
-  # requires a literal "/" after the prefix, so it misses the bare key and the
-  # stat 403s. The "*" glob crosses "/" and matches the empty suffix, so one
-  # entry covers the bare key, the list (target "List:bucket/<prefix>/"), and
-  # every child object. A non-wildcard entry is inert here: 4.47 compares it only
-  # to "Verb:bucket" with the path discarded, so it cannot scope to a prefix. The
-  # tradeoff of the bare "*" is that it also matches a sibling prefix sharing the
-  # string; that is the only prefix-scoped form CanDo can express. The reader
-  # Secret shape (access-key / secret-key) stays unchanged so the tenant Secret
-  # contract is stable.
+  # Mint a read-only S3 identity scoped to this <ns>/<workspace> prefix.
+  # The bare "*" glob (not "/*") is required: SeaweedFS 4.47 matches the
+  # bare-key stat only with a glob that crosses "/".
   kubectl exec -i -n sycophant-system deploy/seaweedfs -- weed shell >/dev/null <<EOF
 s3.configure -user ${read_access} -access_key ${read_access} -secret_key ${read_secret} -actions Read:${INSTRUCTIONS_BUCKET}/${prefix}*,List:${INSTRUCTIONS_BUCKET}/${prefix}* -apply
 EOF
@@ -495,7 +560,7 @@ EOF
 }
 
 # Render the $1 template (for example workspace-provision) of the commands chart
-# with the rest of the arguments, the same render `syco <kind> up` runs: `-f`
+# with the rest of the arguments, the same render `sycoadm <kind> up` runs: `-f`
 # files, then `--set` values as strings.
 render_command() {
   local template="$1"; shift
@@ -506,7 +571,7 @@ render_command() {
 # Write the image override for toolset $1 from local image $2: `image` is the
 # in-cluster registry digest and `tools` the image's md.sycophant.tools label.
 # The host rewrite (localhost:5555 to sycophant-registry:5000) swaps the
-# push-facing host for the name the CoreDNS NodeHosts entry `syco setup` adds
+# push-facing host for the name the CoreDNS NodeHosts entry `sycoadm setup` adds
 # resolves; the digest is identical either way.
 write_toolset_image() {
   local image="localhost:5555/$2:latest" ref tools
@@ -532,7 +597,7 @@ seed_tenant() {
   kubectl create secret generic sycophant-llm-openrouter -n "$NAMESPACE" \
     --from-literal=sycophant-llm-openrouter="$OPENROUTER_API_KEY" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
-  kubectl apply -f "$REPO_ROOT/examples/toolsets/ssh-credentials/fixtures/" -n "$NAMESPACE" >/dev/null
+  kubectl apply -f "$REPO_ROOT/examples/sycoadm/toolsets/ssh-credentials/fixtures/" -n "$NAMESPACE" >/dev/null
   ok "Instructions, secrets, toolset fixtures applied"
 }
 
@@ -540,8 +605,7 @@ seed_tenant() {
 step_3_deploy() {
   step "Step 3: Deploy charts"
 
-  # Create the PSA-restricted release namespace before helm installs into it
-  # (helm --create-namespace would land it bare). Same manifest `syco setup` applies.
+  # PSA-restricted ns -- same as install_object_store.
   kubectl apply -f "$REPO_ROOT/charts/sycophant-cluster/system-ns.yaml" >/dev/null
 
   # A killed prior run can leave this release wedged in a pending-*/failed state,
@@ -553,7 +617,7 @@ step_3_deploy() {
     warn "cluster release 'sycophant' wedged (pending/failed) — uninstalling before reinstall"
     helm uninstall sycophant -n sycophant-system --wait --timeout=2m >/dev/null 2>&1 || true
   fi
-  # `syco setup` installed the cluster chart on a fresh cluster; a reuse run
+  # `sycoadm setup` installed the cluster chart on a fresh cluster; a reuse run
   # re-applies this checkout's chart with the same Dex trust (issuer, audience,
   # and the CA setup generated) and e2e reap tuning, so chart render and live
   # apiserver config agree.
@@ -566,22 +630,18 @@ step_3_deploy() {
     --wait >/dev/null
   ok "Cluster chart installed"
 
-  # A killed prior run (e.g. an apiserver timeout mid-install) can leave a tenant
-  # release wedged in a pending-*/failed state, which blocks the next install
-  # with "another operation in progress". An e2e tenant holds no state worth
-  # preserving, so drop the non-deployed records the installers keep in
-  # ConfigMaps; the next install proceeds from the last deployed one.
+  # Same wedged-release guard as the cluster chart above.
   if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
     kubectl delete configmap -n "$NAMESPACE" \
       -l 'owner=helm,status in (pending-install,pending-upgrade,pending-rollback,failed)' \
       --ignore-not-found >/dev/null
   fi
 
-  # The operator's path: `syco tenant up -f` applies the tenant provision
+  # The operator's path: `sycoadm tenant up -f` applies the tenant provision
   # command under the operator's Dex login and waits on its installer Job. The
   # provision runs in the background while this step seeds the namespace the
   # reactor generates.
-  "$SYCO" tenant up -f "$REPO_ROOT/examples/tenants/e2e-test.yaml" &
+  "$SYCO" tenant up -f "$REPO_ROOT/examples/sycoadm/tenants/e2e-test.yaml" &
   local up_pid=$!
   CLEANUP_PIDS+=("$up_pid")
 
@@ -650,13 +710,12 @@ POD
   # container syncs its <ns>/<workspace> prefix from the shared store in the
   # system namespace (seeded above) into an emptyDir it mounts read-only.
 
-  wait "$up_pid" || { warn "syco tenant up failed"; exit 1; }
-  ok "syco tenant up: tenant provision command admitted; its installer Job succeeded (install-wait passed)"
+  wait "$up_pid" || { warn "sycoadm tenant up failed"; exit 1; }
+  ok "sycoadm tenant up: tenant provision command admitted; its installer Job succeeded (install-wait passed)"
   wait_for "tenant release ${NAMESPACE} deployed" 120 \
     "release_deployed '$NAMESPACE' '$NAMESPACE'"
   ok "tenant release ${NAMESPACE} deployed"
-  kubectl get configmap provision-tenant -n sycophant-system >/dev/null 2>&1 \
-    && { warn "the tenant provision command survived a successful install"; exit 1; }
+  assert_command_consumed provision-tenant sycophant-system
   ok "the tenant installer deleted its provision command"
 
   # Each model is its own provision command, applied once the tenant is up and
@@ -664,11 +723,10 @@ POD
   # restart.
   local model
   for model in "$REMOTE_MODEL" "$INFERENCE_PROFILE"; do
-    "$SYCO" inference up -f "$REPO_ROOT/examples/inference/${model}.yaml"
-    kubectl get configmap "inf-${model}" -n "$NAMESPACE" >/dev/null 2>&1 \
-      || { warn "model ConfigMap inf-${model} missing after its install"; exit 1; }
+    "$SYCO" inference up -f "$REPO_ROOT/examples/sycoadm/inference/${model}.yaml"
+    assert_installed configmap "inf-${model}" "$NAMESPACE" "model ConfigMap inf-${model}"
   done
-  ok "syco inference up: ${REMOTE_MODEL} and ${INFERENCE_PROFILE} model provision commands installed"
+  ok "sycoadm inference up: ${REMOTE_MODEL} and ${INFERENCE_PROFILE} model provision commands installed"
 
   # Each toolset is its own provision command: its example values, then an
   # override carrying the image digest and the image's tool label. The harness
@@ -678,31 +736,29 @@ POD
   for ts in stdlib:toolset workspace-ro:toolset-git ssh-credentials:toolset-ssh-credentials; do
     IFS=: read -r name img <<<"$ts"
     write_toolset_image "$name" "$img"
-    "$SYCO" toolset up -f "$REPO_ROOT/examples/toolsets/${name}/values.yaml" \
+    "$SYCO" toolset up -f "$REPO_ROOT/examples/sycoadm/toolsets/${name}/values.yaml" \
       -f "$VALUES_DIR/toolset-${name}-image.yaml"
     [ -n "$(kubectl get configmap "ts-${name}" -n "$NAMESPACE" \
       -o 'jsonpath={.data.image}' 2>/dev/null)" ] \
       || { warn "toolset ConfigMap ts-${name} missing or has no image after its install"; exit 1; }
   done
-  ok "syco toolset up: stdlib, workspace-ro and ssh-credentials toolset provision commands installed"
+  ok "sycoadm toolset up: stdlib, workspace-ro and ssh-credentials toolset provision commands installed"
 
   # The workspace and its bound user are one provision command each.
-  "$SYCO" workspace up -f "$REPO_ROOT/examples/workspaces/hello-world.yaml"
-  kubectl get deploy ws-hello-world -n "$NAMESPACE" >/dev/null 2>&1 \
-    || { warn "hello-world harness Deployment missing after its install"; exit 1; }
-  "$SYCO" user up -f "$REPO_ROOT/examples/users/alice.yaml" \
+  "$SYCO" workspace up -f "$REPO_ROOT/examples/sycoadm/workspaces/hello-world.yaml"
+  assert_installed deploy ws-hello-world "$NAMESPACE" "hello-world harness Deployment"
+  "$SYCO" user up -f "$REPO_ROOT/examples/sycoadm/users/alice.yaml" \
     --set "user.subject=${APISERVER_OIDC_ISSUER}#${TENANT_A_USER_SUB}"
-  ok "syco workspace up and syco user up: hello-world and its bound user installed"
+  ok "sycoadm workspace up and sycoadm user up: hello-world and its bound user installed"
 
   # The app channel is one provision command, after the base: its adapter needs
   # a pre-auth key minted from the tenant's own headscale.
-  "$SYCO" channel up -f "$REPO_ROOT/examples/channels/app.yaml"
-  kubectl get deploy headscale -n "$NAMESPACE" >/dev/null 2>&1 \
-    || { warn "headscale Deployment missing after the channel install"; exit 1; }
-  ok "syco channel up: headscale and the app channel installed"
+  "$SYCO" channel up -f "$REPO_ROOT/examples/sycoadm/channels/app.yaml"
+  assert_installed deploy headscale "$NAMESPACE" "headscale Deployment"
+  ok "sycoadm channel up: headscale and the app channel installed"
   step_3_headscale_authkey
 
-  # Identity is operator-written runtime data, not chart config: `syco user
+  # Identity is operator-written runtime data, not chart config: `sycoadm user
   # up` (run above) rendered the subject's reach RoleBindings and identity
   # ConfigMap, so the operator's Dex token already reaches hello-world. The
   # relay mints nothing; authorization is a per-request Kubernetes review
@@ -840,7 +896,7 @@ relay_call() {
   local token="$1" method="$2"; shift 2
   # shellcheck disable=SC2086 # RELAY_GRPC_PROTO is a flag list; it must split.
   grpcurl -plaintext ${RELAY_GRPC_PROTO} -authority "$TAILNET_RELAY_ADDR" \
-    -H "authorization: Bearer ${token}" "$@" -d @ \
+    -H "authorization: Bearer $token" "$@" -d @ \
     "${TAILNET_RELAY_ADDR}" "relay.v1.RelayGateway/${method}"
 }
 
@@ -849,106 +905,126 @@ relay_call() {
 E2E_TOOL_CONV=""
 E2E_CHAT_CONV=""
 
-# A client tool call inside a fresh conversation, no model involved: mint
-# the conversation, dispatch Shell into it, and wait for the result. Sets
-# E2E_TOOL_CONV. The call also starts the stdlib toolset pod Step 6 probes,
-# so it runs last in Step 5.
-e2e_tool_call() {
-  local token="$1" command="$2"
-  local conv call result
-  conv="$(relay_call "$token" MintConversation <<<'{"workspace":"hello-world"}' | jq -r '.conversationId // empty')"
-  [ -n "$conv" ] || { warn "MintConversation returned no conversation"; return 1; }
-
-  call="$(relay_call "$token" DispatchTool <<JSON | jq -r '.callId // empty'
-{"name": "Shell", "workspace": "hello-world", "conversationId": "$conv",
- "inputJson": $(jq -n --arg c "$command" '{command: $c} | tojson')}
-JSON
-  )"
-  [ -n "$call" ] || { warn "DispatchTool returned no call id"; return 1; }
-
-  result="$(relay_call "$token" AwaitToolResult -max-time 180 <<JSON 2>&1
-{"callId": "$call", "conversationId": "$conv", "workspace": "hello-world"}
-JSON
-  )"
-  printf '%s' "$result" | jq -e 'select(.complete.outcome == "TOOL_OUTCOME_DONE")' >/dev/null 2>&1 \
-    || { warn "tool call did not complete: ${result}"; return 1; }
-  E2E_TOOL_CONV="$conv"
-}
-
-# One model turn with the demo-key grant, as a person-token client would
-# send it: open a receive stream, ingest the message on its channel, and wait
-# for the turn to go idle. Sets E2E_CHAT_CONV.
-e2e_chat_turn() {
-  local token="$1" message="$2"
-  local stream pid ch conv
-  stream="$(mktemp)"
-  relay_call "$token" ChannelReceive -max-time 300 \
-    <<<'{"workspace":"hello-world"}' >"$stream" 2>&1 &
-  pid=$!
-  CLEANUP_PIDS+=("$pid")
-
-  # shellcheck disable=SC2016 # single-quoted on purpose: wait_for evals it.
-  wait_for "receive stream opened" 30 \
-    'jq -r ".ack.channelId // empty" "'"$stream"'" 2>/dev/null | grep -q .' \
-    || { warn "ChannelReceive opened no channel: $(cat "$stream")"; return 1; }
-  ch="$(jq -r '.ack.channelId // empty' "$stream" 2>/dev/null | head -1)"
-
-  conv="$(relay_call "$token" ChannelIngest <<JSON | jq -r '.conversationId // empty'
-{"channelId": "$ch",
- "userMessage": {"content": [{"text": {"text": $(jq -Rn --arg m "$message" '$m')}}],
-                 "grants": [{"toolset": "ssh-credentials", "grant": "demo-key"}]}}
-JSON
-  )"
-  [ -n "$conv" ] || { warn "ChannelIngest filed no conversation"; kill "$pid" 2>/dev/null; return 1; }
-
-  # shellcheck disable=SC2016 # single-quoted on purpose: wait_for evals it.
-  wait_for "chat turn finished" 180 \
-    'jq -r "select(.turnState.conversationId == \"'"$conv"'\") | .turnState.state" "'"$stream"'" 2>/dev/null | grep -qE "TURN_STATE_(IDLE|FAILED)"' \
-    || { kill "$pid" 2>/dev/null; return 1; }
-  kill "$pid" 2>/dev/null
-  if jq -r "select(.turnState.conversationId == \"$conv\") | .turnState.state" "$stream" 2>/dev/null \
-       | grep -q TURN_STATE_FAILED; then
-    warn "chat turn failed: $(jq -c 'select(.turnState.state == "TURN_STATE_FAILED")' "$stream" 2>/dev/null)"
-    return 1
-  fi
-  jq -r '.streamItem.start.toolUse.name // empty' "$stream" 2>/dev/null | grep -qx 'test-cmd' \
-    || { warn "the model did not call test-cmd in the chat turn"; return 1; }
-  E2E_CHAT_CONV="$conv"
-}
-
 # The app path with the operator's person token, over the same tailnet
 # forward the app uses. The relay TokenReviews the token, resolves the bound
 # subject, and authorizes the named workspace by SubjectAccessReview for it.
+# Drives the path through the syco CLI rather than raw grpcurl.
 step_5_app_path_turn() {
   local token="$1"
-  command -v grpcurl >/dev/null 2>&1 \
-    || { warn "grpcurl required for the app-path turn"; return 1; }
+
+  # ── isolated config dir for the operator's token ──
+  local SYCO_APP_TMP
+  SYCO_APP_TMP="$(mktemp -d)"
+  trap 'rm -rf "$SYCO_APP_TMP"; trap - RETURN' RETURN
+
+  envsubst < "$REPO_ROOT/examples/syco/config.toml" > "$SYCO_APP_TMP/config.toml"
+
+  SYCO_TOKEN="$token" envsubst < "$REPO_ROOT/examples/syco/credentials.toml" > "$SYCO_APP_TMP/credentials.toml"
 
   # The watched identity table answers the bound list for the token's subject.
   local listed
-  listed="$(relay_call "$token" ListWorkspaces <<<'{}' 2>&1)" \
-    || { warn "ListWorkspaces failed over the tailnet: ${listed}"; return 1; }
+  listed="$(SYCO_CONFIG_DIR="$SYCO_APP_TMP" "$REPO_ROOT/target/syco" whoami 2>&1)" \
+    || { warn "syco whoami failed over the tailnet: ${listed}"; return 1; }
   printf '%s' "$listed" | grep -q 'hello-world' \
-    || { warn "ListWorkspaces did not answer hello-world: ${listed}"; return 1; }
-  ok "ListWorkspaces answered the bound list (hello-world present)"
+    || { warn "syco whoami did not list hello-world: ${listed}"; return 1; }
+  ok "syco whoami answered the bound list (hello-world present)"
 
   # The same token on a workspace it was never granted: the review must deny.
-  local denied
-  denied="$(relay_call "$token" DispatchTool 2>&1 <<'JSON'
-{"name": "Shell", "workspace": "not-granted", "conversationId": "", "inputJson": "{}"}
-JSON
-  )"
-  printf '%s' "$denied" | grep -q 'PermissionDenied' \
-    || { warn "an ungranted workspace was not denied over the app path: ${denied}"; return 1; }
-  ok "Ungranted workspace denied over the app path"
+  local denied_cfg
+  denied_cfg="$(mktemp -d)"
+  cat > "$denied_cfg/config.toml" <<TOML
+[default]
+profile = "e2e"
 
-  e2e_chat_turn "$token" "Use the test-cmd tool." || return 1
-  ok "Chat turn with the demo-key grant ran over the app path (${E2E_CHAT_CONV})"
+[profile.e2e]
+server = "$TAILNET_RELAY_ADDR"
+workspace = "not-granted"
+TOML
+  cp "$SYCO_APP_TMP/credentials.toml" "$denied_cfg/credentials.toml"
+
+  local denied
+  if denied="$(SYCO_CONFIG_DIR="$denied_cfg" "$REPO_ROOT/target/syco" chat "hello" 2>&1)"; then
+    warn "an ungranted workspace was not denied over the app path: ${denied}"
+    rm -rf "$denied_cfg"
+    return 1
+  fi
+  if ! printf '%s' "$denied" | grep -qi 'permission\|denied\|PermissionDenied'; then
+    warn "an ungranted workspace was not denied over the app path: ${denied}"
+    rm -rf "$denied_cfg"
+    return 1
+  fi
+  rm -rf "$denied_cfg"
+  ok "Ungranted workspace denied over the app path"
 
   # Last, so the stdlib toolset pod it starts is freshly used when Step 6
   # probes it: keepalive pods exit after 10 minutes idle.
-  e2e_tool_call "$token" 'dmesg | head -1' || return 1
-  ok "Tool call ran in a conversation over the app path (${E2E_TOOL_CONV})"
+  local chat_out chat_err
+  chat_err="$(mktemp)"
+  chat_out="$(SYCO_CONFIG_DIR="$SYCO_APP_TMP" \
+    "$REPO_ROOT/target/syco" chat "Run: dmesg | head -1" 2>"$chat_err")" \
+    || { warn "syco chat (tool call) exited non-zero: ${chat_out} $(cat "$chat_err")"; rm -f "$chat_err"; return 1; }
+  E2E_TOOL_CONV="$(sed -n 's/^conversation: //p' "$chat_err" | head -1)"
+  rm -f "$chat_err"
+  [ -n "$E2E_TOOL_CONV" ] \
+    || { warn "syco chat did not print a conversation ID to stderr"; return 1; }
+  ok "Tool call ran via syco chat over the app path (${E2E_TOOL_CONV})"
+}
+
+# End-to-end login + chat via the Go `syco` CLI binary: write a throwaway
+# config, `syco login` with the Dex credentials, bind the resulting identity
+# to the hello-world workspace, then `syco chat`.
+# Sets E2E_CHAT_CONV from the conversation ID syco chat prints to stderr.
+step_5b_syco_cli_chat() {
+  command -v go >/dev/null 2>&1 \
+    || { warn "go toolchain required for the syco CLI test"; return 1; }
+
+  # ── isolated config dir ──
+  local SYCO_TMP
+  SYCO_TMP="$(mktemp -d)"
+  trap 'rm -rf "$SYCO_TMP"; trap - RETURN' RETURN
+
+  envsubst < "$REPO_ROOT/examples/syco/config.toml" > "$SYCO_TMP/config.toml"
+
+  # ── login ──
+  SYCO_CONFIG_DIR="$SYCO_TMP" SYCO_PASSWORD="$SYCO_PASSWORD" \
+    "$REPO_ROOT/target/syco" login --email "$SYCO_EMAIL" \
+    || { warn "syco login failed"; return 1; }
+  ok "syco login succeeded"
+
+  # ── extract sub claim from the saved token ──
+  local raw_token sub
+  raw_token="$(awk -F'"' '/token/ {print $2}' "$SYCO_TMP/credentials.toml")"
+  [ -n "$raw_token" ] || { warn "no token found in credentials.toml"; return 1; }
+
+  sub="$(jwt_claim "$raw_token" sub)"
+  [ -n "$sub" ] && [ "$sub" != "null" ] \
+    || { warn "could not decode sub from the saved JWT"; return 1; }
+  ok "Decoded sub from JWT: ${sub}"
+
+  # ── bind identity to workspace ──
+  "$SYCO" user up -f "$REPO_ROOT/examples/sycoadm/users/alice.yaml" \
+    --set "user.subject=${APISERVER_OIDC_ISSUER}#${sub}" \
+    --set "user.workspaces={hello-world}" \
+    || { warn "sycoadm user up failed for the syco identity"; return 1; }
+  ok "Bound ${APISERVER_OIDC_ISSUER}#${sub} to hello-world"
+
+  # ── chat ──
+  local chat_out chat_err
+  chat_err="$(mktemp)"
+  chat_out="$(SYCO_CONFIG_DIR="$SYCO_TMP" \
+    "$REPO_ROOT/target/syco" chat "Use the test-cmd tool." \
+    --grant ssh-credentials/demo-key 2>"$chat_err")" \
+    || { warn "syco chat exited non-zero: ${chat_out} $(cat "$chat_err")"; rm -f "$chat_err"; return 1; }
+
+  printf '%s\n' "$chat_out" | grep -q 'test-cmd' \
+    || { warn "syco chat output did not contain a test-cmd tool call line: ${chat_out}"; rm -f "$chat_err"; return 1; }
+
+  # syco chat prints "conversation: <id>" to stderr on success.
+  E2E_CHAT_CONV="$(sed -n 's/^conversation: //p' "$chat_err" | head -1)"
+  rm -f "$chat_err"
+  [ -n "$E2E_CHAT_CONV" ] \
+    || { warn "syco chat did not print a conversation ID to stderr"; return 1; }
+  ok "syco chat completed with test-cmd tool call (${E2E_CHAT_CONV})"
 }
 
 # Re-register the operator's Mac against THIS run's headscale. Every Step 0
@@ -1028,12 +1104,16 @@ step_5_flutter() {
   tailnet_join_macos || return 1
 
   # The operator's person token: a Dex-signed ID token for the subject
-  # `syco user up` bound to the workspace list.
+  # `sycoadm user up` bound to the workspace list.
   local token
   token="$(mint_dex_token "$TENANT_A_USER_SUB")"
   step_5_app_path_turn "$token" \
     || { warn "the operator-token app-path turn failed"; return 1; }
   ok "App path proven with the operator token (denial, chat turn, tool call)"
+
+  step_5b_syco_cli_chat \
+    || { warn "syco CLI login + chat test failed"; return 1; }
+  ok "syco CLI login + chat proven end-to-end"
 }
 
 # ---- step 6: security assertions ----
@@ -1143,15 +1223,7 @@ step_6_security() {
     return 1
   fi
 
-  # The harness persists tool execution to a single append-only
-  # execution.json per conversation, under
-  # /var/lib/harness/conversations/<ws>/<conv_id>/execution.json: one
-  # ND-JSON record per ToolResultFrame (stdout / stderr / image, terminated by
-  # one ToolComplete), each line carrying its call_id, with binary frames moved
-  # to content-addressed blobs/sha256/<hex> in the same conversation dir. A tool
-  # that ran to completion leaves a non-empty execution.json, so assert a
-  # non-empty execution.json exists for this run's tool-call conversation.
-  # Read it via the same ephemeral container the conv-log scrub scan used.
+  # The harness writes execution.json per conversation; a completed tool call leaves it non-empty.
   local exec_ok=""
   for _ in $(seq 1 30); do
     exec_ok="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
@@ -1188,24 +1260,14 @@ step_6_security() {
     warn "nslookup absent in toolset image — skipping L7 DNS probe (wget check still covers egress containment)"
   fi
 
-  if kubectl exec -n "$NAMESPACE" "$task_pod" -- \
-       cat /run/secrets/toolset/api-key >/dev/null 2>&1; then
-    warn "/run/secrets/toolset/api-key exists inside stdlib toolset pod — credential leak"
-    return 1
-  else
-    ok "Credential isolation (no LLM key in stdlib toolset pod)"
-  fi
+  assert_path_absent "$task_pod" "$NAMESPACE" /run/secrets/toolset/api-key "credential leak"
+  ok "Credential isolation (no LLM key in stdlib toolset pod)"
 
   # The stdlib toolset is bound bare, so this call resolved no grant. The
   # convention credential target must therefore be empty: a grant a call never
   # selected must not reach the pod.
-  if kubectl exec -n "$NAMESPACE" "$task_pod" -- \
-       cat /run/secrets/grant/credential >/dev/null 2>&1; then
-    warn "/run/secrets/grant/credential exists inside a grantless toolset pod — credential leak"
-    return 1
-  else
-    ok "Credential isolation (no grant credential in a grantless toolset pod)"
-  fi
+  assert_path_absent "$task_pod" "$NAMESPACE" /run/secrets/grant/credential "credential leak"
+  ok "Credential isolation (no grant credential in a grantless toolset pod)"
 
   # Every workspace-sa form the chart renders for the workspace must exist, not
   # just one of them.
@@ -1458,7 +1520,7 @@ POD
     "${prompt_ms:-n/a}" "${rate:-n/a}" "${mem:-n/a}"
 }
 
-# Identity is live operator data: the operator re-runs `syco user up` and the
+# Identity is live operator data: the operator re-runs `sycoadm user up` and the
 # relay's watched table answers the change without a pod restart. The probe
 # binds a second subject, waits for its identity ConfigMap to appear in the
 # watched answer, then removes the binding and waits for the answer to go
@@ -1475,11 +1537,11 @@ step_6_identity_hot_reload() {
   # answer its list.
   # Its own handle: a handle two subjects claim resolves to neither, which
   # would unbind the main user's slack handle for the length of the probe.
-  "$SYCO" user up -f "$REPO_ROOT/examples/users/alice.yaml" \
+  "$SYCO" user up -f "$REPO_ROOT/examples/sycoadm/users/alice.yaml" \
     --set "user.subject=${APISERVER_OIDC_ISSUER}#${probe_sub}" \
     --set "user.handles.slack=E2E-HOT-RELOAD" \
     >/dev/null \
-    || { warn "syco user up failed for the hot-reload probe"; return 1; }
+    || { warn "sycoadm user up failed for the hot-reload probe"; return 1; }
 
   token="$(mint_dex_token "$probe_sub")"
   # shellcheck disable=SC2016 # single-quoted on purpose: wait_for evals it.
@@ -1492,7 +1554,7 @@ step_6_identity_hot_reload() {
   fi
 
   # Remove the binding by deleting the user's release, exactly as the
-  # operator would re-run `syco user up` without the workspace: the identity
+  # operator would re-run `sycoadm user up` without the workspace: the identity
   # ConfigMap and the reach RoleBindings go together. The relay's next
   # answer must be empty.
   local release_name
@@ -1522,30 +1584,30 @@ step_6_identity_hot_reload() {
   ok "Identity hot reload completed with no relay restart"
 }
 
-# ---- step 7: syco upgrade via the CLI ----
+# ---- step 7: sycoadm upgrade via the CLI ----
 # Exercises the operator upgrade path: it re-extracts the binary's charts and
 # re-provisions the main tenant from its provision command, so this is the only
-# coverage that `syco upgrade` actually delivers the binary's charts. Wiping the config-root charts first is the regression guard: an upgrade
+# coverage that `sycoadm upgrade` actually delivers the binary's charts. Wiping the config-root charts first is the regression guard: an upgrade
 # that skips the chart re-extract has nothing to apply and fails here.
 step_7_upgrade_cli() {
-  step "Step 7: syco upgrade (CLI chart delivery)"
+  step "Step 7: sycoadm upgrade (CLI chart delivery)"
 
-  cargo build --release -p syco >/dev/null
-  local syco="$REPO_ROOT/target/release/syco"
+  cargo build --release -p sycoadm >/dev/null
+  local syco="$REPO_ROOT/target/release/sycoadm"
 
   rm -rf "${SYCO_CONFIG_DIR}/charts"
 
   if "$syco" upgrade; then
-    ok "syco upgrade succeeded (re-extracted charts + applied cluster + tenant)"
+    ok "sycoadm upgrade succeeded (re-extracted charts + applied cluster + tenant)"
   else
-    warn "syco upgrade FAILED — CLI did not deliver its embedded charts"
+    warn "sycoadm upgrade FAILED — CLI did not deliver its embedded charts"
     return 1
   fi
 
   if [ -f "${SYCO_CONFIG_DIR}/charts/sycophant-cluster/Chart.yaml" ]; then
     ok "config-root charts re-extracted from the binary"
   else
-    warn "syco upgrade left the config-root charts missing"
+    warn "sycoadm upgrade left the config-root charts missing"
     return 1
   fi
 }
@@ -1558,10 +1620,10 @@ step_7_upgrade_cli() {
 #                      -s3.iam.config roleMapping maps this issuer to it.
 # The issuer carries :8080 so the iss claim, the discovery jwks_uri, the JWKS
 # fetch, the fixture Service, and the egress port all resolve to one port.
-OIDC_WRITE_ROLE_ARN="${OIDC_WRITE_ROLE_ARN:-arn:aws:iam::role/instructions-writer}"
-OIDC_FIXTURE_AUDIENCE="${OIDC_FIXTURE_AUDIENCE:-sycophant-objectstore}"
-OIDC_FIXTURE_SUBJECT="${OIDC_FIXTURE_SUBJECT:-e2e-writer}"
-OIDC_FIXTURE_ISSUER="http://oidc-fixture.sycophant-system.svc.cluster.local:8080"
+readonly OIDC_WRITE_ROLE_ARN="${OIDC_WRITE_ROLE_ARN:-arn:aws:iam::role/instructions-writer}"
+readonly OIDC_FIXTURE_AUDIENCE="${OIDC_FIXTURE_AUDIENCE:-sycophant-objectstore}"
+readonly OIDC_FIXTURE_SUBJECT="${OIDC_FIXTURE_SUBJECT:-e2e-writer}"
+readonly OIDC_FIXTURE_ISSUER="http://oidc-fixture.sycophant-system.svc.cluster.local:8080"
 
 # Apiserver-trusted issuer for the per-identity cluster-identity proof: the
 # bundled Dex. A separate trust root from the object-store issuer above: the
@@ -1571,55 +1633,52 @@ OIDC_FIXTURE_ISSUER="http://oidc-fixture.sycophant-system.svc.cluster.local:8080
 # rendered AuthenticationConfiguration are generated at boot into
 # tmp/oidc-apiserver and mounted into the apiserver; the same cert is handed to
 # Dex as its TLS listener, so both ends share one CA.
-APISERVER_OIDC_NS="sycophant-system"
-# Dex is published on this pinned NodePort so the apiserver reaches its
-# discovery and JWKS at the node loopback.
-APISERVER_OIDC_NODEPORT=30443
-# Dex serves discovery and JWKS under the /dex path.
-APISERVER_OIDC_ISSUER="https://127.0.0.1:${APISERVER_OIDC_NODEPORT}/dex"
-APISERVER_OIDC_AUDIENCE="sycophant-cluster"
-APISERVER_OIDC_DIR="$REPO_ROOT/tmp/oidc-apiserver"
+readonly APISERVER_OIDC_NS="sycophant-system"
+readonly APISERVER_OIDC_NODEPORT=30443
+readonly APISERVER_OIDC_ISSUER="https://127.0.0.1:${APISERVER_OIDC_NODEPORT}/dex"
+readonly APISERVER_OIDC_AUDIENCE="sycophant-cluster"
+readonly APISERVER_OIDC_DIR="$REPO_ROOT/tmp/oidc-apiserver"
 # The identity sub each token carries; the apiserver prefixes it with the
 # issuer to form the RoleBinding subject <issuer>#<sub>.
-TENANT_A_USER_SUB="tenant-a-user"
-TENANT_B_USER_SUB="tenant-b-user"
-TENANT_B_NAMESPACE="${NAMESPACE}-b"
+readonly TENANT_A_USER_SUB="tenant-a-user"
+readonly TENANT_B_USER_SUB="tenant-b-user"
+readonly TENANT_B_NAMESPACE="${NAMESPACE}-b"
 
 # Command contract. Command names and the label mirror the cluster
 # chart's reactor policies. The reactor prefixes the bare tenant token with
 # tenant-. The operator is authenticated by a second, non-Dex issuer (below).
-LIFECYCLE_OPERATOR_SUB="operator-provisioner"
-LIFECYCLE_TENANT_TOKEN="lifecycle-probe"
-LIFECYCLE_TENANT_NS="tenant-${LIFECYCLE_TENANT_TOKEN}"
-LIFECYCLE_WORKSPACE="hello-world"
-LIFECYCLE_USER="${APISERVER_OIDC_ISSUER}#lifecycle-bound-user"
+readonly LIFECYCLE_OPERATOR_SUB="operator-provisioner"
+readonly LIFECYCLE_TENANT_TOKEN="lifecycle-probe"
+readonly LIFECYCLE_TENANT_NS="tenant-${LIFECYCLE_TENANT_TOKEN}"
+readonly LIFECYCLE_WORKSPACE="hello-world"
+readonly LIFECYCLE_USER="${APISERVER_OIDC_ISSUER}#lifecycle-bound-user"
 # Toolset names absent from the base install, so their ConfigMaps can only land
 # via their provision commands.
-LIFECYCLE_TOOLSET="lifecycle-tool"
-LIFECYCLE_TOOLSET_2="lifecycle-tool-2"
+readonly LIFECYCLE_TOOLSET="lifecycle-tool"
+readonly LIFECYCLE_TOOLSET_2="lifecycle-tool-2"
 
 # A second JWT issuer on its own loopback NodePort, trusted at boot
 # (gen_second_issuer_trust) with the same username prefix as Dex, so the command
 # contract is proven against an issuer the bundled Dex never signed.
-APISERVER_OIDC2_NODEPORT=30444
-APISERVER_OIDC2_ISSUER="https://127.0.0.1:${APISERVER_OIDC2_NODEPORT}"
-APISERVER_OIDC2_AUDIENCE="sycophant-lifecycle"
-APISERVER_OIDC2_KID="lifecycle-fixture-key"
+readonly APISERVER_OIDC2_NODEPORT=30444
+readonly APISERVER_OIDC2_ISSUER="https://127.0.0.1:${APISERVER_OIDC2_NODEPORT}"
+readonly APISERVER_OIDC2_AUDIENCE="sycophant-lifecycle"
+readonly APISERVER_OIDC2_KID="lifecycle-fixture-key"
 
-# ---- syco inputs ----
-# e2e drives the operator's real path through `syco`. Each SYCO_* input below
+# ---- sycoadm inputs ----
+# e2e drives the operator's real path through `sycoadm`. Each SYCO_* input below
 # defaults for e2e and may be overridden from the environment.
-SYCO="$REPO_ROOT/target/release/syco"
-# syco's config root for this run, so e2e never touches the operator's own
-# ~/.config/sycophant. `syco setup` regenerates the Dex trust under it.
+readonly SYCO="$REPO_ROOT/target/release/sycoadm"
+# sycoadm's config root for this run, so e2e never touches the operator's own
+# ~/.config/sycophant. `sycoadm setup` regenerates the Dex trust under it.
 export SYCO_CONFIG_DIR="${SYCO_CONFIG_DIR:-$REPO_ROOT/tmp/syco-config}"
 # Dex's operator login. The password persists for reuse runs against the same
 # Dex and is regenerated with the cluster.
-SYCO_PASSWORD_FILE="$REPO_ROOT/tmp/e2e-operator-password"
-# The public Dex CA `syco setup` generated and the apiserver trusts.
-SYCO_DEX_CA="$SYCO_CONFIG_DIR/oidc/ca.crt"
+readonly SYCO_PASSWORD_FILE="$REPO_ROOT/tmp/e2e-operator-password"
+# The public Dex CA `sycoadm setup` generated and the apiserver trusts.
+readonly SYCO_DEX_CA="$SYCO_CONFIG_DIR/oidc/ca.crt"
 # The toolset image overrides e2e writes beside the example values.
-VALUES_DIR="$SYCO_CONFIG_DIR/values"
+readonly VALUES_DIR="$SYCO_CONFIG_DIR/values"
 export SYCO_EMAIL="${SYCO_EMAIL:-e2e-operator@sycophant.local}"
 # Step 1 builds and loads the e2e image set itself.
 export SYCO_SKIP_BUILD="${SYCO_SKIP_BUILD:-1}"
@@ -1691,7 +1750,7 @@ verify_oidc_write_path() {
   command -v python3 >/dev/null 2>&1 || { warn "python3 required for the OIDC proof"; exit 1; }
 
   local work; work="$(mktemp -d)"
-  trap 'rm -rf "$work"' RETURN
+  trap 'rm -rf "$work"; trap - RETURN' RETURN
 
   # --- fixture keypair + discovery + JWKS ---
   openssl genrsa -out "$work/key.pem" 2048 >/dev/null 2>&1
@@ -1745,7 +1804,7 @@ EOF
   # --- reach the s3 gateway over the port-forward ---
   kubectl port-forward -n sycophant-system svc/seaweedfs "${S3_PF_PORT}:8333" >/dev/null 2>&1 &
   local pf_pid=$!
-  trap 'kill '"$pf_pid"' 2>/dev/null || true; rm -rf "$work"' RETURN
+  trap 'kill '"$pf_pid"' 2>/dev/null || true; rm -rf "$work"; trap - RETURN' RETURN
   local endpoint="http://127.0.0.1:${S3_PF_PORT}"
   wait_for "s3 gateway reachable" 60 "curl -s -o /dev/null '${endpoint}'"
 
@@ -1826,9 +1885,9 @@ verify_user_isolation() {
     || { warn "apiserver OIDC trust material missing at ${SYCO_DEX_CA}; boot the cluster with --clean first"; exit 1; }
 
   local work; work="$(mktemp -d)"
-  trap 'rm -rf "$work"' RETURN
+  trap 'rm -rf "$work"; trap - RETURN' RETURN
 
-  # `syco setup` installed the bundled Dex on the pinned NodePort the apiserver
+  # `sycoadm setup` installed the bundled Dex on the pinned NodePort the apiserver
   # trusts, with its own TLS cert.
   wait_for "bundled Dex ready" 120 \
     "kubectl get deploy sycophant-dex -n $APISERVER_OIDC_NS -o jsonpath='{.status.readyReplicas}' 2>/dev/null | grep -qx 1"
@@ -1846,9 +1905,9 @@ verify_user_isolation() {
        -o jsonpath='{.metadata.labels.app\.kubernetes\.io/part-of}' 2>/dev/null | grep -qx sycophant-tenant; then
     kubectl delete namespace "$TENANT_B_NAMESPACE" --timeout=300s >/dev/null
   fi
-  "$SYCO" tenant up -f "$REPO_ROOT/examples/tenants/e2e-test.yaml" \
+  "$SYCO" tenant up -f "$REPO_ROOT/examples/sycoadm/tenants/e2e-test.yaml" \
     --set "tenant.name=${TENANT_B_NAMESPACE#tenant-}" --set tenant.capacity=512Mi
-  "$SYCO" user up -f "$REPO_ROOT/examples/users/alice.yaml" --set "user.tenant=${TENANT_B_NAMESPACE#tenant-}" \
+  "$SYCO" user up -f "$REPO_ROOT/examples/sycoadm/users/alice.yaml" --set "user.tenant=${TENANT_B_NAMESPACE#tenant-}" \
     --set "user.subject=${APISERVER_OIDC_ISSUER}#${TENANT_B_USER_SUB}" \
     --set "user.workspaces="
   ok "tenant ${TENANT_B_NAMESPACE} provisioned and bound to ${TENANT_B_USER_SUB}"
@@ -1957,74 +2016,8 @@ stand_up_second_issuer() {
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
   local jwks_sum; jwks_sum="$(shasum -a 256 "$work/oidc2-jwks.json" | cut -d' ' -f1)"
-  kubectl apply -n "$APISERVER_OIDC_NS" -f - >/dev/null <<YAML
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: oidc2-fixture
-  labels: { app.kubernetes.io/name: oidc2-fixture }
-spec:
-  replicas: 1
-  selector:
-    matchLabels: { app.kubernetes.io/name: oidc2-fixture }
-  template:
-    metadata:
-      labels: { app.kubernetes.io/name: oidc2-fixture }
-      annotations: { checksum/jwks: "${jwks_sum}" }
-    spec:
-      automountServiceAccountToken: false
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
-        fsGroup: 1000
-        seccompProfile: { type: RuntimeDefault }
-      containers:
-        - name: static-server
-          # Same pinned static-web-server the object-store OIDC fixture uses,
-          # here fronted with TLS so the apiserver fetches discovery over HTTPS.
-          image: joseluisq/static-web-server@sha256:c6704bc8f1fe05378d91c3288495ce2e0131cf31cf8956f117cb1c7d83c49c31
-          args:
-            - --port=8443
-            - --root=/public
-            - --ignore-hidden-files=false
-            - --disable-symlinks=false
-            - --http2=true
-            - --http2-tls-cert=/tls/tls.crt
-            - --http2-tls-key=/tls/tls.key
-          ports: [ { name: https, containerPort: 8443 } ]
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities: { drop: [ALL] }
-          readinessProbe:
-            httpGet: { path: /.well-known/openid-configuration, port: 8443, scheme: HTTPS }
-            initialDelaySeconds: 1
-            periodSeconds: 2
-          volumeMounts:
-            - { name: well-known, mountPath: /public/.well-known, readOnly: true }
-            - { name: tls, mountPath: /tls, readOnly: true }
-      volumes:
-        - name: well-known
-          configMap:
-            name: oidc2-fixture
-            items:
-              - { key: openid-configuration, path: openid-configuration }
-              - { key: jwks.json, path: jwks.json }
-        - name: tls
-          secret: { secretName: oidc2-fixture-tls }
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: oidc2-fixture
-  labels: { app.kubernetes.io/name: oidc2-fixture }
-spec:
-  type: NodePort
-  selector: { app.kubernetes.io/name: oidc2-fixture }
-  ports:
-    - { name: https, port: 8443, targetPort: 8443, nodePort: ${APISERVER_OIDC2_NODEPORT} }
-YAML
+  export jwks_sum APISERVER_OIDC2_NODEPORT
+  envsubst < "$REPO_ROOT/tests/fixtures/oidc2/server.yaml" | kubectl apply -n "$APISERVER_OIDC_NS" -f - >/dev/null
   wait_for "second issuer fixture ready" 120 \
     "kubectl get deploy oidc2-fixture -n $APISERVER_OIDC_NS -o jsonpath='{.status.readyReplicas}' 2>/dev/null | grep -qx 1"
 }
@@ -2042,7 +2035,7 @@ YAML
 handle_of() { printf '%s' "$1" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10; }
 
 # Prove the identity gate on the kind $1 provision command rendered from the
-# rest of the arguments (`syco <kind> up` values), sent with kubectl create: the
+# rest of the arguments (`sycoadm <kind> up` values), sent with kubectl create: the
 # standing SA ($sa_kube) is refused by command-provision-$1 on a real write, and
 # the second issuer's identity ($op_kube), which Dex never signed, is admitted on
 # a server dry-run so nothing is generated.
@@ -2087,14 +2080,10 @@ lifecycle_toolset_image() {
 
 # Write the values for toolset $1 to $work.
 toolset_values() {
-  cat > "$work/toolset-$1.yaml" <<YAML
-toolset:
-  name: $1
-  tenant: ${LIFECYCLE_TENANT_TOKEN}
-  image: $(lifecycle_toolset_image "$1")
-  tools:
-    tool.$1-status.description: Report status.
-YAML
+  TOOLSET_NAME="$1" \
+  TOOLSET_TENANT="$LIFECYCLE_TENANT_TOKEN" \
+  TOOLSET_IMAGE="$(lifecycle_toolset_image "$1")" \
+  envsubst < "$REPO_ROOT/tests/fixtures/lifecycle/toolset.yaml" > "$work/toolset-$1.yaml"
 }
 
 verify_tenant_lifecycle() {
@@ -2107,7 +2096,7 @@ verify_tenant_lifecycle() {
   user_handle="$(handle_of "$LIFECYCLE_USER")"
 
   local work; work="$(mktemp -d)"
-  trap 'rm -rf "$work"' RETURN
+  trap 'rm -rf "$work"; trap - RETURN' RETURN
 
   # Start from nothing, so the proof covers a first provision. A prior run's
   # installer outlives its reap TTL.
@@ -2140,17 +2129,17 @@ verify_tenant_lifecycle() {
 
   local owner_hash
   owner_hash="$(printf '%s' "$operator_identity" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-16)"
-  local tenant_values=(-f "$REPO_ROOT/examples/tenants/e2e-test.yaml"
+  local tenant_values=(-f "$REPO_ROOT/examples/sycoadm/tenants/e2e-test.yaml"
     --set "tenant.name=$LIFECYCLE_TENANT_TOKEN" --set tenant.capacity=512Mi
     --set "tenant.owner=$operator_identity" --set "tenant.ownerHash=$owner_hash")
   prove_gate tenant "${tenant_values[@]}"
 
-  # The operator's real path: syco writes the tenant provision command under its
+  # The operator's real path: sycoadm writes the tenant provision command under its
   # Dex login and waits on its installer Job, failing loudly on a refused
   # command or a failed Job.
   syco_credentials
   "$SYCO" tenant up "${tenant_values[@]}"
-  ok "syco tenant up: tenant provision command admitted for the operator's Dex identity; its installer Job succeeded"
+  ok "sycoadm tenant up: tenant provision command admitted for the operator's Dex identity; its installer Job succeeded"
 
   wait_for "tenant namespace generated" 120 \
     "kubectl get namespace '$LIFECYCLE_TENANT_NS' >/dev/null 2>&1"
@@ -2181,14 +2170,11 @@ verify_tenant_lifecycle() {
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
   # Each provision command is refused for the standing SA and admitted (dry-run)
-  # for the second issuer's identity, then syco applies it under its Dex login.
-  cat > "$work/workspace.yaml" <<YAML
-workspace:
-  name: ${LIFECYCLE_WORKSPACE}
-  tenant: ${LIFECYCLE_TENANT_TOKEN}
-  toolsets: [stdlib, workspace-ro]
-YAML
-  local user_values=(-f "$REPO_ROOT/examples/users/alice.yaml"
+  # for the second issuer's identity, then sycoadm applies it under its Dex login.
+  WORKSPACE_NAME="$LIFECYCLE_WORKSPACE" \
+  WORKSPACE_TENANT="$LIFECYCLE_TENANT_TOKEN" \
+  envsubst < "$REPO_ROOT/tests/fixtures/lifecycle/workspace.yaml" > "$work/workspace.yaml"
+  local user_values=(-f "$REPO_ROOT/examples/sycoadm/users/alice.yaml"
     --set "user.tenant=$LIFECYCLE_TENANT_TOKEN" --set "user.subject=$LIFECYCLE_USER")
   prove_gate workspace -f "$work/workspace.yaml"
   prove_gate user "${user_values[@]}"
@@ -2196,18 +2182,16 @@ YAML
   "$SYCO" user up "${user_values[@]}"
   local m
   for m in "provision-workspace-${LIFECYCLE_WORKSPACE}" "provision-user-${user_handle}"; do
-    kubectl get configmap "$m" -n "$LIFECYCLE_TENANT_NS" >/dev/null 2>&1 \
-      && { warn "provision command ${m} survived a successful install"; exit 1; }
+    assert_command_consumed "$m" "$LIFECYCLE_TENANT_NS"
   done
   ok "the workspace and user installers deleted their provision commands"
 
   wait_for "workspace helm release deployed" 120 \
     "release_deployed 'ws-${LIFECYCLE_WORKSPACE}' '$LIFECYCLE_TENANT_NS'"
-  kubectl get deploy "ws-$LIFECYCLE_WORKSPACE" -n "$LIFECYCLE_TENANT_NS" >/dev/null 2>&1 \
-    || { warn "workspace harness Deployment was not created"; exit 1; }
-  kubectl get configmap "ws-${LIFECYCLE_WORKSPACE}-relay-grants" -n "$LIFECYCLE_TENANT_NS" \
-    -o jsonpath='{.metadata.labels.sycophant\.md/type}' 2>/dev/null | grep -qx relay-toolset-grants \
-    || { warn "per-workspace relay-toolset-grants ConfigMap missing or unlabeled"; exit 1; }
+  assert_installed deploy "ws-$LIFECYCLE_WORKSPACE" "$LIFECYCLE_TENANT_NS" "workspace harness Deployment"
+  assert_field configmap "ws-${LIFECYCLE_WORKSPACE}-relay-grants" "$LIFECYCLE_TENANT_NS" \
+    '{.metadata.labels.sycophant\.md/type}' relay-toolset-grants \
+    "per-workspace relay-toolset-grants ConfigMap missing or unlabeled"
   ok "workspace release deployed; per-workspace object set installed from the workspace chart"
 
   # The harness's one init container, instructions-sync, rclone-syncs the
@@ -2229,12 +2213,12 @@ YAML
 
   wait_for "user helm release deployed" 120 \
     "release_deployed 'user-${user_handle}' '$LIFECYCLE_TENANT_NS'"
-  kubectl get rolebinding "user-${user_handle}" -n "$LIFECYCLE_TENANT_NS" \
-    -o jsonpath='{.roleRef.kind}/{.roleRef.name}' 2>/dev/null | grep -qx ClusterRole/provision-identity \
-    || { warn "per-user provision-identity RoleBinding missing or wrong roleRef"; exit 1; }
-  kubectl get rolebinding "user-${user_handle}" -n "$LIFECYCLE_TENANT_NS" \
-    -o jsonpath='{.subjects[0].kind}/{.subjects[0].name}' 2>/dev/null | grep -qFx "User/${LIFECYCLE_USER}" \
-    || { warn "per-user provision-identity RoleBinding does not bind ${LIFECYCLE_USER}"; exit 1; }
+  assert_field rolebinding "user-${user_handle}" "$LIFECYCLE_TENANT_NS" \
+    '{.roleRef.kind}/{.roleRef.name}' ClusterRole/provision-identity \
+    "per-user provision-identity RoleBinding missing or wrong roleRef"
+  assert_field rolebinding "user-${user_handle}" "$LIFECYCLE_TENANT_NS" \
+    '{.subjects[0].kind}/{.subjects[0].name}' "User/${LIFECYCLE_USER}" \
+    "per-user provision-identity RoleBinding does not bind ${LIFECYCLE_USER}"
   ok "user release deployed; per-user provision-identity RoleBinding binds the identity from the user chart"
 
   # Two toolsets, one provision command each. The harness merges each per-toolset
@@ -2247,17 +2231,16 @@ YAML
     toolset_values "$ts"
     prove_gate toolset -f "$work/toolset-${ts}.yaml"
     "$SYCO" toolset up -f "$work/toolset-${ts}.yaml"
-    kubectl get configmap "provision-toolset-${ts}" -n "$LIFECYCLE_TENANT_NS" >/dev/null 2>&1 \
-      && { warn "toolset provision command ${ts} survived a successful install"; exit 1; }
+    assert_command_consumed "provision-toolset-${ts}" "$LIFECYCLE_TENANT_NS"
 
     wait_for "toolset ${ts} helm release deployed" 120 \
       "release_deployed 'ts-${ts}' '$LIFECYCLE_TENANT_NS'"
-    kubectl get configmap "ts-${ts}" -n "$LIFECYCLE_TENANT_NS" \
-      -o jsonpath='{.metadata.labels.sycophant\.md/type}' 2>/dev/null | grep -qx toolset \
-      || { warn "per-toolset ConfigMap for ${ts} missing or not labelled sycophant.md/type=toolset"; exit 1; }
-    kubectl get configmap "ts-${ts}" -n "$LIFECYCLE_TENANT_NS" \
-      -o "jsonpath={.data.image}" 2>/dev/null | grep -qFx "$(lifecycle_toolset_image "$ts")" \
-      || { warn "per-toolset ConfigMap for ${ts} does not carry the provision command's data"; exit 1; }
+    assert_field configmap "ts-${ts}" "$LIFECYCLE_TENANT_NS" \
+      '{.metadata.labels.sycophant\.md/type}' toolset \
+      "per-toolset ConfigMap for ${ts} missing or not labelled sycophant.md/type=toolset"
+    assert_field configmap "ts-${ts}" "$LIFECYCLE_TENANT_NS" \
+      '{.data.image}' "$(lifecycle_toolset_image "$ts")" \
+      "per-toolset ConfigMap for ${ts} does not carry the provision command's data"
 
     wait_for "harness merged toolset set=${n} by watch" 120 \
       "kubectl logs deploy/ws-${LIFECYCLE_WORKSPACE} -n ${LIFECYCLE_TENANT_NS} -c harness --tail=200 2>/dev/null | grep -E 'toolset delivery applied.*\"configmaps\":${n},' -q"
@@ -2268,46 +2251,20 @@ YAML
   done
 
   # --- suspend: scale tenant Deployments to zero, stamp the reap TTL.
-  kubectl apply -n "$LIFECYCLE_TENANT_NS" -f - >/dev/null <<'YAML'
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: lifecycle-workload
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: lifecycle-workload
-  template:
-    metadata:
-      labels:
-        app: lifecycle-workload
-    spec:
-      automountServiceAccountToken: false
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 65534
-        seccompProfile: { type: RuntimeDefault }
-      containers:
-        - name: pause
-          image: registry.k8s.io/pause:3.9
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities: { drop: ["ALL"] }
-YAML
+  kubectl apply -n "$LIFECYCLE_TENANT_NS" -f "$REPO_ROOT/tests/fixtures/lifecycle/workload.yaml" >/dev/null
 
-  # `syco tenant down` suspends with no keepalive; `syco tenant remove`
+  # `sycoadm tenant down` suspends with no keepalive; `sycoadm tenant remove`
   # re-writes the suspend command with keepalive 0.
   "$SYCO" tenant down "$LIFECYCLE_TENANT_TOKEN"
   wait_for "tenant deployments scaled to zero" 120 \
     "kubectl get deploy lifecycle-workload -n '$LIFECYCLE_TENANT_NS' -o jsonpath='{.spec.replicas}' 2>/dev/null | grep -qx 0" \
     || exit 1
-  ok "syco tenant down scaled the tenant deployments to zero"
+  ok "sycoadm tenant down scaled the tenant deployments to zero"
   "$SYCO" tenant remove "$LIFECYCLE_TENANT_TOKEN"
   wait_for "reap-after TTL stamped on the namespace" 120 \
     "kubectl get namespace '$LIFECYCLE_TENANT_NS' -o jsonpath='{.metadata.annotations.sycophant\.md/reap-after}' 2>/dev/null | grep -q ." \
     || exit 1
-  ok "syco tenant remove stamped the reap TTL"
+  ok "sycoadm tenant remove stamped the reap TTL"
 
   # The e2e reap schedule is every minute (Kyverno's floor); allow a loaded node.
   wait_for "tenant namespace reaped" 720 \
@@ -2318,8 +2275,11 @@ YAML
 }
 
 main() {
-  # The operator path below runs through this checkout's syco.
-  cargo build --release -p syco >/dev/null
+  # The operator path below runs through this checkout's sycoadm.
+  cargo build --release -p sycoadm >/dev/null
+  # The user CLI (Go) must also be current for steps that call syco.
+  (cd "$REPO_ROOT/cmd/syco" && go build -o "$REPO_ROOT/target/syco" .) \
+    || { warn "go build of cmd/syco failed"; return 1; }
   local cluster_exists=0
   if k3d cluster list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$CLUSTER_NAME"; then
     cluster_exists=1
@@ -2355,7 +2315,10 @@ main() {
   step_6_security
   step_7_upgrade_cli
   verify_oidc_write_path
-  printf '\n\033[1;32m==> e2e complete\033[0m\n'
+  if [ "$_step_start" -gt 0 ]; then
+    printf '\033[1;34m    ⏱  previous step took %ds\033[0m\n' "$(( SECONDS - _step_start ))"
+  fi
+  printf '\n\033[1;32m==> e2e complete (%ds total)\033[0m\n' "$SECONDS"
   # Each helper installs a function-local `trap ... RETURN` to clean its temp
   # dir. Without functrace that trap stays installed after the helper returns
   # and would fire again on main's own return, when its `work` is out of scope

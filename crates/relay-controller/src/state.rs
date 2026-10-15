@@ -170,6 +170,9 @@ pub struct GatewayState {
     /// swapped by the toolset-grants watcher on every ConfigMap delivery. Names
     /// only; empty when no workspace has minted its ConfigMap yet.
     capabilities: Arc<RwLock<crate::capabilities::CapabilityGrants>>,
+    idp_issuer: String,
+    idp_audience: String,
+    idp_certificate_authority: String,
 }
 
 impl GatewayState {
@@ -186,6 +189,25 @@ impl GatewayState {
             namespace,
             harness_clients,
             capabilities: Arc::new(RwLock::new(crate::capabilities::CapabilityGrants::default())),
+            idp_issuer: String::new(),
+            idp_audience: String::new(),
+            idp_certificate_authority: String::new(),
+        }
+    }
+
+    /// Construct a `GatewayState` with IdP configuration.
+    pub fn new_with_idp(
+        kube_client: Option<kube::Client>,
+        namespace: String,
+        idp_issuer: String,
+        idp_audience: String,
+        idp_certificate_authority: String,
+    ) -> Self {
+        Self {
+            idp_issuer,
+            idp_audience,
+            idp_certificate_authority,
+            ..Self::new(kube_client, namespace)
         }
     }
 
@@ -214,6 +236,11 @@ impl GatewayState {
     /// through it; the workspace-list answer and handle resolution read it.
     pub fn identity(&self) -> Arc<RwLock<IdentityTable>> {
         self.identity.clone()
+    }
+
+    /// Returns the IdP configuration (issuer, audience, certificate_authority).
+    pub fn idp_config(&self) -> (&str, &str, &str) {
+        (&self.idp_issuer, &self.idp_audience, &self.idp_certificate_authority)
     }
 
     /// The subject a conversation is cached under, if the relay has seen

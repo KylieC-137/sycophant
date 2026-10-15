@@ -68,9 +68,9 @@ harness:
 
 ## Reference fixtures
 
-[`examples/instructions/`](../examples/instructions/) holds a fixture you can copy onto the host path as a starting point:
+[`examples/sycoadm/instructions/`](../examples/sycoadm/instructions/) holds a fixture you can copy onto the host path as a starting point:
 
-- [`simple/`](../examples/instructions/simple/) — minimal assistant with local tools only. Single `AGENTS.md`.
+- [`simple/`](../examples/sycoadm/instructions/simple/) — minimal assistant with local tools only. Single `AGENTS.md`.
 
 ## Routing delegates to specific models
 
@@ -79,7 +79,7 @@ An agent file (or `AGENTS.md` itself) MAY declare a `model:` field in YAML front
 1. It parses the frontmatter (delimited by `---` lines, max 4 KiB), selects the `model:` name (or resolves `inherit` from the conversation log), and strips the frontmatter from the system prompt before dispatch — the LLM never sees the YAML.
 2. It resolves the name against its live model table — one `inf-<key>` ConfigMap per inference provision command, limited to the workspace's `models` list — and dials that destination directly: a warm in-cluster inference Service in-process, or a per-call `inference-runtime` Job the harness creates and dials. A name with no matching entry is refused, never defaulted.
 
-Example. With the two models in [`examples/inference/`](../examples/inference/) installed, `local` and `deepseek-v4-flash`, each with `syco inference up -f <file>`, agent files declare which to use:
+Example. With the two models in [`examples/sycoadm/inference/`](../examples/sycoadm/inference/) installed, `local` and `deepseek-v4-flash`, each with `sycoadm inference up -f <file>`, agent files declare which to use:
 
 ```markdown
 ---
@@ -123,7 +123,7 @@ The list narrows the toolset tools advertised to the model for that agent's turn
 ## Future work
 
 - **Remote-source instructions adapters** — OCI, lakeFS, and git adapters beyond the object-storage sync ship as separate-repo crates with their own controllers. Each populates the workspace's object-storage prefix out-of-band; the serving container reads only its synced emptyDir.
-- **CLI helpers** — `syco init` to scaffold a new instructions folder.
+- **CLI helpers** — `sycoadm init` to scaffold a new instructions folder.
 - **Web UI authoring surface** — an operator-facing app for editing principal content.
 
 ## Verification

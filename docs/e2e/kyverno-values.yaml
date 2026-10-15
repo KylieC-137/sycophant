@@ -1,4 +1,4 @@
-# e2e additions to the Kyverno engine values `syco setup` installs
+# e2e additions to the Kyverno engine values `sycoadm setup` installs
 # (SYCO_KYVERNO_VALUES). The background controller generates every lifecycle
 # object; the default client rate limit throttles the bursts e2e drives.
 backgroundController:

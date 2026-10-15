@@ -40,6 +40,7 @@ use proto_common::{
     ToolsetGrants, TurnState, TurnStateEvent, UserMessage, WatchToolsRequest,
 };
 use relay_proto::relay_gateway_server::RelayGateway;
+use relay_proto::{DiscoverRequest, DiscoverResponse};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -538,6 +539,18 @@ fn warn_on_undelivered(delivered: bool) -> bool {
 
 #[tonic::async_trait]
 impl RelayGateway for GatewayService {
+    async fn discover(
+        &self,
+        _request: Request<DiscoverRequest>,
+    ) -> Result<Response<DiscoverResponse>, Status> {
+        let (issuer, client_id, ca) = self.state.idp_config();
+        Ok(Response::new(DiscoverResponse {
+            issuer: issuer.to_string(),
+            client_id: client_id.to_string(),
+            certificate_authority: ca.to_string(),
+        }))
+    }
+
     async fn list_workspaces(
         &self,
         request: Request<ListWorkspacesRequest>,

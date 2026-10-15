@@ -63,10 +63,10 @@ k3d cluster create sycophant \
 
 # 2. One-command install. Sequences Cilium → kube-system, Kyverno →
 #    kyverno (with PSA labels), and this chart.
-cargo run -p syco --release -- install
+cargo run -p sycoadm --release -- install
 ```
 
-`syco install` lives in the workspace's `cli/` crate. It uses `helm upgrade
+`sycoadm install` lives in the workspace's `cli/` crate. It uses `helm upgrade
 --install` everywhere, so re-running is idempotent.
 
 Override the release namespace for `sycophant-quickstart` itself with
@@ -85,11 +85,11 @@ helm install sycophant-quickstart . -n <your-ns> --wait --timeout=10m
 ```
 
 Then provision one or more tenants from a values file
-([`examples/tenants/e2e-test.yaml`](../../examples/tenants/e2e-test.yaml)); re-run
+([`examples/sycoadm/tenants/e2e-test.yaml`](../../examples/sycoadm/tenants/e2e-test.yaml)); re-run
 to upgrade the tenant in place:
 
 ```sh
-syco tenant up -f examples/tenants/e2e-test.yaml --set tenant.name=acme
+sycoadm tenant up -f examples/sycoadm/tenants/e2e-test.yaml --set tenant.name=acme
 ```
 
 ## Uninstall
@@ -106,7 +106,7 @@ For the hobbyist who wants the cluster gone entirely:
 k3d cluster delete sycophant
 ```
 
-If you ran `syco install` and want to uninstall Cilium + Kyverno too, run
+If you ran `sycoadm install` and want to uninstall Cilium + Kyverno too, run
 their respective `helm uninstall` commands:
 
 ```sh

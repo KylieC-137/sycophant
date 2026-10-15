@@ -13,11 +13,11 @@ use std::path::{Path, PathBuf};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 
+use crate::commands::command::SYSTEM_NS;
 use crate::commands::common::{ok, step, wait_for};
 use crate::interrupt;
 use crate::runner::{run_output, run_silent, run_stdin, run_stdin_bytes};
 
-const SYSTEM_NS: &str = "sycophant-system";
 // k3s runs kube-apiserver in the node netns with no CoreDNS, so Dex is
 // published on a pinned NodePort the apiserver reaches at the node loopback.
 // The host reaches the same address through the k3d port mapping.

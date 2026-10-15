@@ -42,7 +42,7 @@ fn toolset_context(image: &str) -> &'static str {
     match image {
         "toolset" => "images/toolset",
         "toolset-git" => "images/git",
-        "toolset-ssh-credentials" => "examples/toolsets/ssh-credentials",
+        "toolset-ssh-credentials" => "examples/sycoadm/toolsets/ssh-credentials",
         _ => unreachable!("unknown toolset image"),
     }
 }
@@ -255,7 +255,7 @@ mod tests {
         assert_eq!(toolset_context("toolset-git"), "images/git");
         assert_eq!(
             toolset_context("toolset-ssh-credentials"),
-            "examples/toolsets/ssh-credentials"
+            "examples/sycoadm/toolsets/ssh-credentials"
         );
     }
 

@@ -59,6 +59,12 @@ spec:
             # submits its authorization reviews in.
             - name: RELAY_NAMESPACE
               value: "{{ .Release.Namespace }}"
+            - name: IDP_ISSUER
+              value: "{{ .Values.idp.issuer }}"
+            - name: IDP_AUDIENCE
+              value: "{{ .Values.idp.audience }}"
+            - name: IDP_CERTIFICATE_AUTHORITY
+              value: {{ .Values.idp.certificateAuthority | quote }}
           ports:
             # Internal listener (9090): K8s ServiceAccount tokens via
             # TokenReview. Reachable from in-cluster pods only via the

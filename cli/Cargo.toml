@@ -1,5 +1,5 @@
 [package]
-name = "syco"
+name = "sycoadm"
 version.workspace = true
 edition.workspace = true
 

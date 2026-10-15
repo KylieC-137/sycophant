@@ -1,0 +1,6 @@
+toolset:
+  name: ${TOOLSET_NAME}
+  tenant: ${TOOLSET_TENANT}
+  image: ${TOOLSET_IMAGE}
+  tools:
+    tool.${TOOLSET_NAME}-status.description: Report status.
