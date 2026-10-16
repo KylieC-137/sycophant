@@ -1,7 +1,11 @@
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "sycoadm", about = "Sycophant CLI", version)]
+#[command(
+    name = "sycoadm",
+    about = "Administer Sycophant clusters, tenants, and components",
+    version
+)]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -13,14 +17,19 @@ pub(crate) struct Cli {
     reason = "clap arg structs, parsed once at startup"
 )]
 pub(crate) enum Command {
+    /// Set up a local Sycophant cluster
     Setup(SetupCmd),
+    /// Delete the cluster and all tenant data (irreversible)
     Destroy(DestroyCmd),
+    /// Check or upgrade the cluster and its tenants
     Upgrade(UpgradeCmd),
+    /// Manage tenant lifecycle, secrets, and audits
     Tenant(TenantCmd),
     /// Install or remove one toolset through its provision and reap commands
     Toolset(ComponentCmd),
     /// Install or remove one workspace through its provision and reap commands
     Workspace(ComponentCmd),
+    /// Provision a framework user from configuration
     User(UserCmd),
     /// Install or remove one model through its provision and reap commands
     Inference(ComponentCmd),
@@ -269,5 +278,22 @@ mod tests {
                 "toolset.tenant=t"
             ]
         );
+    }
+
+    #[test]
+    fn top_level_help_explains_key_commands() {
+        use clap::CommandFactory;
+
+        let help = Cli::command().render_help().to_string();
+        for expected in [
+            "Administer Sycophant clusters",
+            "Set up a local Sycophant cluster",
+            "Delete the cluster and all tenant data (irreversible)",
+            "Check or upgrade the cluster and its tenants",
+            "Manage tenant lifecycle, secrets, and audits",
+            "Provision a framework user from configuration",
+        ] {
+            assert!(help.contains(expected), "help missing: {expected}");
+        }
     }
 }
