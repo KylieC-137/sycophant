@@ -3,6 +3,7 @@ mod channel_tools;
 mod clients;
 mod config;
 mod dispatch;
+pub(crate) mod event_log;
 mod execution_log;
 // `conversation` is the workspace-history library surface (log store,
 // scopes, frontmatter, snapshots). Exposed as a public module so its
@@ -83,6 +84,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_CONVERSATION_DIR));
     probe_dir_writable("conversation-log", &conversation_dir)?;
+    // Workspace event log for resumable streaming. Constructed early so the
+    // sequence counter is recovered from disk before any turn runs.
+    let event_log = Arc::new(event_log::EventLog::new(&conversation_dir));
+    let event_log_for_grpc = event_log.clone();
+    tracing::info!(dir = %conversation_dir.display(), "event log ready");
     let factory: Arc<dyn ConversationStoreFactory> =
         Arc::new(LocalFsFactory::new(conversation_dir.clone()));
     let registry = Arc::new(ConversationRegistry::new(factory));
@@ -254,7 +260,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Relay-facing forward surface (HarnessControl). Ingress: relay-ctrl only.
     tokio::spawn(async move {
-        let svc = grpc_server::HarnessService::new(grpc_router_handle, grpc_registry_handle);
+        let svc = grpc_server::HarnessService::new(grpc_router_handle, grpc_registry_handle)
+            .with_event_log(event_log_for_grpc);
         let server = Server::builder()
             .add_service(toolset_proto::harness_control_server::HarnessControlServer::new(svc))
             .serve(relay_forward_addr);
@@ -281,6 +288,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         tool_router,
         registry,
         source.as_mut(),
+        event_log.clone(),
     )
     .await?;
 

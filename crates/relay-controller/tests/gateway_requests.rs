@@ -61,7 +61,7 @@ async fn alice_channel(state: &GatewayState) -> String {
     // Keep the receiver alive so the channel stays deliverable.
     std::mem::forget(rx);
     state
-        .mint_channel(ChannelOpener::Person, ALICE.into(), "alpha".into(), tx)
+        .mint_channel(ChannelOpener::Person, ALICE.into(), "alpha".into(), tx, false)
         .await
 }
 
@@ -294,7 +294,7 @@ async fn channel_ingest_advertised_supported_methods_become_usable() {
     svc.channel_ingest(bearer(ALICE_TOKEN, req)).await.unwrap();
     assert!(
         state
-            .send_server_notification(&id, "RevealPath", "{}".into())
+            .send_server_notification("alpha", "RevealPath", "{}".into(), None)
             .await
             .is_ok(),
         "advertised method must be usable"
@@ -317,7 +317,7 @@ async fn channel_ingest_empty_supported_methods_does_not_clobber() {
     .unwrap();
     assert!(
         state
-            .send_server_notification(&id, "RevealPath", "{}".into())
+            .send_server_notification("alpha", "RevealPath", "{}".into(), None)
             .await
             .is_ok(),
         "empty supported_methods must not clobber prior set"
@@ -336,6 +336,7 @@ async fn channel_receive_emits_ack_then_idle_replay() {
                 adapter_hint: Some("cli:test".into()),
                 workspace: "alpha".into(),
                 sender: String::new(),
+                resume_after_seq: None,
             },
         ))
         .await

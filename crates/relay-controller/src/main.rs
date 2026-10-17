@@ -98,14 +98,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let idp_issuer = std::env::var("IDP_ISSUER").unwrap_or_default();
     let idp_audience = std::env::var("IDP_AUDIENCE").unwrap_or_default();
     let idp_certificate_authority = std::env::var("IDP_CERTIFICATE_AUTHORITY").unwrap_or_default();
+    let heartbeat_interval_secs: u64 = std::env::var("HEARTBEAT_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(15);
 
-    let state = Arc::new(GatewayState::new_with_idp(
+    let mut state = GatewayState::new_with_idp(
         Some(kube_client.clone()),
         namespace.clone(),
         idp_issuer,
         idp_audience,
         idp_certificate_authority,
-    ));
+    );
+    state.set_heartbeat_interval(std::time::Duration::from_secs(heartbeat_interval_secs));
+    let state = Arc::new(state);
 
     // The live ListGrants table. An unsynced table serves an empty ListGrants
     // for every workspace, so a timeout crashes the process and lets the

@@ -717,7 +717,8 @@ const (
 	RelayInternal_Subscribe_FullMethodName                 = "/relay.v1.RelayInternal/Subscribe"
 	RelayInternal_SendServerNotification_FullMethodName    = "/relay.v1.RelayInternal/SendServerNotification"
 	RelayInternal_SendServerRequestAndAwait_FullMethodName = "/relay.v1.RelayInternal/SendServerRequestAndAwait"
-	RelayInternal_DeliverOutbound_FullMethodName           = "/relay.v1.RelayInternal/DeliverOutbound"
+	RelayInternal_DeliverReply_FullMethodName              = "/relay.v1.RelayInternal/DeliverReply"
+	RelayInternal_DeliverTurnState_FullMethodName          = "/relay.v1.RelayInternal/DeliverTurnState"
 	RelayInternal_DeliverStreamItem_FullMethodName         = "/relay.v1.RelayInternal/DeliverStreamItem"
 )
 
@@ -728,9 +729,10 @@ type RelayInternalClient interface {
 	Subscribe(ctx context.Context, in *v1.SubscribeRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.UserMessage], error)
 	SendServerNotification(ctx context.Context, in *v1.SendServerNotificationRequest, opts ...grpc.CallOption) (*v1.SendServerNotificationResponse, error)
 	SendServerRequestAndAwait(ctx context.Context, in *v1.SendServerRequestAndAwaitRequest, opts ...grpc.CallOption) (*v1.SendServerRequestAndAwaitResponse, error)
-	// The harness pushes assistant reply + terminal turn-state in one
-	// ordered call.
-	DeliverOutbound(ctx context.Context, in *DeliverOutboundRequest, opts ...grpc.CallOption) (*DeliverOutboundResponse, error)
+	// The harness pushes the assistant reply as a separate RPC from turn-state.
+	DeliverReply(ctx context.Context, in *DeliverReplyRequest, opts ...grpc.CallOption) (*DeliverReplyResponse, error)
+	// The harness pushes a terminal turn-state event as a separate RPC.
+	DeliverTurnState(ctx context.Context, in *DeliverTurnStateRequest, opts ...grpc.CallOption) (*DeliverTurnStateResponse, error)
 	// Harness pushes one streamed activity frame produced during a turn.
 	// Unary-per-frame; the gateway wraps the StreamItem verbatim into a
 	// ChannelOutbound and relays it unchanged (no payload inspection).
@@ -784,10 +786,20 @@ func (c *relayInternalClient) SendServerRequestAndAwait(ctx context.Context, in 
 	return out, nil
 }
 
-func (c *relayInternalClient) DeliverOutbound(ctx context.Context, in *DeliverOutboundRequest, opts ...grpc.CallOption) (*DeliverOutboundResponse, error) {
+func (c *relayInternalClient) DeliverReply(ctx context.Context, in *DeliverReplyRequest, opts ...grpc.CallOption) (*DeliverReplyResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(DeliverOutboundResponse)
-	err := c.cc.Invoke(ctx, RelayInternal_DeliverOutbound_FullMethodName, in, out, cOpts...)
+	out := new(DeliverReplyResponse)
+	err := c.cc.Invoke(ctx, RelayInternal_DeliverReply_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *relayInternalClient) DeliverTurnState(ctx context.Context, in *DeliverTurnStateRequest, opts ...grpc.CallOption) (*DeliverTurnStateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeliverTurnStateResponse)
+	err := c.cc.Invoke(ctx, RelayInternal_DeliverTurnState_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -811,9 +823,10 @@ type RelayInternalServer interface {
 	Subscribe(*v1.SubscribeRequest, grpc.ServerStreamingServer[v1.UserMessage]) error
 	SendServerNotification(context.Context, *v1.SendServerNotificationRequest) (*v1.SendServerNotificationResponse, error)
 	SendServerRequestAndAwait(context.Context, *v1.SendServerRequestAndAwaitRequest) (*v1.SendServerRequestAndAwaitResponse, error)
-	// The harness pushes assistant reply + terminal turn-state in one
-	// ordered call.
-	DeliverOutbound(context.Context, *DeliverOutboundRequest) (*DeliverOutboundResponse, error)
+	// The harness pushes the assistant reply as a separate RPC from turn-state.
+	DeliverReply(context.Context, *DeliverReplyRequest) (*DeliverReplyResponse, error)
+	// The harness pushes a terminal turn-state event as a separate RPC.
+	DeliverTurnState(context.Context, *DeliverTurnStateRequest) (*DeliverTurnStateResponse, error)
 	// Harness pushes one streamed activity frame produced during a turn.
 	// Unary-per-frame; the gateway wraps the StreamItem verbatim into a
 	// ChannelOutbound and relays it unchanged (no payload inspection).
@@ -837,8 +850,11 @@ func (UnimplementedRelayInternalServer) SendServerNotification(context.Context, 
 func (UnimplementedRelayInternalServer) SendServerRequestAndAwait(context.Context, *v1.SendServerRequestAndAwaitRequest) (*v1.SendServerRequestAndAwaitResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SendServerRequestAndAwait not implemented")
 }
-func (UnimplementedRelayInternalServer) DeliverOutbound(context.Context, *DeliverOutboundRequest) (*DeliverOutboundResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method DeliverOutbound not implemented")
+func (UnimplementedRelayInternalServer) DeliverReply(context.Context, *DeliverReplyRequest) (*DeliverReplyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeliverReply not implemented")
+}
+func (UnimplementedRelayInternalServer) DeliverTurnState(context.Context, *DeliverTurnStateRequest) (*DeliverTurnStateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeliverTurnState not implemented")
 }
 func (UnimplementedRelayInternalServer) DeliverStreamItem(context.Context, *DeliverStreamItemRequest) (*DeliverStreamItemResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeliverStreamItem not implemented")
@@ -911,20 +927,38 @@ func _RelayInternal_SendServerRequestAndAwait_Handler(srv interface{}, ctx conte
 	return interceptor(ctx, in, info, handler)
 }
 
-func _RelayInternal_DeliverOutbound_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(DeliverOutboundRequest)
+func _RelayInternal_DeliverReply_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeliverReplyRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(RelayInternalServer).DeliverOutbound(ctx, in)
+		return srv.(RelayInternalServer).DeliverReply(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: RelayInternal_DeliverOutbound_FullMethodName,
+		FullMethod: RelayInternal_DeliverReply_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(RelayInternalServer).DeliverOutbound(ctx, req.(*DeliverOutboundRequest))
+		return srv.(RelayInternalServer).DeliverReply(ctx, req.(*DeliverReplyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RelayInternal_DeliverTurnState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeliverTurnStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RelayInternalServer).DeliverTurnState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RelayInternal_DeliverTurnState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RelayInternalServer).DeliverTurnState(ctx, req.(*DeliverTurnStateRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -963,8 +997,12 @@ var RelayInternal_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _RelayInternal_SendServerRequestAndAwait_Handler,
 		},
 		{
-			MethodName: "DeliverOutbound",
-			Handler:    _RelayInternal_DeliverOutbound_Handler,
+			MethodName: "DeliverReply",
+			Handler:    _RelayInternal_DeliverReply_Handler,
+		},
+		{
+			MethodName: "DeliverTurnState",
+			Handler:    _RelayInternal_DeliverTurnState_Handler,
 		},
 		{
 			MethodName: "DeliverStreamItem",

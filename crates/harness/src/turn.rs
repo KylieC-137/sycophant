@@ -8,6 +8,7 @@ use proto_common::{ContentBlock, StopReason, ToolCall};
 use toolset_proto::{turn_event, TurnComplete, TurnEvent};
 
 use crate::clients::{RelayRpc, TurnSource};
+use crate::event_log::EventLog;
 
 /// Sink for streamed activity frames produced during a turn. The orchestrator
 /// path backs it with a gateway RPC; the sub-agent path backs it with a no-op.
@@ -26,17 +27,30 @@ impl StreamSink for NullSink {
 }
 
 /// Streamed-activity sink backed by the gateway's `DeliverStreamItem` RPC.
-/// A delivery failure is best-effort (logged, then dropped) — a dropped delta
-/// must never fail the turn.
+/// Persists each frame to the event log before delivery so a resuming client
+/// can replay it. A delivery failure is best-effort (logged, then dropped) —
+/// a dropped delta must never fail the turn.
 pub(crate) struct GatewaySink<'a> {
     pub(crate) rpc: &'a mut dyn RelayRpc,
     pub(crate) channel_id: String,
+    pub(crate) event_log: std::sync::Arc<EventLog>,
 }
 
 #[async_trait::async_trait]
 impl StreamSink for GatewaySink<'_> {
     async fn emit(&mut self, item: StreamItem) {
-        if let Err(e) = self.rpc.deliver_stream_item(&self.channel_id, item).await {
+        let seq = item.workspace_seq;
+        let outbound = proto_common::ChannelOutbound {
+            command: Some(proto_common::channel_outbound::Command::StreamItem(
+                item.clone(),
+            )),
+            workspace_seq: Some(seq),
+        };
+        if let Err(e) = self.event_log.append(seq, &outbound).await {
+            tracing::warn!(error = %e, "failed to persist streamed item; dropping frame");
+            return;
+        }
+        if let Err(e) = self.rpc.deliver_stream_item(&self.channel_id, item, seq).await {
             tracing::warn!(error = %e, "failed to deliver streamed item");
         }
     }
@@ -55,8 +69,9 @@ pub(crate) struct EmitState {
     /// Operator-authored sub-agent name; stamped on every frame so the client
     /// labels the tile with it. Empty on top-level turns.
     agent_name: String,
-    /// Monotonic, 1-indexed per workspace. Pre-increment on each emitted frame.
-    seq: u64,
+    /// Workspace-scoped event log backing the monotonic sequence counter.
+    /// Shared across the workspace so sub-agent turns use the same counter.
+    event_log: std::sync::Arc<EventLog>,
     /// Item id of the currently-open text run, if any.
     text_item: Option<String>,
     /// Item id of the currently-open tool-use run (the upstream tool id).
@@ -66,12 +81,12 @@ pub(crate) struct EmitState {
 }
 
 impl EmitState {
-    pub(crate) fn new(conversation_id: String) -> Self {
+    pub(crate) fn new(conversation_id: String, event_log: std::sync::Arc<EventLog>) -> Self {
         Self {
             conversation_id,
             parent_conversation_id: String::new(),
             agent_name: String::new(),
-            seq: 0,
+            event_log,
             text_item: None,
             tool_item: None,
             text_runs: 0,
@@ -87,17 +102,18 @@ impl EmitState {
         conversation_id: String,
         parent_conversation_id: String,
         agent_name: String,
+        event_log: std::sync::Arc<EventLog>,
     ) -> Self {
-        let mut s = Self::new(conversation_id);
+        let mut s = Self::new(conversation_id, event_log);
         s.parent_conversation_id = parent_conversation_id;
         s.agent_name = agent_name;
         s
     }
 
     fn next_frame(&mut self, item_id: String, phase: stream_item::Phase) -> StreamItem {
-        self.seq += 1;
+        let seq = self.event_log.next_seq();
         StreamItem {
-            workspace_seq: self.seq,
+            workspace_seq: seq,
             event_id: uuid::Uuid::new_v4().to_string(),
             item_id,
             conversation_id: self.conversation_id.clone(),
@@ -294,7 +310,13 @@ fn process_turn_event(event: TurnEvent) -> Result<Option<TurnResult>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use toolset_proto::{ContentDelta, ToolUseInput, ToolUseStart, TurnError, TurnEvent};
+
+    fn test_event_log() -> Arc<EventLog> {
+        let dir = tempfile::tempdir().unwrap().into_path();
+        Arc::new(EventLog::new(&dir))
+    }
 
     fn content_delta(text: &str) -> TurnEvent {
         TurnEvent {
@@ -359,7 +381,7 @@ mod tests {
 
     #[test]
     fn content_delta_opens_text_item_then_delta() {
-        let mut state = EmitState::new("conv".into());
+        let mut state = EmitState::new("conv".into(), test_event_log());
         let frames = stream_items_for(&content_delta("hello"), &mut state);
         assert_eq!(frames.len(), 2, "first delta emits Start then Delta");
         assert!(is_text_start(&frames[0]));
@@ -373,7 +395,7 @@ mod tests {
 
     #[test]
     fn subsequent_text_deltas_reuse_open_item_without_restart() {
-        let mut state = EmitState::new("c".into());
+        let mut state = EmitState::new("c".into(), test_event_log());
         let first = stream_items_for(&content_delta("a"), &mut state);
         let second = stream_items_for(&content_delta("b"), &mut state);
         // Second delta emits only a Delta (no new Start) on the same item.
@@ -385,14 +407,14 @@ mod tests {
     #[test]
     fn empty_content_delta_emits_no_frame() {
         // Provider heartbeats carry empty text and must not open a text item.
-        let mut state = EmitState::new("c".into());
+        let mut state = EmitState::new("c".into(), test_event_log());
         let frames = stream_items_for(&content_delta(""), &mut state);
         assert!(frames.is_empty());
     }
 
     #[test]
     fn tool_start_carries_name_and_upstream_id() {
-        let mut state = EmitState::new("c".into());
+        let mut state = EmitState::new("c".into(), test_event_log());
         let frames = stream_items_for(&tool_start("tc-1", "Bash"), &mut state);
         assert_eq!(frames.len(), 1);
         assert_eq!(tool_name_of(&frames[0]), Some("Bash"));
@@ -401,7 +423,7 @@ mod tests {
 
     #[test]
     fn tool_input_delta_shares_tool_item_id() {
-        let mut state = EmitState::new("c".into());
+        let mut state = EmitState::new("c".into(), test_event_log());
         let start = stream_items_for(&tool_start("tc-1", "Bash"), &mut state);
         let delta = stream_items_for(&tool_input(r#"{"cmd""#), &mut state);
         assert_eq!(delta.len(), 1);
@@ -411,7 +433,7 @@ mod tests {
 
     #[test]
     fn tool_start_closes_open_text_run() {
-        let mut state = EmitState::new("c".into());
+        let mut state = EmitState::new("c".into(), test_event_log());
         stream_items_for(&content_delta("thinking"), &mut state);
         let frames = stream_items_for(&tool_start("tc-1", "Bash"), &mut state);
         // First frame stops the text item, second opens the tool item.
@@ -422,7 +444,7 @@ mod tests {
 
     #[test]
     fn workspace_seq_strictly_increases_across_events() {
-        let mut state = EmitState::new("c".into());
+        let mut state = EmitState::new("c".into(), test_event_log());
         let mut seqs = Vec::new();
         for ev in [
             content_delta("a"),
@@ -444,7 +466,7 @@ mod tests {
         // text-1 then text-2. Mutant: `state.text_runs += 1` → `*= 1` leaves
         // text_runs at 0 for both runs, yielding text-0 twice → ids collide
         // and this fails.
-        let mut state = EmitState::new("c".into());
+        let mut state = EmitState::new("c".into(), test_event_log());
         let first = stream_items_for(&content_delta("a"), &mut state);
         // Tool start ends the open text run so the next delta opens a NEW run.
         stream_items_for(&tool_start("t", "Bash"), &mut state);
@@ -459,7 +481,7 @@ mod tests {
 
     #[test]
     fn tool_input_without_open_tool_emits_nothing() {
-        let mut state = EmitState::new("c".into());
+        let mut state = EmitState::new("c".into(), test_event_log());
         let frames = stream_items_for(&tool_input("{}"), &mut state);
         assert!(frames.is_empty());
     }
@@ -478,7 +500,7 @@ mod tests {
         std::env::remove_var("TEST_TURN_SCRUB_SECRET");
         assert!(!scrub.is_empty());
 
-        let mut state = EmitState::new("c".into());
+        let mut state = EmitState::new("c".into(), test_event_log());
         stream_items_for(&tool_start("t", "Bash"), &mut state);
         let mut delta = stream_items_for(&tool_input(r#"{"token":"s3cr3t"}"#), &mut state)
             .pop()
@@ -502,7 +524,7 @@ mod tests {
         std::env::remove_var("TEST_TURN_NAME_SCRUB_SECRET");
         assert!(!scrub.is_empty());
 
-        let mut state = EmitState::new("c".into());
+        let mut state = EmitState::new("c".into(), test_event_log());
         let mut start = stream_items_for(&tool_start("t", "s3cr3t"), &mut state)
             .pop()
             .unwrap();
@@ -550,7 +572,7 @@ mod tests {
             },
         ]));
         let mut sink = Capturing(vec![]);
-        let mut emit = EmitState::new("c".into());
+        let mut emit = EmitState::new("c".into(), test_event_log());
         let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_TURN_SCRUB__");
         let token = tokio_util::sync::CancellationToken::new();
         let result = consume_turn_stream_cancellable(
@@ -624,7 +646,7 @@ mod tests {
         }
         let mut src = Stalling;
         let mut sink = NullSink;
-        let mut emit = EmitState::new("c".into());
+        let mut emit = EmitState::new("c".into(), test_event_log());
         let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_TURN_SCRUB__");
         let token = tokio_util::sync::CancellationToken::new();
         let res = consume_turn_stream_cancellable(
@@ -657,7 +679,7 @@ mod tests {
         }
         let mut src = Closed;
         let mut sink = NullSink;
-        let mut emit = EmitState::new("c".into());
+        let mut emit = EmitState::new("c".into(), test_event_log());
         let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_TURN_SCRUB__");
         let token = tokio_util::sync::CancellationToken::new();
         let res = consume_turn_stream_cancellable(
@@ -689,7 +711,7 @@ mod tests {
         // next_frame (or thread `None` for the subagent path) -> the field is
         // empty and the client can no longer group the child under its parent.
         let mut state =
-            EmitState::new_subagent("child-conv".into(), "parent-conv".into(), String::new());
+            EmitState::new_subagent("child-conv".into(), "parent-conv".into(), String::new(), test_event_log());
         let frames = stream_items_for(&content_delta("hi"), &mut state);
         assert!(!frames.is_empty());
         for f in &frames {
@@ -708,7 +730,7 @@ mod tests {
         // so the client renders it inline rather than nested under a parent.
         // Materiality: stamp a non-empty parent on the top-level path -> every
         // ordinary turn item would be mis-grouped as a sub-agent child.
-        let mut state = EmitState::new("top-conv".into());
+        let mut state = EmitState::new("top-conv".into(), test_event_log());
         let frames = stream_items_for(&content_delta("hi"), &mut state);
         assert!(!frames.is_empty());
         for f in &frames {
@@ -732,7 +754,7 @@ mod tests {
         // Default/empty) -> the field is empty and the tile falls back to the
         // id-prefix hash instead of "poet".
         let mut state =
-            EmitState::new_subagent("child-conv".into(), "parent-conv".into(), "poet".into());
+            EmitState::new_subagent("child-conv".into(), "parent-conv".into(), "poet".into(), test_event_log());
         let frames = stream_items_for(&content_delta("hi"), &mut state);
         assert!(!frames.is_empty());
         for f in &frames {
@@ -759,7 +781,7 @@ mod tests {
         // Materiality: stamp a non-empty agent_name on the top-level path (e.g.
         // hardcode it, or stamp unconditionally in next_frame) -> ordinary
         // turn items would falsely advertise a sub-agent name.
-        let mut state = EmitState::new("top-conv".into());
+        let mut state = EmitState::new("top-conv".into(), test_event_log());
         let frames = stream_items_for(&content_delta("hi"), &mut state);
         assert!(!frames.is_empty());
         for f in &frames {
@@ -802,7 +824,7 @@ mod tests {
             polled: polled.clone(),
         };
         let mut sink = NullSink;
-        let mut emit = EmitState::new("c".into());
+        let mut emit = EmitState::new("c".into(), test_event_log());
         let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_TURN_SCRUB__");
 
         let outcome = consume_turn_stream_cancellable(

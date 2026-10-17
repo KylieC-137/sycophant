@@ -52,11 +52,17 @@ fn effective_history_limit(requested: Option<u32>) -> Option<usize> {
 pub(crate) struct HarnessService<A = UnconfiguredToolset> {
     router: Arc<ToolRouter<A>>,
     registry: Arc<ConversationRegistry>,
+    event_log: Option<Arc<crate::event_log::EventLog>>,
 }
 
 impl<A> HarnessService<A> {
     pub(crate) fn new(router: Arc<ToolRouter<A>>, registry: Arc<ConversationRegistry>) -> Self {
-        Self { router, registry }
+        Self { router, registry, event_log: None }
+    }
+
+    pub(crate) fn with_event_log(mut self, event_log: Arc<crate::event_log::EventLog>) -> Self {
+        self.event_log = Some(event_log);
+        self
     }
 }
 
@@ -64,6 +70,7 @@ impl<A> HarnessService<A> {
 impl<A: ToolsetRpc + Clone + Send + Sync + 'static> HarnessControl for HarnessService<A> {
     type WatchToolsStream = ReceiverStream<Result<ToolListUpdate, Status>>;
     type AwaitToolResultStream = ReceiverStream<Result<ToolResultFrame, Status>>;
+    type ReplayEventLogStream = ReceiverStream<Result<proto_common::ChannelOutbound, Status>>;
 
     async fn watch_tools(
         &self,
@@ -292,6 +299,28 @@ impl<A: ToolsetRpc + Clone + Send + Sync + 'static> HarnessControl for HarnessSe
             total_seq: snap.total_seq,
             truncated,
         }))
+    }
+
+    async fn replay_event_log(
+        &self,
+        request: Request<harness_proto::harness::v1::ReplayEventLogRequest>,
+    ) -> Result<Response<Self::ReplayEventLogStream>, Status> {
+        let Some(event_log) = &self.event_log else {
+            return Err(Status::failed_precondition("event log not available"));
+        };
+        let after_seq = request.into_inner().after_seq;
+        let entries = event_log
+            .replay_after(after_seq)
+            .map_err(|e| Status::failed_precondition(format!("event log replay error: {e}")))?;
+        let (tx, rx) = mpsc::channel(16);
+        tokio::spawn(async move {
+            for entry in entries {
+                if tx.send(Ok(entry)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 }
 

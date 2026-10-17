@@ -6,6 +6,7 @@ pub(crate) use proto_common::text_block;
 
 use crate::clients::ToolsetRpc;
 use crate::conversation::{AssistantAttribution, ConversationLog, HistoryScope};
+use crate::event_log::EventLog;
 use crate::runtime_tools::DispatchAbort;
 use crate::tool_router::ToolDispatcher;
 use crate::turn;
@@ -27,6 +28,9 @@ pub(crate) struct LoopMode {
     /// Threaded into every toolset tool dispatch this turn; empty for turns
     /// with no selection (sub-agent turns included).
     pub grants: std::collections::HashMap<String, String>,
+    /// Workspace-scoped event log for the monotonic sequence counter and
+    /// event persistence. Shared across sub-agent turns.
+    pub event_log: std::sync::Arc<EventLog>,
 }
 
 /// Why the loop stopped without natural completion.
@@ -44,7 +48,7 @@ pub(crate) enum LoopHalt {
 /// All non-Ok exits from `llm_loop`. `Halt(_)` is "loop stopped before natural
 /// completion"; the other variants are infrastructure failures.
 #[derive(Debug)]
-#[allow(dead_code)] // ToolDispatch reserved; today tool errors fold into is_error tool results.
+#[allow(dead_code)] // ToolDispatch is matched but not yet constructed; reserved for tool dispatch errors.
 pub(crate) enum LoopError {
     Halt(LoopHalt),
     ToolsetRpc(String),
@@ -153,6 +157,7 @@ pub(crate) async fn llm_loop(
     let idle_gap = mode.idle_gap;
     let cancel = mode.cancel;
     let grants = mode.grants;
+    let event_log = mode.event_log;
     // Streamed-item bookkeeping spans every continuation turn in this loop so
     // `workspace_seq` stays monotonic and item ids stay stable. A delegate
     // sub-turn stamps every frame with the parent link and the sub-agent name
@@ -167,8 +172,9 @@ pub(crate) async fn llm_loop(
             initial_request.conversation_id.clone(),
             parent_conversation_id.to_string(),
             agent_name.to_string(),
+            event_log,
         ),
-        HistoryScope::Orchestrator => turn::EmitState::new(initial_request.conversation_id.clone()),
+        HistoryScope::Orchestrator => turn::EmitState::new(initial_request.conversation_id.clone(), event_log),
     };
     let ctx = ContinuationCtx {
         system: initial_request.system.clone(),
@@ -527,11 +533,14 @@ mod tests {
     }
 
     fn mode(reply_channel: Option<&str>) -> LoopMode {
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let event_log = std::sync::Arc::new(crate::event_log::EventLog::new(&dir));
         LoopMode {
             reply_channel: reply_channel.map(str::to_string),
             idle_gap: std::time::Duration::from_secs(45),
             cancel: tokio_util::sync::CancellationToken::new(),
             grants: std::collections::HashMap::new(),
+            event_log,
         }
     }
 
@@ -1238,11 +1247,14 @@ mod tests {
     fn cancelled_mode() -> LoopMode {
         let cancel = tokio_util::sync::CancellationToken::new();
         cancel.cancel(); // fired before the loop consumes the model call
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let event_log = std::sync::Arc::new(crate::event_log::EventLog::new(&dir));
         LoopMode {
             reply_channel: None,
             idle_gap: std::time::Duration::from_secs(45),
             cancel,
             grants: std::collections::HashMap::new(),
+            event_log,
         }
     }
 

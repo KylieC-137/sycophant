@@ -366,22 +366,28 @@ impl ExecutionLogWriter for LocalFsExecutionLog {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use proto_common::{tool_result_frame::Frame, ToolComplete, ToolOutcome};
-    use std::path::Path;
-    use std::sync::Arc;
+mod test_helpers {
+    use proto_common::{tool_result_frame::Frame, ToolResultFrame};
 
-    fn stdout_f(s: &str) -> ToolResultFrame {
+    pub fn stdout_f(s: &str) -> ToolResultFrame {
         ToolResultFrame {
             frame: Some(Frame::Stdout(s.into())),
         }
     }
-    fn stderr_f(s: &str) -> ToolResultFrame {
+    pub fn stderr_f(s: &str) -> ToolResultFrame {
         ToolResultFrame {
             frame: Some(Frame::Stderr(s.into())),
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::test_helpers::{stdout_f, stderr_f};
+    use proto_common::{tool_result_frame::Frame, ToolComplete, ToolOutcome};
+    use std::path::Path;
+    use std::sync::Arc;
     fn image_f(media_type: &str, data: Vec<u8>) -> ToolResultFrame {
         ToolResultFrame {
             frame: Some(Frame::Image(proto_common::ImageBlock {
@@ -950,19 +956,9 @@ mod tests {
 #[cfg(test)]
 mod replay_tests {
     use super::*;
+    use super::test_helpers::{stdout_f, stderr_f};
     use proto_common::tool_result_frame::Frame;
     use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
-
-    fn stdout_f(s: &str) -> ToolResultFrame {
-        ToolResultFrame {
-            frame: Some(Frame::Stdout(s.into())),
-        }
-    }
-    fn stderr_f(s: &str) -> ToolResultFrame {
-        ToolResultFrame {
-            frame: Some(Frame::Stderr(s.into())),
-        }
-    }
     fn canceled_terminal() -> ToolResultFrame {
         ToolResultFrame {
             frame: Some(Frame::Complete(ToolComplete {

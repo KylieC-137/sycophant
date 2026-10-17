@@ -1024,6 +1024,66 @@ step_5b_syco_cli_chat() {
   [ -n "$E2E_CHAT_CONV" ] \
     || { warn "syco chat did not print a conversation ID to stderr"; return 1; }
   ok "syco chat completed with test-cmd tool call (${E2E_CHAT_CONV})"
+
+  # ── resumable streaming ──
+  local cursor="$SYCO_TMP/cursors/hello-world.seq"
+
+  # Helper: run syco chat, assert catch-up complete, assert cursor advances.
+  # Usage: assert_resume_chat <label> <message> <seq_before>
+  # Prints the new seq to stdout.
+  assert_resume_chat() {
+    local label="$1" msg="$2" seq_before="$3"
+    local err
+    err="$(mktemp)"
+    SYCO_CONFIG_DIR="$SYCO_TMP" \
+      "$REPO_ROOT/target/syco" chat "$msg" >/dev/null 2>"$err" \
+      || { warn "${label}: chat exited non-zero: $(cat "$err")"; rm -f "$err"; return 1; }
+    grep -q "catch-up complete" "$err" \
+      || { warn "${label}: no 'catch-up complete': $(cat "$err")"; rm -f "$err"; return 1; }
+    rm -f "$err"
+    local seq_now
+    seq_now="$(cat "$cursor")"
+    [ "$seq_now" -gt "$seq_before" ] \
+      || { warn "${label}: cursor did not advance (${seq_now} <= ${seq_before})"; return 1; }
+    ok "${label} (cursor ${seq_before} → ${seq_now})" >&2
+    printf '%s' "$seq_now"
+  }
+
+  # Test 1: first chat created cursor
+  [ -f "$cursor" ] \
+    || { warn "cursor file not created after first chat"; return 1; }
+  local seq1
+  seq1="$(cat "$cursor")"
+  [ "$seq1" -gt 0 ] \
+    || { warn "cursor is 0 after first chat"; return 1; }
+  ok "cursor persisted after first chat (seq=${seq1})"
+
+  # Test 2: second chat resumes from cursor
+  local seq2
+  seq2="$(assert_resume_chat "resume" "Say exactly: resumed" "$seq1")" \
+    || return 1
+
+  # Test 3: kill mid-stream, cursor survives
+  local seq_before="$seq2"
+  local kill_err
+  kill_err="$(mktemp)"
+  SYCO_CONFIG_DIR="$SYCO_TMP" \
+    "$REPO_ROOT/target/syco" chat "Write a very long and detailed essay." \
+    2>"$kill_err" &
+  local kill_pid=$!
+  sleep 5
+  kill "$kill_pid" 2>/dev/null || true
+  wait "$kill_pid" 2>/dev/null || true
+  rm -f "$kill_err"
+  local seq_after
+  seq_after="$(cat "$cursor" 2>/dev/null || echo "0")"
+  [ "$seq_after" -gt "$seq_before" ] \
+    || { warn "cursor not advanced after kill (${seq_after} <= ${seq_before})"; return 1; }
+  ok "mid-stream kill preserved cursor (${seq_before} → ${seq_after})"
+
+  # Test 4: reconnect after kill catches up
+  assert_resume_chat "post-kill reconnect" "Say exactly: recovered" "$seq_after" >/dev/null \
+    || return 1
 }
 
 # Re-register the operator's Mac against THIS run's headscale. Every Step 0

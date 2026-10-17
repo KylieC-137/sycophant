@@ -3,7 +3,9 @@ use proto_common::{
     SubscribeRequest, TurnStateEvent, UserMessage,
 };
 use relay_proto::relay_internal_client::RelayInternalClient;
-use relay_proto::{ChannelReply, DeliverOutboundRequest, DeliverStreamItemRequest};
+use relay_proto::{
+    DeliverReplyRequest, DeliverStreamItemRequest, DeliverTurnStateRequest,
+};
 use shared::auth::{SaTokenInterceptor, HARNESS_RELAY_TOKEN_PATH};
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
@@ -48,25 +50,24 @@ pub(crate) trait ToolsetRpc: Send {
 /// server→client requests over a registered channel.
 #[async_trait::async_trait]
 pub(crate) trait RelayRpc: Send {
-    /// Push a fire-and-forget `ServerRequest` to the named channel. The
-    /// returned bool is best-effort — true means the gateway successfully
-    /// enqueued the frame; false means it rejected (unknown channel,
-    /// unsupported method).
+    /// Push a fire-and-forget `ServerRequest` to all channels for the workspace.
     async fn send_server_notification(
         &mut self,
-        channel_id: &str,
+        workspace: &str,
         method: &str,
         params_json: &str,
+        workspace_seq: u64,
     ) -> Result<bool, String>;
     /// Push a `ServerRequest` and block on the matching `ClientResponse`.
     /// `timeout_seconds = 0` lets the gateway pick a default.
     async fn send_server_request_and_await(
         &mut self,
-        channel_id: &str,
+        workspace: &str,
         request_id: &str,
         method: &str,
         params_json: &str,
         timeout_seconds: u32,
+        workspace_seq: u64,
     ) -> Result<ServerRequestOutcome, String>;
     /// Push one streamed activity frame produced during a turn. The gateway
     /// relays the `StreamItem` to the client unchanged. Returns the gateway's
@@ -75,6 +76,22 @@ pub(crate) trait RelayRpc: Send {
         &mut self,
         channel_id: &str,
         item: StreamItem,
+        workspace_seq: u64,
+    ) -> Result<bool, String>;
+    /// Push the assistant reply (ChannelSend) to all workspace channels.
+    async fn deliver_reply(
+        &mut self,
+        conversation_id: &str,
+        content: Vec<ContentBlock>,
+        workspace_seq: u64,
+    ) -> Result<bool, String>;
+    /// Push a turn-state event. The relay records the state keyed by
+    /// the subject carried in the request.
+    async fn deliver_turn_state(
+        &mut self,
+        turn_state: TurnStateEvent,
+        workspace_seq: u64,
+        subject: &str,
     ) -> Result<bool, String>;
 }
 
@@ -104,47 +121,24 @@ impl RelayClient {
             .map(|resp| resp.into_inner())
             .map_err(|e| format!("subscribe RPC failed: {e}"))
     }
-
-    /// Push the assistant reply and/or terminal turn-state to the client via
-    /// the gateway. The harness is the sole originator of replies (the
-    /// gateway enqueues the reply before applying the turn-state, preserving
-    /// client-visible ordering).
-    pub(crate) async fn deliver_outbound(
-        &mut self,
-        channel_id: &str,
-        conversation_id: &str,
-        reply: Option<Vec<ContentBlock>>,
-        turn_state: Option<TurnStateEvent>,
-    ) -> Result<bool, String> {
-        let resp = self
-            .inner
-            .deliver_outbound(DeliverOutboundRequest {
-                channel_id: channel_id.to_string(),
-                conversation_id: conversation_id.to_string(),
-                reply: reply.map(|content| ChannelReply { content }),
-                turn_state,
-            })
-            .await
-            .map_err(|e| format!("deliver_outbound RPC failed: {e}"))?
-            .into_inner();
-        Ok(resp.delivered)
-    }
 }
 
 #[async_trait::async_trait]
 impl RelayRpc for RelayClient {
     async fn send_server_notification(
         &mut self,
-        channel_id: &str,
+        workspace: &str,
         method: &str,
         params_json: &str,
+        workspace_seq: u64,
     ) -> Result<bool, String> {
         let resp = self
             .inner
             .send_server_notification(SendServerNotificationRequest {
-                channel_id: channel_id.to_string(),
                 method: method.to_string(),
                 params_json: params_json.to_string(),
+                workspace: workspace.to_string(),
+                workspace_seq,
             })
             .await
             .map_err(|e| format!("send_server_notification RPC failed: {e}"))?
@@ -154,20 +148,22 @@ impl RelayRpc for RelayClient {
 
     async fn send_server_request_and_await(
         &mut self,
-        channel_id: &str,
+        workspace: &str,
         request_id: &str,
         method: &str,
         params_json: &str,
         timeout_seconds: u32,
+        workspace_seq: u64,
     ) -> Result<ServerRequestOutcome, String> {
         let resp = self
             .inner
             .send_server_request_and_await(SendServerRequestAndAwaitRequest {
-                channel_id: channel_id.to_string(),
                 request_id: request_id.to_string(),
                 method: method.to_string(),
                 params_json: params_json.to_string(),
                 timeout_seconds,
+                workspace: workspace.to_string(),
+                workspace_seq,
             })
             .await
             .map_err(|e| format!("send_server_request_and_await RPC failed: {e}"))?
@@ -192,15 +188,56 @@ impl RelayRpc for RelayClient {
         &mut self,
         channel_id: &str,
         item: StreamItem,
+        workspace_seq: u64,
     ) -> Result<bool, String> {
         let resp = self
             .inner
             .deliver_stream_item(DeliverStreamItemRequest {
                 channel_id: channel_id.to_string(),
                 item: Some(item),
+                workspace_seq,
             })
             .await
             .map_err(|e| format!("deliver_stream_item RPC failed: {e}"))?
+            .into_inner();
+        Ok(resp.delivered)
+    }
+
+    async fn deliver_reply(
+        &mut self,
+        conversation_id: &str,
+        content: Vec<ContentBlock>,
+        workspace_seq: u64,
+    ) -> Result<bool, String> {
+        let resp = self
+            .inner
+            .deliver_reply(DeliverReplyRequest {
+                conversation_id: conversation_id.to_string(),
+                content,
+                workspace_seq,
+            })
+            .await
+            .map_err(|e| format!("deliver_reply RPC failed: {e}"))?
+            .into_inner();
+        Ok(resp.delivered)
+    }
+
+    async fn deliver_turn_state(
+        &mut self,
+        turn_state: TurnStateEvent,
+        workspace_seq: u64,
+        subject: &str,
+    ) -> Result<bool, String> {
+        let resp = self
+            .inner
+            .deliver_turn_state(DeliverTurnStateRequest {
+                channel_id: String::new(),
+                turn_state: Some(turn_state),
+                workspace_seq,
+                subject: subject.to_string(),
+            })
+            .await
+            .map_err(|e| format!("deliver_turn_state RPC failed: {e}"))?
             .into_inner();
         Ok(resp.delivered)
     }

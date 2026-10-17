@@ -65,6 +65,8 @@ spec:
               value: "{{ .Values.idp.audience }}"
             - name: IDP_CERTIFICATE_AUTHORITY
               value: {{ .Values.idp.certificateAuthority | quote }}
+            - name: HEARTBEAT_INTERVAL_SECS
+              value: "{{ .Values.relay.heartbeatIntervalSecs }}"
           ports:
             # Internal listener (9090): K8s ServiceAccount tokens via
             # TokenReview. Reachable from in-cluster pods only via the

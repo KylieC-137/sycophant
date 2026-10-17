@@ -70,6 +70,7 @@ fn receive(workspace: &str, sender: &str) -> ChannelReceiveRequest {
         adapter_hint: None,
         workspace: workspace.into(),
         sender: sender.into(),
+        resume_after_seq: None,
     }
 }
 

@@ -19,8 +19,9 @@ use proto_common::{ContentBlock, Message, ToolDefinition, TurnState, TurnStateEv
 use toolset_proto::TurnRequest;
 
 use crate::agent::{self, LoopError, LoopHalt, LoopMode};
-use crate::clients::{RelayClient, ToolsetRpc};
+use crate::clients::{RelayClient, RelayRpc, ToolsetRpc};
 use crate::conversation::{sha256_hex, strip_frontmatter, AssistantAttribution, HistoryScope};
+use crate::event_log::EventLog;
 use crate::instructions::Instructions;
 use crate::message_source::MessageSource;
 use crate::registry::ConversationRegistry;
@@ -75,6 +76,7 @@ pub(crate) async fn message_loop(
     tool_router: Arc<ToolRouter>,
     registry: Arc<ConversationRegistry>,
     message_source: &mut dyn MessageSource,
+    event_log: Arc<EventLog>,
 ) -> Result<(), String> {
     // The harness is the sole author of conversation history. Each
     // inbound message carries the conversation_id minted via
@@ -141,12 +143,18 @@ pub(crate) async fn message_loop(
         // Turn-start identity frame: name + system-prompt hash so the client
         // can label the agent and warn on a prompt change between turns.
         // Empty agent_name = the workspace primary agent (unnamed here).
-        if let Some(channel) = reply_channel.as_deref() {
+        if reply_channel.is_some() {
             let start = turn_start_frame(&conv_for_deliver, "", &prompt_hash);
-            if let Err(e) = relay
-                .deliver_outbound(channel, &conv_for_deliver, None, Some(start))
-                .await
-            {
+            let seq = event_log.next_seq();
+            let outbound = proto_common::ChannelOutbound {
+                command: Some(proto_common::channel_outbound::Command::TurnState(
+                    start.clone(),
+                )),
+                workspace_seq: Some(seq),
+            };
+            if let Err(e) = event_log.append(seq, &outbound).await {
+                tracing::warn!(error = %e, "failed to persist turn-start identity frame");
+            } else if let Err(e) = relay.deliver_turn_state(start, seq, "").await {
                 tracing::warn!(error = %e, "failed to deliver turn-start identity frame");
             }
         }
@@ -174,6 +182,7 @@ pub(crate) async fn message_loop(
                     gateway_sink = crate::turn::GatewaySink {
                         rpc: &mut *relay,
                         channel_id,
+                        event_log: event_log.clone(),
                     };
                     &mut gateway_sink
                 }
@@ -192,6 +201,7 @@ pub(crate) async fn message_loop(
                     idle_gap,
                     cancel: cancel.clone(),
                     grants: inbound.grants,
+                    event_log: event_log.clone(),
                 },
                 sink,
                 &scrub,
@@ -206,6 +216,7 @@ pub(crate) async fn message_loop(
             reply_for_deliver.as_deref(),
             &conv_for_deliver,
             &result,
+            &event_log,
         )
         .await;
         handle_llm_loop_result(result)?;
@@ -281,21 +292,54 @@ fn turn_start_frame(
 }
 
 /// Push one orchestrator turn's outcome to the client via the gateway.
-/// No-op when the turn had no reply channel; delivery failure is logged,
-/// not fatal (the durable log already holds the reply).
+/// Persists each frame to the event log before delivery so a resuming client
+/// can replay it. No-op when the turn had no reply channel; delivery failure
+/// is logged, not fatal (the durable log already holds the reply).
 async fn deliver_turn_outcome(
     relay: &mut RelayClient,
     channel: Option<&str>,
     conversation_id: &str,
     result: &Result<String, LoopError>,
+    event_log: &EventLog,
 ) {
-    let Some(channel) = channel else { return };
+    let Some(_) = channel else { return };
     let (reply, turn_state) = turn_outcome_frame(conversation_id, result);
-    if let Err(e) = relay
-        .deliver_outbound(channel, conversation_id, reply, Some(turn_state))
+    // Deliver reply first (if any), then turn-state — preserving ordering.
+    // Each frame gets its own seq and is persisted before delivery.
+    if let Some(content) = reply {
+        let seq = event_log.next_seq();
+        let outbound = proto_common::ChannelOutbound {
+            command: Some(proto_common::channel_outbound::Command::SendMessage(
+                proto_common::ChannelSend {
+                    content: content.clone(),
+                    conversation_id: conversation_id.to_string(),
+                },
+            )),
+            workspace_seq: Some(seq),
+        };
+        if let Err(e) = event_log.append(seq, &outbound).await {
+            tracing::warn!(error = %e, "failed to persist reply frame");
+        } else if let Err(e) = relay
+            .deliver_reply(conversation_id, content, seq)
+            .await
+        {
+            tracing::warn!(error = %e, "failed to deliver reply to client");
+        }
+    }
+    let seq = event_log.next_seq();
+    let outbound = proto_common::ChannelOutbound {
+        command: Some(proto_common::channel_outbound::Command::TurnState(
+            turn_state.clone(),
+        )),
+        workspace_seq: Some(seq),
+    };
+    if let Err(e) = event_log.append(seq, &outbound).await {
+        tracing::warn!(error = %e, "failed to persist turn state frame");
+    } else if let Err(e) = relay
+        .deliver_turn_state(turn_state, seq, "")
         .await
     {
-        tracing::warn!(error = %e, "failed to deliver turn outcome to client");
+        tracing::warn!(error = %e, "failed to deliver turn state to client");
     }
 }
 

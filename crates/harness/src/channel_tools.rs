@@ -97,8 +97,9 @@ pub(crate) async fn dispatch(
     gateway: &mut dyn RelayRpc,
     reply_channel: Option<&str>,
     tool_call_id: &str,
+    workspace: &str,
 ) -> Result<CallToolResponse, String> {
-    let Some(channel_id) = reply_channel else {
+    let Some(_) = reply_channel else {
         return Ok(CallToolResponse {
             content: vec![text_block(format!(
                 "channel tool `{name}` requires a connected client; this turn has no reply_channel"
@@ -112,7 +113,7 @@ pub(crate) async fn dispatch(
     match kind {
         Kind::Notification => {
             let delivered = gateway
-                .send_server_notification(channel_id, name, input_json)
+                .send_server_notification(workspace, name, input_json, 0)
                 .await?;
             if delivered {
                 Ok(CallToolResponse {
@@ -132,7 +133,7 @@ pub(crate) async fn dispatch(
         }
         Kind::Request => {
             let outcome = gateway
-                .send_server_request_and_await(channel_id, tool_call_id, name, input_json, 30)
+                .send_server_request_and_await(workspace, tool_call_id, name, input_json, 30, 0)
                 .await?;
             Ok(outcome_to_tool_response(name, outcome))
         }

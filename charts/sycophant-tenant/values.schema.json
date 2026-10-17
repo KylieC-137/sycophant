@@ -20,6 +20,11 @@
         "pullPolicy": {
           "type": "string",
           "enum": ["Always", "IfNotPresent", "Never"]
+        },
+        "heartbeatIntervalSecs": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 15
         }
       }
     },

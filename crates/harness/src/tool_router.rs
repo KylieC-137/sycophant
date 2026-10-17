@@ -532,7 +532,7 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
                 let mut gateway = self.relay.clone().ok_or_else(|| {
                     DispatchAbort::Error("relay gateway client not configured".into())
                 })?;
-                channel_tools::dispatch(name, input_json, &mut gateway, reply_channel, tool_call_id)
+                channel_tools::dispatch(name, input_json, &mut gateway, reply_channel, tool_call_id, &self.workspace)
                     .await
                     .map_err(DispatchAbort::Error)
             }

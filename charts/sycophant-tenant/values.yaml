@@ -18,6 +18,7 @@ relay:
   image: relay-controller
   tag: local
   pullPolicy: Never
+  heartbeatIntervalSecs: 15
 
 # install-wait: post-install/post-upgrade helm hook that waits for every
 # sycophant workload Deployment to become Available. Alpine + kubectl helper

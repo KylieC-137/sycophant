@@ -28,6 +28,7 @@ use toolset_proto::{TurnRequest, TurnRole};
 use crate::agent::{self, text_block, LoopError, LoopHalt, LoopMode};
 use crate::clients::{RelayRpc, ToolsetRpc};
 use crate::conversation::HistoryScope;
+use crate::event_log::EventLog;
 use crate::instructions::{first_paragraph, Instructions, InstructionsError};
 use crate::registry::ConversationRegistry;
 use crate::tool_router::ToolDispatcher;
@@ -528,6 +529,7 @@ async fn dispatch_verb(
 
     // Sub-turn frames relay through a live GatewaySink when the turn has a reply
     // channel; otherwise they drop.
+    let sub_event_log = std::sync::Arc::new(EventLog::new(&std::env::temp_dir()));
     let mut null_sink = turn::NullSink;
     let mut gateway_sink;
     let sink: &mut dyn turn::StreamSink = match (reply_channel, relay) {
@@ -535,6 +537,7 @@ async fn dispatch_verb(
             gateway_sink = turn::GatewaySink {
                 rpc,
                 channel_id: channel_id.to_string(),
+                event_log: sub_event_log.clone(),
             };
             &mut gateway_sink
         }
@@ -585,6 +588,11 @@ async fn dispatch_verb(
             idle_gap: turn::DEFAULT_IDLE_GAP,
             cancel: cancel.clone(),
             grants: HashMap::new(),
+            // Sub-agent turns use a private event log. Their frames are dropped
+            // by NullSink (no reply_channel), so the sequence numbers they
+            // generate are unused. A future refinement can share the parent
+            // workspace's EventLog.
+            event_log: sub_event_log.clone(),
         },
         sink,
         &scrub,
@@ -1117,19 +1125,21 @@ mod tests {
     impl RelayRpc for CapturingRelay {
         async fn send_server_notification(
             &mut self,
-            _channel_id: &str,
+            _workspace: &str,
             _method: &str,
             _params_json: &str,
+            _workspace_seq: u64,
         ) -> Result<bool, String> {
             Ok(true)
         }
         async fn send_server_request_and_await(
             &mut self,
-            _channel_id: &str,
+            _workspace: &str,
             _request_id: &str,
             _method: &str,
             _params_json: &str,
             _timeout_seconds: u32,
+            _workspace_seq: u64,
         ) -> Result<crate::clients::ServerRequestOutcome, String> {
             Ok(crate::clients::ServerRequestOutcome::Result(String::new()))
         }
@@ -1137,8 +1147,25 @@ mod tests {
             &mut self,
             channel_id: &str,
             item: proto_common::StreamItem,
+            _workspace_seq: u64,
         ) -> Result<bool, String> {
             self.delivered.push((channel_id.to_string(), item));
+            Ok(true)
+        }
+        async fn deliver_reply(
+            &mut self,
+            _conversation_id: &str,
+            _content: Vec<proto_common::ContentBlock>,
+            _workspace_seq: u64,
+        ) -> Result<bool, String> {
+            Ok(true)
+        }
+        async fn deliver_turn_state(
+            &mut self,
+            _turn_state: proto_common::TurnStateEvent,
+            _workspace_seq: u64,
+            _subject: &str,
+        ) -> Result<bool, String> {
             Ok(true)
         }
     }
