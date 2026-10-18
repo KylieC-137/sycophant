@@ -61,7 +61,7 @@ pub(crate) struct DestroyCmd {}
 /// making no changes.
 #[derive(Args)]
 pub(crate) struct UpgradeCmd {
-    /// run validation only; make no changes
+    /// Validate the cluster and tenants without applying upgrades or other changes
     #[arg(long)]
     pub check: bool,
 }
@@ -92,6 +92,7 @@ pub(crate) enum TenantSub {
     /// Delete a tenant completely, including its persistent data (irreversible)
     Remove(TenantRemove),
     Secret(SecretCmd),
+    /// Audit a running workspace against Sycophant security controls
     Audit(AuditCmd),
 }
 
