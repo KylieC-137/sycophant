@@ -87,7 +87,9 @@ pub(crate) enum TenantSub {
     /// installer, which upgrades the release in place. The capacity quota is set
     /// on first provision and not resized after
     Up(Up),
+    /// Temporarily stop the tenant from running,  does not delete its stored data.
     Down(TenantDown),
+    /// Delete a tenant completely, including its persistent data (irreversible)
     Remove(TenantRemove),
     Secret(SecretCmd),
     Audit(AuditCmd),
@@ -230,6 +232,7 @@ pub(crate) enum ComponentSub {
     /// command of the same name is replaced; a rejected command or a failed
     /// install exits non-zero
     Up(Up),
+    /// Remove the component and wait for its uninstall to complete
     Down(ComponentDown),
 }
 
