@@ -190,10 +190,12 @@ pub(crate) struct Up {
 /// The values a provision command renders from (see charts/sycophant-commands).
 #[derive(Args)]
 pub(crate) struct Values {
-    /// a values file keyed by kind; repeatable, later files override earlier
+    /// Path to a values file used to configure the resource or operation.
+    /// Repeatable; later files override earlier files.
     #[arg(short = 'f', long = "file", required = true)]
     pub files: Vec<String>,
-    /// one string value, <kind>.<key>=<value>; repeatable, overrides the files
+    /// Override a value from the supplied configuration using <kind>.<key>=<value>.
+    /// Repeatable; overrides are applied after all values files.
     #[arg(long = "set")]
     pub set: Vec<String>,
 }
