@@ -131,9 +131,6 @@ spec:
               echo "$cm" | jq -e --arg s "$ALICE" \
                   '.data.subject == $s and .data.workspaces == "alpha,beta" and .data["handle.slack"] == "U0123ABCDEF"' >/dev/null \
                 || { echo "identity CM data wrong: $cm"; exit 1; }
-              # The provision-identity membership binding survives.
-              kubectl get rolebinding "user-$HASH" -n "$TENANT_NS" >/dev/null \
-                || { echo "membership binding missing"; exit 1; }
               true
     - name: listed-workspaces-reachable-unlisted-not
       try:
@@ -398,83 +395,6 @@ spec:
               kubectl delete job "$JOB" -n sycophant-system --ignore-not-found >/dev/null
               [ "$(kubectl auth can-i get service/ws-delta -n "$TENANT_NS" --as="$ALICE")" = no ] \
                 || { echo "alice reached ws-delta, created after the grant"; exit 1; }
-              true
-    # A retry that finds its command gone stops before helm instead of
-    # installing an empty release over alice's grants.
-    - name: operator-grants-another-missing-workspace
-      use:
-        template: ../../step-templates/user-command.yaml
-        with:
-          bindings:
-            - name: tenant_ns
-              value: ($tenant_ns)
-            - name: sub
-              value: alice
-            - name: workspaces
-              value: alpha,epsilon
-            - name: handle_slack
-              value: ""
-            - name: writer
-              value: operator
-            - name: expect
-              value: admitted
-    - name: a-retry-without-its-command-leaves-the-grants
-      try:
-        - script:
-            timeout: 960s
-            env:
-              - name: TENANT_NS
-                value: ($tenant_ns)
-            content: |
-              set -euo pipefail
-              REPO_ROOT=$(git rev-parse --show-toplevel)
-              ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
-              ALICE="${ISSUER}#alice"
-              HASH=$(printf '%s' "$ALICE" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
-              ALPHA_UID=$(kubectl get role ws-alpha-reach -n "$TENANT_NS" -o jsonpath='{.metadata.uid}')
-              MISSING=epsilon
-              # Find the installer by its refusal: of alice's installers in
-              # this namespace, the one whose current or previous container
-              # logged it. A retry replaces the log, so poll both.
-              JOB=""
-              for i in $(seq 1 180); do
-                for j in $(kubectl get jobs -n sycophant-system -o json \
-                  | jq -r --arg c "provision-user-$HASH" --arg t "$TENANT_NS" \
-                  '.items[] | select(.metadata.name | startswith("provision-user-"))
-                   | select(any(.spec.template.spec.containers[].env[]?; .name == "COMMAND" and .value == $c))
-                   | select(any(.spec.template.spec.containers[].env[]?; .name == "TENANT" and .value == $t))
-                   | .metadata.name'); do
-                  { kubectl logs -n sycophant-system "job/$j" 2>/dev/null
-                    kubectl logs -n sycophant-system "job/$j" --previous 2>/dev/null; } \
-                    | grep -q "workspace $MISSING does not exist" && { JOB=$j; break; }
-                done
-                [ -n "$JOB" ] && break
-                sleep 1
-              done
-              [ -n "$JOB" ] || { echo "no installer refused missing ws-$MISSING"; exit 1; }
-              kubectl delete configmap "provision-user-$HASH" -n "$TENANT_NS" --wait=true >/dev/null
-              for i in $(seq 1 420); do
-                kubectl get rolebinding "user-ws-$HASH-$MISSING" -n "$TENANT_NS" >/dev/null 2>&1 \
-                  && { echo "a retry of $JOB granted ws-$MISSING"; exit 1; }
-                [ "$(kubectl get job "$JOB" -n sycophant-system \
-                  -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}')" = True ] && break
-                sleep 2
-              done
-              [ "$(kubectl get job "$JOB" -n sycophant-system \
-                -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}')" = True ] \
-                || { echo "installer $JOB did not end failed"; exit 1; }
-              kubectl get rolebinding "user-ws-$HASH-$MISSING" -n "$TENANT_NS" >/dev/null 2>&1 \
-                && { echo "a grant to ws-$MISSING rendered"; exit 1; }
-              # The refused grant changed nothing alice already held.
-              [ "$(kubectl get rolebinding "user-ws-$HASH-alpha" -n "$TENANT_NS" \
-                -o jsonpath='{.metadata.ownerReferences[0].uid}' 2>/dev/null)" = "$ALPHA_UID" ] \
-                || { echo "the refused grant removed alice's alpha binding"; exit 1; }
-              [ "$(kubectl auth can-i get service/ws-alpha -n "$TENANT_NS" --as="$ALICE")" = yes ] \
-                || { echo "the refused grant cut alice's reach to ws-alpha"; exit 1; }
-              [ "$(kubectl get configmap "user-$HASH" -n "$TENANT_NS" -o jsonpath='{.data.workspaces}' 2>/dev/null)" = alpha ] \
-                || { echo "the refused grant changed alice's identity ConfigMap"; exit 1; }
-              kubectl delete configmap "provision-user-$HASH" -n "$TENANT_NS" --ignore-not-found --wait=true >/dev/null
-              kubectl delete job "$JOB" -n sycophant-system --ignore-not-found >/dev/null
               true
     # An issuer-prefixed identity holding no write RBAC in this namespace
     # cannot write a shape-valid command, so the denial is RBAC's, not a

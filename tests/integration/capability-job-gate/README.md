@@ -14,33 +14,21 @@ label. Workspace W's Job may mount only W's approved Secret names, read from the
 ## Denial contract
 
 The gate is a single Kyverno `ClusterPolicy` named **`cluster-capability-job-gate`**
-(`background: false`, `validationFailureAction: Enforce`). Every live deny test
-below matches that name on the rejection, the way
-`tenant-resource-protection/*-immutable` match `cluster-protect-security`. Each
+(`background: false`, `validationFailureAction: Enforce`). The deny cases run
+offline in `tests/unit/kyverno-policies/capability-job-gate-as-harness/`. Each
 deny case is well-formed in every respect except the one field it targets, so with
-the targeted rule removed the Job admits and the test goes red — no case passes on
+the targeted rule removed the Job admits and the case goes red — no case passes on
 a policy missing the rule it targets.
 
 ## Tests
 
 | Test                               | Property                                                       |
 |------------------------------------|----------------------------------------------------------------|
-| unprivileged-sa-unbound-no-automount/ | `ws-<ws>-unprivileged` renders with automount false and no RoleBinding subject (render) |
-| harness-sa-only-creates-jobs/      | `ws-<ws>` Role is exactly `create` on `batch/jobs` (render) |
 | well-formed-job-admits-and-stamps/ | A well-formed harness Job admits and is stamped with the envelope, `component: capability-job`, and `workspace` overwritten from identity (live) |
-| stripped-envelope-denies/          | A harness Job with a non-compliant container securityContext denies (live) |
-| off-allowlist-volume-kind-denies/  | A harness Job with a volume kind outside the six-kind safe set denies (live) |
-| off-allowlist-secret-volume-denies/    | Off-allowlist name on `volumes[].secret.secretName` denies (live) |
-| off-allowlist-secret-projected-denies/ | Off-allowlist name on `volumes[].projected.sources[].secret.name` denies (live) |
-| off-allowlist-secret-env-denies/       | Off-allowlist name on `env[].valueFrom.secretKeyRef.name` denies (live) |
-| off-allowlist-secret-envfrom-denies/   | Off-allowlist name on `envFrom[].secretRef.name` denies (live) |
-| off-allowlist-image-pull-secret-denies/ | Off-allowlist name on `imagePullSecrets[].name` denies (live) |
-| wrong-service-account-denies/      | `serviceAccountName` other than `ws-<ws>-unprivileged` denies (live) |
-| bad-job-kind-denies/               | `sycophant.md/job-kind` outside `{tool, inference}` denies (live) |
 | policy-exception-admits/           | A gate-denied Job admits when a matching Kyverno PolicyException exists (live) |
-| cross-workspace-secret-denies/     | Workspace A's identity naming workspace B's approved Secret denies (live) |
 
-Render tests use `helm template` alone. Live tests impersonate the creator with
+The render checks for the two ServiceAccounts live in `tests/unit/tenant-chart/`.
+Live tests impersonate the creator with
 `kubectl --as system:serviceaccount:<ns>:ws-<ws>` and observe admit/deny at
 admission; they need a cluster because identity-keyed admission is not visible to a
 render.

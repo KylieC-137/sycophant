@@ -1,0 +1,1 @@
+{"idp": {"issuer": "https://127.0.0.1:30443/dex", "audience": "sycophant-cluster", "certificateAuthority": "-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n"}}

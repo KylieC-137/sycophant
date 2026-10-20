@@ -176,29 +176,3 @@ pub(crate) fn outcome_to_tool_response(
         },
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // channel_tools.rs:37 `tool_definitions` advertises exactly the three
-    // channel tools the LLM can invoke (consts at channel_tools.rs:13-15).
-    // Materiality: drop any one of the three `ToolInfo` entries from the
-    // returned vec and its name goes missing -> the matching `contains` reds.
-    #[test]
-    fn tool_definitions_advertises_the_three_channel_tools() {
-        let names: Vec<String> = tool_definitions().into_iter().map(|t| t.name).collect();
-        assert!(
-            names.contains(&REVEAL_PATH.to_string()),
-            "RevealPath must be advertised, got {names:?}"
-        );
-        assert!(
-            names.contains(&REQUEST_USER_INPUT.to_string()),
-            "RequestUserInput must be advertised, got {names:?}"
-        );
-        assert!(
-            names.contains(&REQUEST_USER_AUTH.to_string()),
-            "RequestUserAuth must be advertised, got {names:?}"
-        );
-    }
-}

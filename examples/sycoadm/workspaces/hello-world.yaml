@@ -3,8 +3,9 @@
 workspace:
   name: hello-world
   tenant: e2e-test
+  instructions: ../instructions/simple
   toolsets: [stdlib, workspace-ro, ssh-credentials]
-  models: [deepseek-v4-flash, local]
+  models: [local]
   grants:
     ssh-credentials:
       demo-key:

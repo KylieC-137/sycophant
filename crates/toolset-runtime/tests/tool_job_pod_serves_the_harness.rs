@@ -8,11 +8,6 @@
 //! pre-flip design), it could never obtain a call and this test could not
 //! complete. That absence is the load-bearing check for "the pod holds no client
 //! that dials out to the harness".
-//!
-//! Materiality: making the runtime a client again (no `ToolJob` server) leaves
-//! nothing for `ToolJobClient::connect` to reach, so `run` never returns frames.
-//! Dropping the assignment-first read makes the pod run no tool, so the target
-//! file is never written.
 
 use std::collections::HashMap;
 use std::time::Duration;

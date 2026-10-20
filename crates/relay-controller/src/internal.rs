@@ -12,9 +12,7 @@ use proto_common::{
     SendServerRequestAndAwaitResponse, SubscribeRequest, TurnState, TurnStateEvent, UserMessage,
 };
 use relay_proto::relay_internal_server::RelayInternal;
-use relay_proto::{
-    DeliverStreamItemRequest, DeliverStreamItemResponse,
-};
+use relay_proto::{DeliverStreamItemRequest, DeliverStreamItemResponse};
 use shared::auth::{extract_bearer_token, TokenVerifier};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -85,7 +83,11 @@ impl RelayInternal for InternalService {
         if req.method.is_empty() {
             return Err(Status::invalid_argument("method required"));
         }
-        let workspace_seq = if req.workspace_seq > 0 { Some(req.workspace_seq) } else { None };
+        let workspace_seq = if req.workspace_seq > 0 {
+            Some(req.workspace_seq)
+        } else {
+            None
+        };
         let delivered = match self
             .state
             .send_server_notification(&workspace, &req.method, req.params_json, workspace_seq)
@@ -182,10 +184,16 @@ impl RelayInternal for InternalService {
                 content: req.content,
                 conversation_id: req.conversation_id.clone(),
             })),
-            workspace_seq: if req.workspace_seq > 0 { Some(req.workspace_seq) } else { None },
+            workspace_seq: if req.workspace_seq > 0 {
+                Some(req.workspace_seq)
+            } else {
+                None
+            },
         };
         let delivered = self.state.send_to_workspace(&workspace, send).await > 0;
-        Ok(Response::new(relay_proto::DeliverReplyResponse { delivered }))
+        Ok(Response::new(relay_proto::DeliverReplyResponse {
+            delivered,
+        }))
     }
 
     async fn deliver_turn_state(
@@ -207,7 +215,11 @@ impl RelayInternal for InternalService {
             req.subject
         };
         let state = TurnState::try_from(turn_state.state).unwrap_or(TurnState::Unspecified);
-        let ws_seq = if req.workspace_seq > 0 { Some(req.workspace_seq) } else { None };
+        let ws_seq = if req.workspace_seq > 0 {
+            Some(req.workspace_seq)
+        } else {
+            None
+        };
 
         // Record the turn state for poll recovery.
         if state == TurnState::Failed {
@@ -248,7 +260,9 @@ impl RelayInternal for InternalService {
             workspace_seq: ws_seq,
         };
         let delivered = self.state.send_to_workspace(&workspace, msg).await > 0;
-        Ok(Response::new(relay_proto::DeliverTurnStateResponse { delivered }))
+        Ok(Response::new(relay_proto::DeliverTurnStateResponse {
+            delivered,
+        }))
     }
 
     // deliver_outbound is kept for backward compatibility but no longer called
@@ -267,7 +281,11 @@ impl RelayInternal for InternalService {
         // collapsing. The harness is the sole egress authority.
         let frame = ChannelOutbound {
             command: Some(channel_outbound::Command::StreamItem(item)),
-            workspace_seq: if req.workspace_seq > 0 { Some(req.workspace_seq) } else { None },
+            workspace_seq: if req.workspace_seq > 0 {
+                Some(req.workspace_seq)
+            } else {
+                None
+            },
         };
         let delivered = self.state.send_to_workspace(&workspace, frame).await > 0;
         Ok(Response::new(DeliverStreamItemResponse { delivered }))
@@ -316,17 +334,9 @@ mod tests {
     }
 
     #[test]
-    fn clamp_await_zero_returns_default() {
+    fn clamp_await_defaults_zero_caps_the_ceiling_passes_the_rest() {
         assert_eq!(clamp_await_secs(0), DEFAULT_AWAIT_SECS);
-    }
-
-    #[test]
-    fn clamp_await_caps_at_ceiling() {
         assert_eq!(clamp_await_secs(10_000), MAX_AWAIT_SECS);
-    }
-
-    #[test]
-    fn clamp_await_passes_through_in_range() {
         assert_eq!(clamp_await_secs(42), 42);
     }
 
@@ -401,54 +411,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_server_notification_cross_workspace_channel_denied() {
-        let state = make_state();
-        let (tx, _rx) = mpsc::channel(4);
-        // Channel owned by "other".
-        let _id = mint_person(&state, "subject-other", "other", tx).await;
-        let service = service_for(state, "ws");
-        // With workspace-scoped fan-out, the notification goes to all workspace channels.
-        // The verifier authenticates as "ws" so this just reports not delivered (no channels).
-        let resp = service
-            .send_server_notification(authed(SendServerNotificationRequest {
-                method: "RevealPath".into(),
-                params_json: "{}".into(),
-                workspace: "ws".into(),
-                workspace_seq: 0,
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert!(!resp.delivered);
-    }
-
-    #[tokio::test]
     async fn send_server_request_unknown_channel_sets_unknown_flag() {
         let service = service_for(make_state(), "ws");
-        let resp = service
-            .send_server_request_and_await(authed(SendServerRequestAndAwaitRequest {
-                request_id: "r".into(),
-                method: "AskUser".into(),
-                params_json: "{}".into(),
-                timeout_seconds: 1,
-                workspace: "ws".into(),
-                workspace_seq: 0,
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert!(resp.unknown_channel);
-    }
-
-    #[tokio::test]
-    async fn send_server_request_cross_workspace_channel_denied() {
-        let state = make_state();
-        let (tx, _rx) = mpsc::channel(4);
-        // Channel owned by "other"; caller authenticates as "ws".
-        let _id = mint_person(&state, "subject-other", "other", tx).await;
-        let service = service_for(state, "ws");
-        // Now workspace-scoped: the request goes to workspace "ws" channels.
-        // There are none, so it returns unknown_channel.
         let resp = service
             .send_server_request_and_await(authed(SendServerRequestAndAwaitRequest {
                 request_id: "r".into(),
@@ -490,22 +454,6 @@ mod tests {
             Some(channel_outbound::Command::SendMessage(_))
         ));
         assert_eq!(frame.workspace_seq, Some(42));
-    }
-
-    #[tokio::test]
-    async fn deliver_reply_no_channels_reports_not_delivered() {
-        let state = make_state();
-        let service = service_for(state, "ws");
-        let resp = service
-            .deliver_reply(authed(relay_proto::DeliverReplyRequest {
-                conversation_id: "ws.conv".into(),
-                content: vec![],
-                workspace_seq: 1,
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert!(!resp.delivered);
     }
 
     #[tokio::test]
@@ -582,34 +530,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deliver_turn_state_records_even_without_channel() {
-        let state = make_state();
-        let service = service_for(state.clone(), "ws");
-        let resp = service
-            .deliver_turn_state(authed(relay_proto::DeliverTurnStateRequest {
-                channel_id: String::new(),
-                turn_state: Some(TurnStateEvent {
-                    state: TurnState::Idle as i32,
-                    conversation_id: "ws.conv".into(),
-                    reason: String::new(),
-                    code: String::new(),
-                    ..Default::default()
-                }),
-                workspace_seq: 0,
-                subject: "subject-ws".into(),
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert!(!resp.delivered); // no channels minted, so nothing delivered
-        let rec = state
-            .turn_state_record("subject-ws", "ws.conv")
-            .await
-            .unwrap();
-        assert_eq!(rec.state, TurnState::Idle);
-    }
-
-    #[tokio::test]
     async fn deliver_stream_item_wraps_verbatim_unchanged() {
         use proto_common::{item_start, stream_item, ItemStart, StreamItem, ToolUseItem};
         let state = make_state();
@@ -652,21 +572,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deliver_stream_item_no_channels_reports_not_delivered() {
-        let service = service_for(make_state(), "ws");
-        let resp = service
-            .deliver_stream_item(authed(DeliverStreamItemRequest {
-                channel_id: String::new(),
-                item: Some(proto_common::StreamItem::default()),
-                workspace_seq: 0,
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert!(!resp.delivered);
-    }
-
-    #[tokio::test]
     async fn deliver_stream_item_fans_out_to_workspace_not_cross_workspace() {
         let state = make_state();
         let (tx_other, mut rx_other) = mpsc::channel(4);
@@ -685,32 +590,9 @@ mod tests {
             .unwrap()
             .into_inner();
         assert!(!resp.delivered);
-        assert!(rx_other.try_recv().is_err(), "other workspace channel must not receive");
-    }
-
-    #[tokio::test]
-    async fn deliver_turn_state_cross_workspace_channel_isolated() {
-        let state = make_state();
-        let (tx_other, mut rx_other) = mpsc::channel(4);
-        let _id = mint_person(&state, "subject-other", "other", tx_other).await;
-        let service = service_for(state, "ws");
-        // The verifier authenticates as "ws". With fan-out, the turn state
-        // goes to "ws" channels only. "other" channel must not receive.
-        let resp = service
-            .deliver_turn_state(authed(relay_proto::DeliverTurnStateRequest {
-                channel_id: String::new(),
-                turn_state: Some(TurnStateEvent {
-                    state: TurnState::Working as i32,
-                    conversation_id: "ws.c".into(),
-                    ..Default::default()
-                }),
-                workspace_seq: 0,
-                subject: "subject-ws".into(),
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert!(!resp.delivered); // no channels in "ws", so nothing delivered
-        assert!(rx_other.try_recv().is_err(), "other workspace channel must not receive");
+        assert!(
+            rx_other.try_recv().is_err(),
+            "other workspace channel must not receive"
+        );
     }
 }

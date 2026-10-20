@@ -6,7 +6,7 @@ The Harness is the agent runtime, one per workspace. It runs the agent loop, own
 
 The instructions are the principal-authored content that drives agent behavior — most importantly the `AGENTS.md` that becomes the agent's system prompt. The harness reads it **in-process** from a read-only volume it mounts; there is no separate instructions-serving pod and no instructions RPC.
 
-The instructions form a read-only, entrypoint-driven principal source. Content is synced at pod start by an init container from this workspace's object-storage prefix into an emptyDir the serving container mounts read-only. The read-only, prefix-scoped sync credential is mounted into the init container only; the serving container holds no credential.
+The instructions form a read-only, entrypoint-driven principal source. Content is synced at pod start by an init container from this workspace's object-storage prefix into an emptyDir the serving container mounts read-only. Only the init container mounts the pod's token for the store (audience `sycophant-objectstore`), which it exchanges at the store for a short-lived read-only credential scoped to this workspace's folder. No read credential is stored, and the serving container holds none.
 
 ### Layout conventions
 
@@ -25,26 +25,26 @@ Sycophant's interpretation of AGENTS.md is "the agent's file at this level of th
 
 Trust contract:
 
-- The cluster never writes to the instructions. All writes happen at the source, controlled by the principal, who uploads the instruction tree to the workspace's object-storage prefix out-of-band. The init container's sync is read-only (GET/LIST), prefix-scoped to this workspace.
-- Each workspace has its **own** instructions — different AGENTS.md, different skills, different sub-agents. Multiple workspaces in the same namespace are *different agents*, not copies of one. A harness syncs only its own workspace's prefix, so it can never read another workspace's content. The serving container holds no Kubernetes API grant, no Secret access, and no `jobs` or `instructions` RBAC; reading the instructions is a local filesystem read. Only the init container mounts the read-only, prefix-scoped sync credential.
+- The cluster never writes to the instructions. All writes happen at the source, controlled by the operator, whose `sycoadm workspace up` uploads the instruction tree to the workspace's object-storage folder. The init container's sync is read-only (GET/LIST), scoped to this workspace's folder.
+- Each workspace has its **own** instructions — different AGENTS.md, different skills, different sub-agents. Multiple workspaces in the same namespace are *different agents*, not copies of one. A harness syncs only its own workspace's folder, so it can never read another workspace's content. The serving container holds no Secret access and no `instructions` RBAC; reading the instructions is a local filesystem read. Only the init container mounts the pod's token for the store, and no read credential is stored anywhere.
 
 ### How it's wired
 
 Instructions content is driven by the workspace provision command, not a custom resource. The chart renders, per workspace from its workspace provision command (no `lookup`), an `emptyDir` mounted read-only onto that workspace's harness at `/etc/instructions/<workspace>` plus an init container that fills it.
 
-For each workspace the harness pod runs an `instructions-sync` init container that pulls `<harness.instructions.bucket>/<namespace>/<workspace>` from `<harness.instructions.endpoint>` into the `emptyDir`, using the read-only credential named by `harness.instructions.credentialName` (a Secret the operator provides). The init container mounts the credential; the serving container does not. `emptyDir` (not `hostPath`, not a PV) keeps the tenant namespace PSA `restricted` and re-syncs a fresh tree on every pod start.
+For each workspace the harness pod runs an `instructions-sync` init container that pulls `<harness.instructions.bucket>/system:serviceaccount:<namespace>:ws-<workspace>/` from `<harness.instructions.endpoint>` into the `emptyDir`. It presents the pod's own projected service-account token (audience `sycophant-objectstore`) to the store's STS, which returns a short-lived read-only credential scoped to the folder named by the token's subject. The init container mounts the token; the serving container does not. `emptyDir` (not `hostPath`, not a PV) keeps the tenant namespace PSA `restricted` and re-syncs a fresh tree on every pod start.
 
 ```
-<bucket>/<namespace>/<workspace>  →  init sync  →  emptyDir /etc/instructions/<ws>  →  agent
+<bucket>/system:serviceaccount:<ns>:ws-<ws>/  →  init sync  →  emptyDir /etc/instructions/<ws>  →  agent
 ```
 
 Because delivery renders per-workspace from the provision command with no `lookup`, the chart renders identically under `helm install` and a GitOps `helm template | kubectl apply` pipeline — neither strips a instructions.
 
-**SeaweedFS ingress lock.** The object store is a shared cluster component (`charts/sycophant-objectstore`, installed once in `sycophant-system`), so it owns its own network posture. Its `objectstore` CiliumNetworkPolicy admits only harness pods (`app.kubernetes.io/component: harness`), in any tenant namespace via a `k8s:io.kubernetes.pod.namespace` Exists match, to the store's S3 API port (8333), and denies every other pod. It selects the store pod by `app.kubernetes.io/component: objectstorage` + `app.kubernetes.io/part-of: sycophant`. Its egress is default-deny with cluster DNS always open; with no `oidc.issuer` the store dials nothing external, and with an issuer set it gains exactly one external peer, the configured issuer, for discovery and JWKS. The workspace chart's harness egress policy is the tenant-side half: it lets the init container reach the store cross-namespace by component label plus the store namespace read from `harness.instructions.endpoint`, and adds that host to the DNS L7 allowlist.
+**SeaweedFS ingress lock.** The object store is a shared cluster component (`charts/sycophant-objectstore`, installed once in `sycophant-system`), so it owns its own network posture. Its `objectstore` CiliumNetworkPolicy admits only harness pods (`app.kubernetes.io/component: harness`), in any tenant namespace via a `k8s:io.kubernetes.pod.namespace` Exists match, to the store's S3 API port (8333), and denies every other pod. It selects the store pod by `app.kubernetes.io/component: objectstorage` + `app.kubernetes.io/part-of: sycophant`. Its egress is default-deny with cluster DNS and the apiserver (for the cluster issuer's key set) always open; with no `oidc.issuer` the store dials nothing else, and with an issuer set it gains exactly one more peer, the configured issuer, for discovery and JWKS. The workspace chart's harness egress policy is the tenant-side half: it lets the init container reach the store cross-namespace by component label plus the store namespace read from `harness.instructions.endpoint`, and adds that host to the DNS L7 allowlist.
 
 ### Authoring instructions
 
-Instructions are content, not a custom resource — author them per workspace by uploading the agent files to the workspace's object-storage prefix. Content lives at the key `<namespace>/<workspace>` in `harness.instructions.bucket`. Upload the agent files there and the next pod start syncs them to `/etc/instructions/<workspace>`.
+Instructions are content, not a custom resource — author them per workspace as a local directory and name it in the workspace values file with `workspace.instructions` (a relative path resolves against the values file's directory). `sycoadm workspace up` replaces the workspace's folder `system:serviceaccount:<namespace>:ws-<workspace>/` in `harness.instructions.bucket` with that directory's files, then provisions the workspace; a hash of the files rides the provision command, so changed files roll the pod and the new pod syncs them to `/etc/instructions/<workspace>`. Rerun `workspace up` after editing the files. `sycoadm workspace down` deletes the folder after the workspace is removed.
 
 ### ValidatingAdmissionPolicy on hostPath
 
@@ -62,7 +62,6 @@ harness:
   instructions:
     endpoint: seaweedfs.sycophant-system.svc.cluster.local:8333
     bucket: sycophant-instructions
-    credentialName: instructions-reader
     syncImage: rclone/rclone:1.75.1
 ```
 

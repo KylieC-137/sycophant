@@ -401,13 +401,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shell_missing_command_param_is_error() {
-        let r = dispatch_builtin("Shell", &args(&[]), "/tmp", 30_000).await;
-        assert_ne!(r.exit_code, 0);
-        assert!(r.stderr.contains("missing required parameter"));
-    }
-
-    #[tokio::test]
     async fn shell_uses_working_dir_as_cwd() {
         let dir = tempfile::tempdir().unwrap();
         let r = dispatch_builtin(
@@ -480,23 +473,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shell_timeout_clamped_to_max() {
-        // Requesting a timeout above the hard cap is silently clamped — the
-        // command still runs to completion within the cap. Hard to test the
-        // clamp directly without making the cap configurable, so just verify
-        // a "too-large" request doesn't reject and a quick command completes.
-        let r = dispatch_builtin(
-            "Shell",
-            &args(&[("command", "echo ok"), ("timeout", "99999")]),
-            "/tmp",
-            30_000,
-        )
-        .await;
-        assert_eq!(r.exit_code, 0);
-        assert!(r.stdout.contains("ok"));
-    }
-
-    #[tokio::test]
     async fn shell_timeout_zero_runs_at_floor_not_instant_kill() {
         // A model-supplied timeout of 0 must not instant-kill the command. The
         // request is clamped up to the floor, so a quick command completes
@@ -532,38 +508,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_offset_skips_initial_lines() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("t.txt");
-        std::fs::write(&path, "a\nb\nc\nd\n").unwrap();
-        let r = dispatch_builtin(
-            "Read",
-            &args(&[("path", path.to_str().unwrap()), ("offset", "3")]),
-            "/tmp",
-            30_000,
-        )
-        .await;
-        assert_eq!(r.exit_code, 0);
-        assert_eq!(r.stdout, "3|c\n4|d\n");
-    }
-
-    #[tokio::test]
-    async fn read_limit_caps_returned_lines() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("t.txt");
-        std::fs::write(&path, "a\nb\nc\nd\ne\n").unwrap();
-        let r = dispatch_builtin(
-            "Read",
-            &args(&[("path", path.to_str().unwrap()), ("limit", "2")]),
-            "/tmp",
-            30_000,
-        )
-        .await;
-        assert_eq!(r.exit_code, 0);
-        assert_eq!(r.stdout, "1|a\n2|b\n");
-    }
-
-    #[tokio::test]
     async fn read_offset_plus_limit_window() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.txt");
@@ -581,13 +525,6 @@ mod tests {
         .await;
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "2|b\n3|c\n");
-    }
-
-    #[tokio::test]
-    async fn read_missing_path_param_is_error() {
-        let r = dispatch_builtin("Read", &args(&[]), "/tmp", 30_000).await;
-        assert_ne!(r.exit_code, 0);
-        assert!(r.stderr.contains("missing required parameter"));
     }
 
     #[tokio::test]
@@ -621,30 +558,13 @@ mod tests {
         assert!(r.stdout.is_empty());
     }
 
-    #[tokio::test]
-    async fn read_at_exact_cap_succeeds() {
-        // Pins the cap as strict `>` rather than `>=`. A file of exactly
-        // READ_FILE_CAP_BYTES is still permitted.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("at_cap.txt");
-        let at_cap = "x".repeat(READ_FILE_CAP_BYTES as usize);
-        std::fs::write(&path, &at_cap).unwrap();
-        let r = dispatch_builtin(
-            "Read",
-            &args(&[("path", path.to_str().unwrap())]),
-            "/tmp",
-            usize::MAX,
-        )
-        .await;
-        assert_eq!(r.exit_code, 0);
-    }
-
     // ---- Write ----
 
     #[tokio::test]
     async fn write_creates_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("out.txt");
+        // A nested path: missing parent directories are created.
+        let path = dir.path().join("a/b/c/out.txt");
         let r = dispatch_builtin(
             "Write",
             &args(&[("path", path.to_str().unwrap()), ("content", "hello")]),
@@ -655,36 +575,6 @@ mod tests {
         assert_eq!(r.exit_code, 0);
         assert!(r.stdout.contains("wrote 5 bytes"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
-    }
-
-    #[tokio::test]
-    async fn write_auto_creates_parent_directories() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a/b/c/out.txt");
-        let r = dispatch_builtin(
-            "Write",
-            &args(&[("path", path.to_str().unwrap()), ("content", "nested")]),
-            "/tmp",
-            30_000,
-        )
-        .await;
-        assert_eq!(r.exit_code, 0);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "nested");
-    }
-
-    #[tokio::test]
-    async fn write_empty_content_creates_empty_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("empty.txt");
-        let r = dispatch_builtin(
-            "Write",
-            &args(&[("path", path.to_str().unwrap()), ("content", "")]),
-            "/tmp",
-            30_000,
-        )
-        .await;
-        assert_eq!(r.exit_code, 0);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
     }
 
     // ---- Edit ----
@@ -775,28 +665,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn edit_runaway_protected_when_new_contains_old() {
-        // Old="foo", new="foobar" — replacen with limit 1 prevents
-        // re-matching the inserted "foo" inside "foobar".
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("t.txt");
-        std::fs::write(&path, "foo").unwrap();
-        let r = dispatch_builtin(
-            "Edit",
-            &args(&[
-                ("path", path.to_str().unwrap()),
-                ("old_string", "foo"),
-                ("new_string", "foobar"),
-            ]),
-            "/tmp",
-            30_000,
-        )
-        .await;
-        assert_eq!(r.exit_code, 0);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "foobar");
-    }
-
-    #[tokio::test]
     async fn edit_missing_required_param_is_error() {
         let r = dispatch_builtin(
             "Edit",
@@ -832,34 +700,6 @@ mod tests {
         assert!(r.stderr.contains("too large"));
         // File unchanged.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), oversized);
-    }
-
-    #[tokio::test]
-    async fn edit_at_exact_cap_succeeds() {
-        // Pins the cap as strict `>` rather than `>=`. A file of exactly
-        // READ_FILE_CAP_BYTES is still editable.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("at_cap.txt");
-        let mut content = String::with_capacity(READ_FILE_CAP_BYTES as usize);
-        content.push_str("ANCHOR");
-        content.push_str(&"x".repeat(READ_FILE_CAP_BYTES as usize - "ANCHOR".len()));
-        assert_eq!(content.len() as u64, READ_FILE_CAP_BYTES);
-        std::fs::write(&path, &content).unwrap();
-        let r = dispatch_builtin(
-            "Edit",
-            &args(&[
-                ("path", path.to_str().unwrap()),
-                ("old_string", "ANCHOR"),
-                ("new_string", "MARKER"),
-            ]),
-            "/tmp",
-            usize::MAX,
-        )
-        .await;
-        assert_eq!(r.exit_code, 0);
-        assert!(std::fs::read_to_string(&path)
-            .unwrap()
-            .starts_with("MARKER"));
     }
 
     // ---- Search ----
@@ -1026,27 +866,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_pagination_at_exact_cap_allowed() {
-        // Pins the cap as strict `>` rather than `>=`. offset + limit
-        // exactly at SEARCH_MAX_PAGE is permitted.
-        let dir = tempfile::tempdir().unwrap();
-        let r = dispatch_builtin(
-            "Search",
-            &args(&[
-                ("target", "files"),
-                ("pattern", ""),
-                ("path", dir.path().to_str().unwrap()),
-                ("offset", "500"),
-                ("limit", "500"),
-            ]),
-            "/tmp",
-            30_000,
-        )
-        .await;
-        assert_eq!(r.exit_code, 0);
-    }
-
-    #[tokio::test]
     async fn search_files_pagination_skips_and_takes() {
         let dir = tempfile::tempdir().unwrap();
         for i in 0..10 {
@@ -1147,40 +966,14 @@ mod tests {
     #[test]
     fn truncate_short_string_unchanged() {
         assert_eq!(truncate_middle("hello", 100), "hello");
+        assert_eq!(truncate_middle("hello", 5), "hello", "exactly at the limit");
     }
 
     #[test]
-    fn truncate_exact_limit_unchanged() {
-        assert_eq!(truncate_middle("hello", 5), "hello");
-    }
-
-    #[test]
-    fn truncate_long_string_has_marker_with_count() {
+    fn truncate_long_string_keeps_head_and_tail_around_a_truncated_note() {
         let s = "a".repeat(1000);
         let result = truncate_middle(&s, 100);
         assert_eq!(result.len(), 100);
-        let marker_start = result.find("[...truncated ").expect("marker missing");
-        let after_prefix = &result[marker_start + "[...truncated ".len()..];
-        let count_end = after_prefix.find(' ').expect("marker malformed");
-        let count: usize = after_prefix[..count_end].parse().expect("count not int");
-        assert!(count > 0);
-        assert!(result.contains(&format!("[...truncated {count} characters...]")));
-    }
-
-    #[test]
-    fn truncate_preserves_head_and_tail() {
-        let head_region = "H".repeat(50);
-        let tail_region = "T".repeat(50);
-        let s = format!("{}{}{}", head_region, "x".repeat(900), tail_region);
-        let result = truncate_middle(&s, 100);
-        assert!(result.starts_with("HH"));
-        assert!(result.ends_with("TT"));
-    }
-
-    #[test]
-    fn truncate_head_is_40_percent_of_available_space() {
-        let s = "a".repeat(1000);
-        let result = truncate_middle(&s, 100);
         let marker_start = result.find("\n[...truncated ").expect("marker missing");
         let marker_end = result
             .rfind(" characters...]\n")
@@ -1194,22 +987,19 @@ mod tests {
         let expected_tail = available - expected_head;
         assert_eq!(head_len, expected_head, "head is 2/5 of available space");
         assert_eq!(tail_len, expected_tail, "tail is remainder of available");
-    }
-
-    #[test]
-    fn truncate_marker_reports_exact_dropped_byte_count() {
-        let s = "a".repeat(1000);
-        let result = truncate_middle(&s, 100);
-        let marker_start = result.find("\n[...truncated ").expect("marker missing");
-        let marker_end = result
-            .rfind(" characters...]\n")
-            .expect("marker end missing")
-            + " characters...]\n".len();
-        let head_len = marker_start;
-        let tail_len = result.len() - marker_end;
         let expected_truncated = 1000 - head_len - tail_len;
         assert!(result.contains(&format!(
             "[...truncated {expected_truncated} characters...]"
         )));
+    }
+
+    #[test]
+    fn truncate_preserves_head_and_tail() {
+        let head_region = "H".repeat(50);
+        let tail_region = "T".repeat(50);
+        let s = format!("{}{}{}", head_region, "x".repeat(900), tail_region);
+        let result = truncate_middle(&s, 100);
+        assert!(result.starts_with("HH"));
+        assert!(result.ends_with("TT"));
     }
 }

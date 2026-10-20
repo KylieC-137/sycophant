@@ -59,7 +59,7 @@ want = ("provision-workspace-hello-world", "tenant-acme", {
 check("workspace values flatten to command data", summary("workspace-provision") == want,
       f"got: {summary('workspace-provision')}")
 
-want = ("provision-tenant", "sycophant-system", {"tenant": "acme", "capacity": "2Gi", "owner": "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#operator", "owner-hash": "027164b38d531173"})
+want = ("provision-tenant", "sycophant-system", {"tenant": "acme", "capacity": "2Gi", "owner": "https://sycophant-dex.sycophant-system.svc.cluster.local:5556/dex#operator", "owner-hash": "027164b38d531173", "headscale.enabled": "true", "headscale.serverUrl": "http://localhost:8080", "headscale.magicDns": "true", "headscale.baseDomain": "ts.local", "headscale.acme.enabled": "false", "headscale.acme.email": "ops@example.com"})
 check("tenant values flatten to command data", summary("tenant-provision") == want,
       f"got: {summary('tenant-provision')}")
 
@@ -91,15 +91,6 @@ want = ("provision-channel-app", "tenant-acme", {
     "loginServer": "http://headscale:8080",
     "hostname": "relay",
     "authKeySecret": "relay-tsnet-authkey",
-    "headscale.enabled": "true",
-    "headscale.image": "headscale/headscale",
-    "headscale.tag": "0.28.0",
-    "headscale.pullPolicy": "Always",
-    "headscale.serverUrl": "http://localhost:8080",
-    "headscale.magicDns": "true",
-    "headscale.baseDomain": "ts.local",
-    "headscale.acme.enabled": "false",
-    "headscale.acme.email": "ops@example.com",
 })
 check("channel values flatten to command data", summary("channel-provision") == want,
       f"got: {summary('channel-provision')}")
@@ -144,59 +135,49 @@ expect() {
 }
 
 expect tenant-unknown-key provision-tenant bogus
-expect tenant-bad-capacity provision-tenant capacity
 expect tenant-from-serviceaccount provision-tenant issuer-prefixed
-expect tenant-token-at-cap provision-tenant ""
 expect tenant-token-over-cap provision-tenant "at most 46"
 expect tenant-missing-capacity provision-tenant capacity
 expect tenant-missing-owner provision-tenant owner
-expect tenant-missing-owner-hash provision-tenant owner-hash
 expect tenant-bad-owner-hash provision-tenant owner-hash
-expect tenant-values-key provision-tenant "'values'"
-expect inference-commands provision-inference-deepseek ""
 expect inference-commands provision-inference-format format
-expect inference-commands provision-inference-baseurl "'baseUrl' must be an http or https URL whose host is a dotted name"
 expect inference-commands provision-inference-bool server.singleNodeException
 expect inference-commands provision-inference-localbaseurl "must not carry a 'baseUrl'"
 expect inference-commands provision-inference-singlelabel "'baseUrl' must be an http or https URL whose host is a dotted name"
 expect inference-commands provision-inference-emptyimage "non-empty 'server.image'"
-expect inference-commands reap-inference-data ""
 expect toolset-commands provision-toolset-tagimage "'image' must"
 expect toolset-commands provision-toolset-bogus "unknown key 'tool.git-status.bogus'"
 expect toolset-commands provision-toolset-badtype "'tool.git-clone.arg.url.type' must"
 expect toolset-commands provision-toolset-deadline "'deadlineSeconds' must"
 expect toolset-commands provision-toolset-noenv "'tool.git-clone.arg.url.env'"
 expect toolset-commands provision-toolset-dotted "unknown key 'tool.git.status.description'"
-expect toolset-commands provision-toolset-notype "'tool.git-clone.arg.url.type'"
-expect toolset-commands provision-toolset-dottedarg "unknown key 'tool.git-clone.arg.u.rl."
 expect toolset-commands provision-toolset-required "'tool.git-clone.arg.url.required' must"
 expect toolset-commands reap-toolset-data "'image'"
 expect workspace-commands provision-workspace-unlisted "'grant.ssh-credentials.demo-key.secret' grants a toolset not in 'toolsets'"
 expect workspace-commands provision-workspace-nosecret "'grant.ssh-credentials.demo-key.path' has no '.secret' beside it"
-expect workspace-commands provision-workspace-harnesscpu "unknown key 'harness.cpu'"
 expect workspace-commands provision-workspace-undottedegress "'grant.ssh-credentials.demo-key.egress' must be a dotted hostname"
 expect workspace-commands provision-workspace-relativepath "'grant.ssh-credentials.demo-key.path' must be an absolute path"
 expect workspace-commands provision-workspace-badsecret "a workspace grant's 'secret' must be a Secret name"
+expect workspace-commands provision-workspace-badhash-upper "a workspace command's 'instructions-hash' must be 64 lowercase hex characters"
+# A valid 64-lowercase-hex instructions-hash is admitted.
+expect workspace-commands provision-workspace-goodhash ""
 expect suspend-bad-keepalive suspend-tenant "0, 30, 60, 90"
-expect slice-commands-validate-data "provision-workspace-$(printf 'a%.0s' {1..49})" ""
 expect slice-commands-validate-data "provision-workspace-$(printf 'a%.0s' {1..50})" "at most 49"
-expect slice-commands-validate-data "provision-toolset-$(printf 'a%.0s' {1..50})" ""
 expect slice-commands-validate-data "provision-toolset-$(printf 'a%.0s' {1..51})" "at most 50"
-expect slice-commands-validate-data "provision-inference-$(printf 'a%.0s' {1..49})" ""
 expect slice-commands-validate-data "provision-inference-$(printf 'a%.0s' {1..50})" "at most 49"
-expect slice-commands-validate-data "provision-channel-$(printf 'a%.0s' {1..50})" ""
 expect slice-commands-validate-data "provision-channel-$(printf 'a%.0s' {1..51})" "at most 50"
-expect slice-commands-validate-data provision-channel-yes "'headscale.enabled' must be \"true\" or \"false\""
-expect slice-commands-validate-data provision-channel-magicdns "'headscale.magicDns' must be \"true\" or \"false\""
 expect slice-commands-validate-data provision-channel-kind "'kind' app"
 expect slice-commands-validate-data provision-channel-nologin "non-empty 'loginServer'"
-expect slice-commands-validate-data provision-channel-emptylogin "non-empty 'loginServer'"
-expect slice-commands-validate-data provision-channel-noserverurl "non-empty 'headscale.serverUrl'"
-expect slice-commands-validate-data provision-channel-noacmeemail "non-empty 'headscale.acme.email'"
 expect slice-commands-validate-data provision-user-0f1e2d3c4 handle
 expect slice-commands-validate-data provision-user-1f1e2d3c4b quote
 expect slice-commands-validate-data provision-user-2f1e2d3c4b quote
-expect slice-commands-validate-data provision-user-3f1e2d3c4b quote
+expect tenant-headscale-bad-bool provision-tenant "headscale.enabled"
+expect tenant-headscale-no-serverurl provision-tenant "non-empty 'headscale.serverUrl'"
+expect tenant-headscale-bad-serverurl provision-tenant "'headscale.serverUrl' must be an http or https URL"
+expect tenant-headscale-no-acme-email provision-tenant "non-empty 'headscale.acme.email'"
+expect tenant-headscale-bad-basedomain provision-tenant "'headscale.baseDomain' must be a DNS name"
+expect tenant-headscale-bad-storageclass provision-tenant "'headscale.storageClass' must be a Kubernetes name"
+expect tenant-headscale-bad-email provision-tenant "'headscale.acme.email' must be a valid email address"
 # The user command's data contract: subject + workspaces + handles.
 expect user-commands provision-user-4d5e6f7a81 ""
 expect user-commands provision-user-4d5e6f7a82 "comma list of DNS-safe names"

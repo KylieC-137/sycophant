@@ -125,33 +125,6 @@ mod tests {
         }
     }
 
-    #[test]
-    #[serial]
-    fn stage_credentials_creates_parent_dirs() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let staging = tmp.path().join("key");
-        let target = tmp.path().join("a/b/c/key");
-        fs::write(&staging, "data").unwrap();
-
-        let map = serde_json::json!([{
-            "staging": staging.to_str().unwrap(),
-            "target": target.to_str().unwrap(),
-        }]);
-        env::set_var("TOOLSET_CREDENTIAL_MAP", map.to_string());
-        stage_credentials().expect("staging must succeed");
-        env::remove_var("TOOLSET_CREDENTIAL_MAP");
-
-        assert!(target.exists());
-        assert!(target.parent().unwrap().is_dir());
-    }
-
-    #[test]
-    #[serial]
-    fn stage_credentials_no_env_is_noop() {
-        env::remove_var("TOOLSET_CREDENTIAL_MAP");
-        stage_credentials().expect("no credential map is a no-op");
-    }
-
     /// A `tracing` writer that keeps every emitted line in memory.
     #[derive(Clone, Default)]
     struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);

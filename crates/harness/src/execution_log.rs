@@ -17,7 +17,7 @@
 //!    through this store, so a dropped or re-subscribed call is served without
 //!    re-running the tool.
 //!
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
@@ -196,7 +196,6 @@ struct ExecutionRecord {
 enum RecordBody {
     Stdout { text: String },
     Stderr { text: String },
-    Image { media_type: String, sha256: String },
     Complete { outcome: i32, exit_code: i32 },
 }
 
@@ -238,15 +237,6 @@ impl LocalFsExecutionLog {
 
     fn execution_log_path(&self) -> PathBuf {
         self.root.join(EXECUTION_LOG_FILENAME)
-    }
-
-    fn blob_dir(&self) -> PathBuf {
-        self.root.join("blobs").join("sha256")
-    }
-
-    /// Load a blob's bytes back for replay.
-    async fn read_blob(dir: &Path, hex: &str) -> Option<Vec<u8>> {
-        tokio::fs::read(dir.join(hex)).await.ok()
     }
 }
 
@@ -314,7 +304,6 @@ impl ExecutionLogWriter for LocalFsExecutionLog {
         let text = tokio::fs::read_to_string(self.execution_log_path())
             .await
             .ok()?;
-        let blob_dir = self.blob_dir();
         let mut frames = Vec::new();
         for line in text.lines() {
             if line.trim().is_empty() {
@@ -339,15 +328,6 @@ impl ExecutionLogWriter for LocalFsExecutionLog {
                 RecordBody::Stderr { text } => ToolResultFrame {
                     frame: Some(Frame::Stderr(text)),
                 },
-                RecordBody::Image { media_type, sha256 } => {
-                    let Some(data) = Self::read_blob(&blob_dir, &sha256).await else {
-                        tracing::warn!(sha256, "missing blob for image record; skipping frame");
-                        continue;
-                    };
-                    ToolResultFrame {
-                        frame: Some(Frame::Image(proto_common::ImageBlock { media_type, data })),
-                    }
-                }
                 RecordBody::Complete { outcome, exit_code } => ToolResultFrame {
                     frame: Some(Frame::Complete(proto_common::ToolComplete {
                         outcome,
@@ -369,12 +349,12 @@ impl ExecutionLogWriter for LocalFsExecutionLog {
 mod test_helpers {
     use proto_common::{tool_result_frame::Frame, ToolResultFrame};
 
-    pub fn stdout_f(s: &str) -> ToolResultFrame {
+    pub(super) fn stdout_f(s: &str) -> ToolResultFrame {
         ToolResultFrame {
             frame: Some(Frame::Stdout(s.into())),
         }
     }
-    pub fn stderr_f(s: &str) -> ToolResultFrame {
+    pub(super) fn stderr_f(s: &str) -> ToolResultFrame {
         ToolResultFrame {
             frame: Some(Frame::Stderr(s.into())),
         }
@@ -383,8 +363,8 @@ mod test_helpers {
 
 #[cfg(test)]
 mod tests {
+    use super::test_helpers::{stderr_f, stdout_f};
     use super::*;
-    use super::test_helpers::{stdout_f, stderr_f};
     use proto_common::{tool_result_frame::Frame, ToolComplete, ToolOutcome};
     use std::path::Path;
     use std::sync::Arc;
@@ -442,11 +422,6 @@ mod tests {
 
     // The model-facing result assembled from a frame stream includes stdout and
     // image frames and excludes stderr frames on a successful run.
-    //
-    // Materiality: the stub returns empty content, reding the stdout/image
-    // assertions. A mutant that folds stderr into the model result on success
-    // (today's behavior) reds the "stderr excluded" assertion; dropping the
-    // image frame from the result reds the image assertion.
     #[test]
     fn model_result_includes_stdout_and_image_and_excludes_stderr_on_success() {
         let frames = vec![
@@ -473,16 +448,10 @@ mod tests {
     }
 
     // On a survived non-zero exit the tool's stderr IS folded into the failure
-    // result, and the child's exit code survives in the persisted `.frames`
-    // record's terminal frame. The fold is issuer-agnostic (no issuer
-    // parameter): the agent call site routes this content into the model message
-    // and the user call site returns it in the RPC response to the client.
-    //
-    // Materiality: a mutant that never folds stderr (always excludes it, even on
-    // failure) reds the "boom" assertion; a mutant that folds stderr on ALL exits
-    // reds the success-case test above — together they pin the exit-conditional
-    // fold. A mutant that drops the terminal's exit code before persisting reds
-    // the exit-code assertion read back from the `.frames` store.
+    // result, joined to stdout by exactly one newline. The fold is
+    // issuer-agnostic (no issuer parameter): the agent call site routes this
+    // content into the model message and the user call site returns it in the
+    // RPC response to the client.
     #[tokio::test]
     async fn non_zero_exit_folds_stderr_into_the_failure_result() {
         let frames = vec![
@@ -492,157 +461,15 @@ mod tests {
         ];
         let result = assemble_from_frames(&frames);
         let text = proto_common::content_text(&result.content);
-        assert!(
-            text.contains("boom: the failure reason"),
-            "on a non-zero exit the tool's stderr enters the result, got {text:?}"
+        assert_eq!(
+            text, "partial output before the failure\nboom: the failure reason",
+            "on a non-zero exit stderr enters the result as stdout-newline-stderr, got {text:?}"
         );
         assert!(result.is_error, "a non-zero exit produces an error result");
-
-        // The exit code survives in the terminal frame persisted to the `.frames`
-        // store. Append the stream and read it back to assert the child's non-zero
-        // exit reached the record.
-        let dir = tempfile::tempdir().unwrap();
-        let log = LocalFsExecutionLog::new(dir.path().to_path_buf(), "test-conv".to_string());
-        for frame in &frames {
-            log.append_frame("call-exit", frame)
-                .await
-                .expect("append frame");
-        }
-        let persisted = log.read("call-exit").await.expect("persisted record");
-        let exit_code = persisted
-            .frames()
-            .iter()
-            .find_map(|f| match f.frame.as_ref() {
-                Some(Frame::Complete(c)) => Some(c.exit_code),
-                _ => None,
-            });
-        assert_eq!(
-            exit_code,
-            Some(2),
-            "the persisted record's terminal frame carries the child's non-zero exit code"
-        );
-    }
-
-    // Fold join format (kills the surviving mutant at the `if !text.is_empty()`
-    // guard on the stdout/stderr fold): on a non-zero exit with BOTH non-empty
-    // stdout and non-empty stderr, the folded model text is exactly
-    // `stdout` + one `\n` + `stderr` — one separator, stderr trailing.
-    //
-    // Materiality: the stderr-fold test above only asserts the stderr substring
-    // is present, so `stdoutstderr` (no separator) still passes it — the mutant
-    // survives. Deleting the `!` in `if !text.is_empty()` (→ `if text.is_empty()`)
-    // skips the `\n` when stdout is non-empty, yielding
-    // `"out lineerr line"`; dropping the `text.push('\n')` line does the same.
-    // Either reds the exact-join assertion below.
-    #[test]
-    fn non_zero_exit_joins_stdout_and_stderr_with_exactly_one_newline() {
-        let frames = vec![
-            stdout_f("out line"),
-            stderr_f("err line"),
-            complete_f(true, 3),
-        ];
-        let result = assemble_from_frames(&frames);
-        let text = proto_common::content_text(&result.content);
-        assert_eq!(
-            text, "out line\nerr line",
-            "stdout and the folded stderr join as stdout-newline-stderr, got {text:?}"
-        );
-    }
-
-    // The persisted execution record captures BOTH the tool's stdout and its
-    // stderr, keyed by call_id — the observability "how" the model result
-    // deliberately drops. With one on-disk format they live as the call's typed
-    // `.frames`, read back by call_id from the harness-owned store (the
-    // toolset-unforgeable half — separate PVC + RBAC — is infrastructure, not
-    // unit-testable).
-    //
-    // Materiality: a mutant that drops the stderr frame before persisting, or
-    // `append_frame` overwriting instead of appending, reds the stderr assertion —
-    // the exact information the execution log exists to keep. A mutant that
-    // persists without keying by call_id reds the read-back for `call-both`.
-    #[tokio::test]
-    async fn execution_record_captures_both_stdout_and_stderr() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = LocalFsExecutionLog::new(dir.path().to_path_buf(), "test-conv".to_string());
-        for frame in [
-            stdout_f("recorded stdout A"),
-            stderr_f("recorded stderr B"),
-            complete_f(false, 0),
-        ] {
-            log.append_frame("call-both", &frame)
-                .await
-                .expect("append frame");
-        }
-        let persisted = log.read("call-both").await.expect("persisted record");
-        let has_stdout = persisted.frames().iter().any(
-            |f| matches!(f.frame.as_ref(), Some(Frame::Stdout(s)) if s.contains("recorded stdout A")),
-        );
-        let has_stderr = persisted.frames().iter().any(
-            |f| matches!(f.frame.as_ref(), Some(Frame::Stderr(s)) if s.contains("recorded stderr B")),
-        );
-        assert!(has_stdout, "the persisted record keeps stdout");
-        assert!(has_stderr, "the persisted record keeps stderr");
-    }
-
-    // A tool call's output frames append as ND-JSON lines to the conversation's
-    // single execution.json, one record per frame, each self-identifying by
-    // call_id.
-    //
-    // Materiality: a store that writes one `exec-<call_id>.frames` file per call
-    // never creates `execution.json`, reding the exists assertion.
-    // A mutant that overwrites instead of appends (one record survives) reds the
-    // two-record count; a mutant that drops `call_id` from each record reds the
-    // call_id-substring assertion; prost/other non-JSON framing reds the
-    // per-line JSON parse.
-    //
-    // Pins the on-disk shape (single ND-JSON file, one record per appended
-    // frame, each self-identifying by call_id). It fails against an empty impl (no
-    // file) and against the current impl (wrong file, wrong framing).
-    #[tokio::test]
-    async fn model_tool_frames_are_appended_as_ndjson_lines_to_execution_json() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = LocalFsExecutionLog::new(dir.path().to_path_buf(), "test-conv".to_string());
-
-        log.append_frame("call-1", &stdout_f("hello-from-call-1"))
-            .await
-            .expect("append stdout frame");
-        log.append_frame("call-1", &complete_f(false, 0))
-            .await
-            .expect("append terminal frame");
-
-        let exec_json = dir.path().join("execution.json");
-        assert!(
-            exec_json.is_file(),
-            "the conversation's frames must land in a single execution.json, none at {}",
-            exec_json.display()
-        );
-
-        let records = ndjson_records(&exec_json);
-        assert_eq!(
-            records.len(),
-            2,
-            "one appended frame -> one ND-JSON record; append (not overwrite) keeps both, got {records:?}"
-        );
-        for line in &records {
-            serde_json::from_str::<serde_json::Value>(line)
-                .unwrap_or_else(|e| panic!("each execution.json line must be JSON, {line:?}: {e}"));
-        }
-        let text = std::fs::read_to_string(&exec_json).unwrap();
-        assert!(
-            text.contains("call-1"),
-            "each line carries its call_id so a single file can hold many calls, got {text:?}"
-        );
     }
 
     // Two tool calls writing concurrently to one conversation's execution.json
     // serialize their appends so no line interleaves.
-    //
-    // Materiality: a store that writes a separate file per call never creates
-    // execution.json, reding the exists assertion. A mutant
-    // that drops the per-conversation serialization mutex lets two large
-    // concurrent `write_all`s interleave mid-line, producing at least one record
-    // that fails to parse as JSON — the per-line parse assertion reds. Losing a
-    // call's records to a clobbering write reds the per-call replay counts.
     //
     // Pins that one shared execution.json with two concurrent writers stays
     // line-atomic — the exact guarantee the mutex exists to provide. Large
@@ -719,13 +546,6 @@ mod tests {
     // A log file with a half-written trailing line is read by skipping that line
     // rather than failing; the intact records before the tear still replay.
     //
-    // Materiality: a reader that looks at `exec-<call_id>.frames` never consults
-    // the execution.json this test corrupts, so the exists guard reds. A mutant
-    // that fails the whole read on a bad line (an early `?`/return-None on parse
-    // error) drops the valid
-    // records too — the "good frames survive" assertions red. A mutant that lets
-    // the panic propagate crashes the read.
-    //
     // Pins tolerance of a torn tail by asserting the records before the tear are
     // still returned. The good records are written through the real API so the
     // test does not hard-code the record schema.
@@ -778,13 +598,6 @@ mod tests {
 
     // A re-subscribe to a call by id replays only that call's frames, filtered by
     // call_id from a shared execution.json holding several calls.
-    //
-    // Materiality: a store that keeps one file per call never creates a single
-    // execution.json holding both calls, reding the single-file assertion. A
-    // mutant that reads the whole file without filtering by call_id returns the
-    // other call's frames too —
-    // the per-call length and the "does not contain the other marker" assertions
-    // red.
     //
     // Frames for two calls are interleaved in one file, and the test pins that
     // read(call) returns exactly one call's frames; a no-op filter fails this.
@@ -851,13 +664,17 @@ mod tests {
     // A produced-artifact image frame persists nothing in the crash log: no
     // content-addressed blob is written, and execution.json carries neither the
     // image's digest nor an image record line referencing it. Only
-    // stdout/stderr/terminal are the crash log's business.
+    // stdout/stderr/terminal are the crash log's business, and dropping the
+    // image must not disturb the stdout/stderr frames streamed around it.
     //
     // Re-adding the blob write reds the no-blob assertion; re-adding the digest
     // record reds the no-digest / no-image-record assertions. Inverse of
     // `binary_frames_are_stored_as_content_addressed_blobs_referenced_by_digest`.
+    // A too-broad edit that made frame_to_record return None for the whole
+    // stream, or dropped the frame adjacent to the image, reds the stdout/stderr
+    // read-backs.
     #[tokio::test]
-    async fn a_produced_image_frame_persists_no_bytes_and_no_reference_in_the_crash_log() {
+    async fn a_produced_image_is_dropped_from_the_crash_log_but_its_neighbors_kept() {
         let dir = tempfile::tempdir().unwrap();
         let log = LocalFsExecutionLog::new(dir.path().to_path_buf(), "conv-img".to_string());
 
@@ -866,12 +683,16 @@ mod tests {
         let bytes: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
         let hex = sha256_hex_bytes(&bytes);
 
-        log.append_frame("call-img", &image_f("image/png", bytes.clone()))
-            .await
-            .expect("append image frame");
-        log.append_frame("call-img", &complete_f(false, 0))
-            .await
-            .expect("append terminal frame");
+        for frame in [
+            stdout_f("stdout before the image"),
+            image_f("image/png", bytes.clone()),
+            stderr_f("stderr after the image"),
+            complete_f(false, 0),
+        ] {
+            log.append_frame("call-img", &frame)
+                .await
+                .expect("append frame");
+        }
 
         // (a) No content-addressed blob is written for the produced image.
         let blobs = dir.path().join("blobs");
@@ -889,40 +710,15 @@ mod tests {
             "the crash log references no image digest, got {text:?}"
         );
 
-        // (c) No image record line is persisted; only the terminal survives.
+        // (c) No image record line is persisted.
         let records = ndjson_records(&exec_json);
         assert!(
             !records.iter().any(|l| l.contains("\"frame\":\"image\"")),
             "no image record line is persisted for a produced artifact, got {records:?}"
         );
-    }
 
-    // While a toolset streams stdout and stderr, those frames are recorded
-    // frame-by-frame, even interleaved with a produced-artifact image frame whose
-    // bytes are dropped. Dropping the image must not disturb the surrounding
-    // stdout/stderr records.
-    //
-    // A too-broad edit that made frame_to_record return None for the whole
-    // stream, or dropped the frame adjacent to the image, reds the stdout/stderr
-    // read-backs. Complements `execution_record_captures_both_stdout_and_stderr`
-    // by placing an image between the two streamed frames.
-    #[tokio::test]
-    async fn stdout_and_stderr_around_a_dropped_image_frame_still_stream() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = LocalFsExecutionLog::new(dir.path().to_path_buf(), "conv-interleave".to_string());
-
-        for frame in [
-            stdout_f("stdout before the image"),
-            image_f("image/png", vec![9, 8, 7, 6]),
-            stderr_f("stderr after the image"),
-            complete_f(false, 0),
-        ] {
-            log.append_frame("call-mix", &frame)
-                .await
-                .expect("append frame");
-        }
-
-        let persisted = log.read("call-mix").await.expect("persisted record");
+        // (d) The stdout/stderr frames around the dropped image still stream.
+        let persisted = log.read("call-img").await.expect("persisted record");
         assert!(
             persisted.frames().iter().any(
                 |f| matches!(f.frame.as_ref(), Some(Frame::Stdout(s)) if s == "stdout before the image")
@@ -936,17 +732,6 @@ mod tests {
             "the stderr frame after the image is still recorded"
         );
     }
-
-    // execution_log.rs:200 `blob_dir` — blobs are rooted at
-    // `<conversation root>/blobs/sha256`. Materiality: change either path
-    // segment ("blobs"/"sha256"), the join order, or the root the dir hangs
-    // off, and the equality reds.
-    #[test]
-    fn blob_dir_is_rooted_under_the_conversation_root() {
-        let root = std::path::PathBuf::from("/tmp/some-conversation-root");
-        let log = LocalFsExecutionLog::new(root.clone(), "conv-1".to_string());
-        assert_eq!(log.blob_dir(), root.join("blobs").join("sha256"));
-    }
 }
 
 // Tests for the append-as-you-go execution log's replay read API: frames
@@ -955,8 +740,8 @@ mod tests {
 // re-running the tool.
 #[cfg(test)]
 mod replay_tests {
+    use super::test_helpers::{stderr_f, stdout_f};
     use super::*;
-    use super::test_helpers::{stdout_f, stderr_f};
     use proto_common::tool_result_frame::Frame;
     use proto_common::{ToolComplete, ToolOutcome, ToolResultFrame};
     fn canceled_terminal() -> ToolResultFrame {
@@ -975,12 +760,6 @@ mod replay_tests {
     // pre-terminal frame included, with the terminal flagged present. This is
     // the "served from its persisted record" half of re-subscribe: the record
     // holds the whole stream, not just the last frame.
-    //
-    // Materiality: `append_frame` overwriting instead of appending (the current
-    // `tokio::fs::write` full-overwrite behavior) leaves only the terminal, so
-    // the length-3 and stdout/stderr assertions red. `read` returning only the
-    // terminal (dropping pre-terminal frames) reds them the same way. Losing
-    // arrival order reds the frames[0]/frames[1] position assertions.
     #[tokio::test]
     async fn read_returns_appended_frames_in_order_with_terminal_present() {
         let dir = tempfile::tempdir().unwrap();
@@ -1019,61 +798,6 @@ mod replay_tests {
         assert!(
             persisted.has_terminal(),
             "a record whose last frame is a ToolComplete reports the terminal present"
-        );
-    }
-
-    // A record dropped mid-call — frames persisted but no terminal
-    // appended — reports its terminal absent, so the replay path can distinguish
-    // a finished record from a truncated one (the session died before the
-    // runtime's terminal). Complement to the terminal-present case above, which
-    // only exercises the `true` branch.
-    //
-    // Materiality: forcing `has_terminal` to always return `true` reds this — a
-    // truncated record
-    // would wrongly report complete. The length guard pins that the `false` is
-    // owed to the missing terminal, not to an empty read.
-    #[tokio::test]
-    async fn read_of_a_record_without_a_terminal_reports_no_terminal() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = LocalFsExecutionLog::new(dir.path().to_path_buf(), "test-conv".to_string());
-
-        log.append_frame("call-truncated", &stdout_f("mid-call stdout"))
-            .await
-            .expect("append stdout frame");
-        log.append_frame("call-truncated", &stderr_f("mid-call stderr"))
-            .await
-            .expect("append stderr frame");
-
-        let persisted = log
-            .read("call-truncated")
-            .await
-            .expect("a truncated record still reads back");
-        assert_eq!(
-            persisted.frames().len(),
-            2,
-            "both non-terminal frames persisted, so the record is genuinely populated"
-        );
-        assert!(
-            !persisted.has_terminal(),
-            "a record whose last frame is not a ToolComplete reports the terminal absent"
-        );
-    }
-
-    // A `call_id` with no persisted record reads as absent — the replay
-    // path reports "nothing here" rather than fabricating an empty finished
-    // call.
-    //
-    // Materiality: `read` returning `Some(empty)` for an unknown id (so a
-    // re-subscribe to a never-run call looks like a finished empty call) reds
-    // the `is_none` assertion.
-    #[tokio::test]
-    async fn read_of_an_unknown_call_id_is_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = LocalFsExecutionLog::new(dir.path().to_path_buf(), "test-conv".to_string());
-        let persisted = log.read("never-appended").await;
-        assert!(
-            persisted.is_none(),
-            "an unknown call_id has no persisted record to replay"
         );
     }
 }

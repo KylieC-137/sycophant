@@ -1,1 +1,0 @@
-{"format":"openai","model":"liquid/lfm2.5-8b-a1b","server.image":"llama-server:local","server.weights":"ghcr.io/example/lfm2-q4km:1","server.weightsPath":"/weights/model.gguf"}

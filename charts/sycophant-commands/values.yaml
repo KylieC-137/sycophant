@@ -33,6 +33,10 @@
 #   models: []
 #   storage: 5Gi
 #   grants: {}              # <toolset>: {<grant>: {secret, path, egress}}
+#   instructions: ../instructions/simple  # read by sycoadm only, never rendered:
+#                           # the instructions directory, relative to this file
+#   instructionsHash: ""    # set by sycoadm only (--set-string), from the
+#                           # instructions files; rides the command as instructions-hash
 
 # user:
 #   tenant: acme
@@ -50,13 +54,6 @@
 #   pullPolicy: IfNotPresent
 #   hostname: relay
 #   authKeySecret: relay-tsnet-authkey
-#   storageClass: ""        # the headscale data PVC
-#   headscale:
-#     enabled: true
-#     serverUrl: http://localhost:8080
-#     image: headscale/headscale
-#     tag: "0.28.0"
-#     pullPolicy: IfNotPresent
-#     magicDns: true
-#     baseDomain: ts.local
-#     acme: {}              # enabled, email
+#   storageClass: ""
+#   NOTE: headscale itself is now in the tenant chart (headscale.* values in
+#   the tenant values file), not the channel chart.

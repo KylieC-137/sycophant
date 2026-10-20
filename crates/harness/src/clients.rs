@@ -3,9 +3,7 @@ use proto_common::{
     SubscribeRequest, TurnStateEvent, UserMessage,
 };
 use relay_proto::relay_internal_client::RelayInternalClient;
-use relay_proto::{
-    DeliverReplyRequest, DeliverStreamItemRequest, DeliverTurnStateRequest,
-};
+use relay_proto::{DeliverReplyRequest, DeliverStreamItemRequest, DeliverTurnStateRequest};
 use shared::auth::{SaTokenInterceptor, HARNESS_RELAY_TOKEN_PATH};
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;

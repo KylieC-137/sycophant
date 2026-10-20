@@ -32,3 +32,20 @@ idp:
   issuer: ""
   audience: ""
   certificateAuthority: ""
+
+# Headscale — per-tenant tailnet coordination server. Disabled by default;
+# enable with headscale.enabled=true and set serverUrl to the address
+# tailscale clients will reach headscale at (e.g. http://localhost:8080 for
+# local dev, https://hs.example.com for production with ACME).
+headscale:
+  enabled: false
+  image: headscale/headscale
+  tag: "0.28.0"
+  pullPolicy: IfNotPresent
+  serverUrl: ""
+  magicDns: true
+  baseDomain: ts.local
+  storageClass: ""
+  acme:
+    enabled: false
+    email: ""

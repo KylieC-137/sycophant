@@ -1,5 +1,5 @@
 ---
-model: deepseek-v4-flash
+model: local
 tools: [test-cmd, test-cred, Shell]
 ---
 

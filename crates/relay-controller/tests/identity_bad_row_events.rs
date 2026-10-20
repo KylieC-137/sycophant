@@ -61,19 +61,23 @@ fn note_of(event: &serde_json::Value) -> String {
         .to_string()
 }
 
-/// One invalid ConfigMap raises exactly one Warning Event naming it and the
-/// reason; the valid one beside it is not implicated.
+/// Each invalid ConfigMap raises its own Warning Event, hanging off and naming
+/// it, not one aggregate; the valid one beside them is not implicated.
 ///
-/// Materiality: emit a generic note, emit `type: Normal`, or skip publication,
-/// and the operator is blind to the exact identity row the relay dropped.
+/// Emitting a generic note or a `type: Normal` Event, skipping publication, or
+/// hanging every Event off one ConfigMap would leave the operator blind to
+/// the exact identity rows the relay dropped.
 #[tokio::test]
 async fn an_invalid_configmap_raises_a_warning_event_naming_it_and_the_reason() {
+    let mut blank_subject = identity_cm("user-blank", Some("   "));
+    blank_subject.metadata.uid = Some("22222222-2222-3333-4444-555555555555".into());
     let cms = vec![
         identity_cm("user-badbadbad", None),
+        blank_subject,
         identity_cm("user-0a1b2c3d4e", Some("https://issuer.example#alice")),
     ];
     let (_table, errors) = apply_delivery(&cms);
-    assert_eq!(errors.len(), 1, "fixture: exactly one CM is invalid");
+    assert_eq!(errors.len(), 2, "fixture: exactly two CMs are invalid");
 
     let posted: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
     publish_row_errors(
@@ -86,102 +90,32 @@ async fn an_invalid_configmap_raises_a_warning_event_naming_it_and_the_reason() 
     .expect("publishing a row error must not fail against a healthy apiserver");
 
     let events = posted.lock().unwrap().clone();
-    assert_eq!(events.len(), 1, "one Warning Event per rejected ConfigMap");
-    let event = &events[0];
+    assert_eq!(events.len(), 2, "one Warning Event per rejected ConfigMap");
+    for name in ["user-badbadbad", "user-blank"] {
+        let event = events
+            .iter()
+            .find(|e| e.pointer("/regarding/name").and_then(|n| n.as_str()) == Some(name))
+            .unwrap_or_else(|| panic!("no Event hangs off {name}; events were {events:?}"));
 
-    assert_eq!(
-        event.get("type").and_then(|t| t.as_str()),
-        Some("Warning"),
-        "a rejected identity row is a Warning, not a Normal event"
-    );
-    assert_eq!(
-        event.pointer("/regarding/kind").and_then(|k| k.as_str()),
-        Some("ConfigMap"),
-        "the Event must hang off the identity ConfigMap so `kubectl describe` finds it"
-    );
-    assert_eq!(
-        event.pointer("/regarding/name").and_then(|n| n.as_str()),
-        Some("user-badbadbad")
-    );
+        assert_eq!(
+            event.get("type").and_then(|t| t.as_str()),
+            Some("Warning"),
+            "a rejected identity row is a Warning, not a Normal event"
+        );
+        assert_eq!(
+            event.pointer("/regarding/kind").and_then(|k| k.as_str()),
+            Some("ConfigMap"),
+            "the Event must hang off the identity ConfigMap so `kubectl describe` finds it"
+        );
 
-    let note = note_of(event);
-    assert!(
-        note.contains("user-badbadbad"),
-        "the note must name the offending ConfigMap; got: {note}"
-    );
-    assert!(
-        !note.contains("user-0a1b2c3d4e"),
-        "the valid ConfigMap must not be implicated; got: {note}"
-    );
-}
-
-/// Three invalid ConfigMaps in one delivery raise three Warning Events, each
-/// hanging off and naming its own ConfigMap, not one aggregate.
-///
-/// Materiality: hang every Event off one ConfigMap, or collapse them into one,
-/// and the second and third typo stay invisible until the first is fixed.
-#[tokio::test]
-async fn every_rejected_configmap_gets_its_own_warning_event() {
-    let mut blank_subject = identity_cm("user-blank", Some("   "));
-    blank_subject.metadata.uid = Some("22222222-2222-3333-4444-555555555555".into());
-    let mut empty_handle = common::identity_cm(
-        "user-emptyhandle",
-        Some("https://issuer.example#carol"),
-        "alpha",
-        &[("slack", "")],
-    );
-    empty_handle.metadata.uid = Some("33333333-2222-3333-4444-555555555555".into());
-    let cms = vec![
-        identity_cm("user-nosubject", None),
-        blank_subject,
-        empty_handle,
-    ];
-    let (_table, errors) = apply_delivery(&cms);
-    assert_eq!(errors.len(), 3, "fixture: all three ConfigMaps are invalid");
-
-    let posted: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
-    publish_row_errors(
-        &recording_kube_client(posted.clone()),
-        NAMESPACE,
-        &cms,
-        &errors,
-    )
-    .await
-    .expect("publishing row errors must not fail");
-
-    let events = posted.lock().unwrap().clone();
-    assert_eq!(events.len(), 3, "one Warning Event per rejected ConfigMap");
-    for name in ["user-nosubject", "user-blank", "user-emptyhandle"] {
+        let note = note_of(event);
         assert!(
-            events.iter().any(|e| {
-                e.pointer("/regarding/name").and_then(|n| n.as_str()) == Some(name)
-                    && note_of(e).contains(name)
-            }),
-            "no Event hangs off and names {name}; events were {events:?}"
+            note.contains(name),
+            "the note must name the offending ConfigMap; got: {note}"
+        );
+        assert!(
+            !note.contains("user-0a1b2c3d4e"),
+            "the valid ConfigMap must not be implicated; got: {note}"
         );
     }
-}
-
-/// A clean delivery publishes nothing. Publish unconditionally and every watch
-/// re-list floods the namespace with Warnings.
-#[tokio::test]
-async fn a_clean_delivery_publishes_nothing() {
-    let cms = vec![identity_cm(
-        "user-0a1b2c3d4e",
-        Some("https://issuer.example#alice"),
-    )];
-    let (_table, errors) = apply_delivery(&cms);
-    assert!(errors.is_empty(), "fixture: the delivery is clean");
-
-    let posted: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
-    publish_row_errors(
-        &recording_kube_client(posted.clone()),
-        NAMESPACE,
-        &cms,
-        &errors,
-    )
-    .await
-    .expect("a clean delivery must not error");
-
-    assert!(posted.lock().unwrap().is_empty());
 }

@@ -17,9 +17,14 @@ pub(crate) enum Command {
     Destroy(DestroyCmd),
     Upgrade(UpgradeCmd),
     Tenant(TenantCmd),
+    /// Join this host to a tenant's headscale tailnet. Run after `tenant up`
+    /// provisions the tenant and its headscale instance
+    Connect(ConnectCmd),
     /// Install or remove one toolset through its provision and reap commands
     Toolset(ComponentCmd),
-    /// Install or remove one workspace through its provision and reap commands
+    /// Install or remove one workspace. `up` takes exactly one -f and replaces
+    /// the workspace's instructions folder before provisioning; `down` deletes
+    /// the folder after the reap
     Workspace(ComponentCmd),
     User(UserCmd),
     /// Install or remove one model through its provision and reap commands
@@ -42,6 +47,16 @@ pub(crate) struct SetupCmd {}
 /// (irreversible). Inverse of `setup`.
 #[derive(Args)]
 pub(crate) struct DestroyCmd {}
+
+/// Join this host to a tenant's headscale tailnet. Port-forwards headscale,
+/// mints a pre-auth key, runs `sudo tailscale up`, and verifies the join.
+/// Run once after `sycoadm tenant up`.
+#[derive(Args)]
+pub(crate) struct ConnectCmd {
+    /// tenant name (e.g. `e2e-test`; the namespace `tenant-<name>` is derived)
+    #[arg(long)]
+    pub tenant: String,
+}
 
 // --- upgrade (validate the cluster, upgrade it, re-provision every tenant) ---
 

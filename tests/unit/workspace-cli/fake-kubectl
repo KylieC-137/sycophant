@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""A fake kubectl for the workspace-cli acceptance suite. No cluster.
+
+It records every argv as one JSON line in $FAKE_STATE/kubectl.log and answers
+the few calls `sycoadm workspace up|down` makes:
+
+- `config view` and `auth whoami`: a fixed apiserver and the operator identity.
+- `delete -f -` / `create -f -`: a command write. Like the apiserver, `create`
+  refuses an object whose name or namespace is not a valid object name. A
+  written command is saved under $FAKE_STATE/commands and logged as an event.
+- `get job`: every installer Job has succeeded.
+- `exec ... deploy/seaweedfs -- curl ...`: the built-in store's filer HTTP API
+  on localhost:8888, backed by the directory $FAKE_STATE/store. DELETE with
+  ?recursive=true removes a folder (204), a GET answers 200 or 404, and an
+  upload (-T -) stores stdin byte for byte (201). curl's -f turns a status of
+  400 or more into exit 22, and -w '%{http_code}' prints the status. Like the
+  real kubectl, an exec without -i (--stdin) passes the container no stdin, so
+  an upload sent that way stores an empty file.
+
+Modes (environment):
+  FAKE_STORE_DOWN=1     every exec into the store exits 1 (store scaled to zero)
+  FAKE_GET_STATUS=<n>   every store GET answers <n>
+  FAKE_PUT_STATUS=<n>   every store upload answers <n> and stores nothing
+
+Every other call exits 0 with no output.
+"""
+import json
+import os
+import re
+import shutil
+import sys
+import urllib.parse
+
+STATE = os.environ["FAKE_STATE"]
+STORE = os.path.join(STATE, "store")
+argv = sys.argv[1:]
+
+with open(os.path.join(STATE, "kubectl.log"), "a") as f:
+    f.write(json.dumps(argv) + "\n")
+
+
+def event(line):
+    with open(os.path.join(STATE, "events"), "a") as f:
+        f.write(line + "\n")
+
+
+def die(msg, code=1):
+    sys.stderr.write(msg + "\n")
+    sys.exit(code)
+
+
+DNS_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+DNS_SUBDOMAIN = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$")
+
+
+def curl(args, stdin_attached):
+    if not args or args[0] != "curl":
+        die(f"fake kubectl: the store pod runs only curl here, got {args!r}")
+    method, upload, write_out, fail = "GET", None, None, False
+    url = None
+    i = 1
+    while i < len(args):
+        a = args[i]
+        if a in ("-X", "--request"):
+            method = args[i + 1]; i += 2; continue
+        if a in ("-T", "--upload-file"):
+            upload = args[i + 1]; method = "PUT"; i += 2; continue
+        if a in ("-w", "--write-out"):
+            write_out = args[i + 1]; i += 2; continue
+        if a in ("-o", "--output", "-H", "--header", "-d", "--data", "--data-binary"):
+            i += 2; continue
+        if a == "--fail":
+            fail = True
+        elif re.match(r"^-[A-Za-z]+$", a) and "f" in a[1:]:
+            fail = True
+        elif a.startswith("http://") or a.startswith("https://"):
+            url = a
+        i += 1
+    if url is None:
+        die(f"fake kubectl: curl with no URL: {args!r}")
+    u = urllib.parse.urlsplit(url)
+    if u.netloc != "localhost:8888":
+        die(f"fake kubectl: curl to {u.netloc}, not the filer on localhost:8888", 7)
+    path = urllib.parse.unquote(u.path)
+    target = os.path.join(STORE, path.lstrip("/"))
+    if method == "DELETE":
+        query = urllib.parse.parse_qs(u.query)
+        if path.endswith("/") and query.get("recursive") != ["true"]:
+            status = 500
+        else:
+            if os.path.isdir(target):
+                shutil.rmtree(target)
+            elif os.path.exists(target):
+                os.remove(target)
+            status = 204
+        event(f"DELETE {path} {status}")
+    elif method == "PUT":
+        if upload != "-":
+            status = 500
+        elif path.endswith("/"):
+            status = 400
+        elif os.environ.get("FAKE_PUT_STATUS"):
+            status = int(os.environ["FAKE_PUT_STATUS"])
+        else:
+            data = sys.stdin.buffer.read() if stdin_attached else b""
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "wb") as f:
+                f.write(data)
+            status = 201
+        event(f"PUT {path} {status}")
+    else:
+        status = int(os.environ.get("FAKE_GET_STATUS") or 0) or (
+            200 if os.path.exists(target) else 404)
+        event(f"GET {path} {status}")
+    if write_out:
+        sys.stdout.write(write_out.replace("%{http_code}", str(status)))
+    if fail and status >= 400:
+        die(f"curl: (22) The requested URL returned error: {status}", 22)
+    sys.exit(0)
+
+
+def manifest_field(text, key):
+    m = re.search(rf"^  {key}: *['\"]?([^'\"\n]*)['\"]?$", text, re.M)
+    return m.group(1) if m else ""
+
+
+if "exec" in argv:
+    if "--" not in argv:
+        die("fake kubectl: exec with no --")
+    cut = argv.index("--")
+    if not any("seaweedfs" in a for a in argv[:cut]):
+        die(f"fake kubectl: unexpected exec target {argv[:cut]!r}")
+    if os.environ.get("FAKE_STORE_DOWN") == "1":
+        die('error: unable to upgrade connection: container not found ("seaweedfs")')
+    # kubectl forwards stdin into the container only with -i / --stdin.
+    stdin_attached = any(
+        a in ("--stdin", "--stdin=true") or re.match(r"^-[A-Za-z]*i[A-Za-z]*$", a)
+        for a in argv[:cut])
+    curl(argv[cut + 1:], stdin_attached)
+
+if "config" in argv and "view" in argv:
+    jp = next((a for a in argv if a.startswith("jsonpath=")), "")
+    if "certificate-authority-data" in jp:
+        sys.stdout.write("Y2E=")
+    elif "server" in jp:
+        sys.stdout.write("https://127.0.0.1:6443")
+    sys.exit(0)
+
+if "auth" in argv and "whoami" in argv:
+    sys.stdout.write(os.environ["FAKE_IDENTITY"])
+    sys.exit(0)
+
+if ("create" in argv or "delete" in argv) and "-f" in argv and "-" in argv:
+    text = sys.stdin.read()
+    if "delete" in argv:
+        sys.exit(0)
+    name, ns = manifest_field(text, "name"), manifest_field(text, "namespace")
+    if not (DNS_SUBDOMAIN.match(name) and len(name) <= 253):
+        die(f'The ConfigMap "{name}" is invalid: metadata.name: Invalid value')
+    if not (DNS_LABEL.match(ns) and len(ns) <= 63):
+        die(f'the namespace "{ns}" is invalid')
+    os.makedirs(os.path.join(STATE, "commands"), exist_ok=True)
+    with open(os.path.join(STATE, "commands", f"{ns}_{name}.yaml"), "w") as f:
+        f.write(text)
+    event(f"CREATE {ns}/{name}")
+    sys.stdout.write("0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d")
+    sys.exit(0)
+
+if "get" in argv and "job" in argv:
+    sys.stdout.write('{"succeeded":1}')
+    sys.exit(0)
+
+sys.exit(0)

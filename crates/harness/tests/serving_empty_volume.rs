@@ -1,6 +1,5 @@
 //! If the mounted instructions volume is empty, in-process instructions serving fails
-//! legibly with a named error rather than silently serving nothing. This locks
-//! the behavior against a mutant that swallows the error.
+//! legibly with a named error rather than silently serving nothing.
 
 use harness::instructions::{Instructions, InstructionsError};
 

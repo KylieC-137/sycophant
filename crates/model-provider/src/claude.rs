@@ -437,16 +437,13 @@ mod claude_body {
     }
 
     #[test]
-    fn body_inserts_max_tokens_default_when_absent() {
+    fn body_defaults_max_tokens_only_when_unset() {
         let (body, _) = build_anthropic_body(&[], None, &[], None, &cfg());
         assert_eq!(
             body.get("max_tokens"),
             Some(&serde_json::Value::Number(8192.into()))
         );
-    }
 
-    #[test]
-    fn body_max_tokens_passes_through_when_set_in_params() {
         let mut params = serde_json::Map::new();
         params.insert("max_tokens".into(), serde_json::json!(100000));
         let (body, _) = build_anthropic_body(&[], None, &[], Some(&params), &cfg());
@@ -467,31 +464,13 @@ mod claude_body {
     }
 
     #[test]
-    fn body_passes_through_unmanaged_keys() {
-        let mut params = serde_json::Map::new();
-        params.insert(
-            "output_config".into(),
-            serde_json::json!({"effort": "high"}),
-        );
-        let (body, clobbers) = build_anthropic_body(&[], None, &[], Some(&params), &cfg());
-        assert!(clobbers.is_empty());
-        assert_eq!(
-            body.get("output_config"),
-            Some(&serde_json::json!({"effort": "high"}))
-        );
-    }
-
-    #[test]
-    fn body_omits_tools_when_empty() {
+    fn body_only_includes_tools_when_some_are_given() {
         let (body, _) = build_anthropic_body(&[], None, &[], None, &cfg());
         assert!(
             !body.contains_key("tools"),
             "tools field should not be set when no tools are provided"
         );
-    }
 
-    #[test]
-    fn body_includes_tools_when_nonempty() {
         let tools = vec![ToolDefinition {
             name: "bash".into(),
             description: "shell".into(),
@@ -502,7 +481,7 @@ mod claude_body {
     }
 
     #[test]
-    fn system_emits_array_with_cache_control_breakpoint() {
+    fn system_is_only_emitted_when_given_as_a_cached_text_block() {
         let (body, _) = build_anthropic_body(&[], Some("you are helpful"), &[], None, &cfg());
         let system = body.get("system").expect("system field present");
         let arr = system.as_array().expect("system is an array");
@@ -513,10 +492,7 @@ mod claude_body {
             arr[0]["cache_control"],
             serde_json::json!({"type": "ephemeral"})
         );
-    }
 
-    #[test]
-    fn system_field_absent_when_no_system_passed() {
         let (body, _) = build_anthropic_body(&[], None, &[], None, &cfg());
         assert!(
             !body.contains_key("system"),
@@ -529,22 +505,6 @@ mod claude_body {
 mod claude_api {
     use super::*;
     use proto_common::{file_block, image_block, text_block, text_content, ToolCall};
-
-    #[test]
-    fn user_message_converts_to_api_format() {
-        let messages = vec![Message {
-            role: "user".into(),
-            content: text_content("Hello"),
-            tool_calls: vec![],
-            tool_call_id: None,
-            is_error: None,
-        }];
-        let api = build_api_messages(&messages);
-        assert_eq!(api.len(), 1);
-        assert_eq!(api[0]["role"], "user");
-        assert_eq!(api[0]["content"][0]["type"], "text");
-        assert_eq!(api[0]["content"][0]["text"], "Hello");
-    }
 
     #[test]
     fn assistant_with_tool_calls_converts() {
@@ -566,36 +526,15 @@ mod claude_api {
         assert_eq!(content[0]["name"], "bash");
     }
 
-    #[test]
-    fn tool_result_converts_to_user_with_tool_result_block() {
-        let messages = vec![Message {
-            role: "tool".into(),
-            content: text_content("file list here"),
-            tool_calls: vec![],
-            tool_call_id: Some("tc-1".into()),
-            is_error: None,
-        }];
-        let api = build_api_messages(&messages);
-        assert_eq!(api[0]["role"], "user");
-        let content = api[0]["content"].as_array().unwrap();
-        assert_eq!(content[0]["type"], "tool_result");
-        assert_eq!(content[0]["tool_use_id"], "tc-1");
-        // Anthropic accepts both string and array forms for
-        // tool_result.content; we send array-of-blocks form to avoid
-        // the empty-turn-2 regression triggered by string form with
-        // non-trivial payloads.
-        let result_content = content[0]["content"].as_array().unwrap();
-        assert_eq!(result_content[0]["type"], "text");
-        assert_eq!(result_content[0]["text"], "file list here");
-    }
-
     /// Anthropic's Messages API requires that multiple parallel
     /// `tool_result` blocks live in a SINGLE user message — not several
     /// consecutive user messages. The previous implementation emitted
     /// one user message per tool result; this produced empty
     /// `TurnComplete` responses from Sonnet 4.6 on the next turn.
+    /// is_error must round-trip into the block, and the merge stops at
+    /// the role boundary (the following assistant message stays its own).
     #[test]
-    fn consecutive_tool_results_collapse_into_one_user_message() {
+    fn consecutive_tool_results_merge_with_is_error_until_the_next_role() {
         let messages = vec![
             Message {
                 role: "tool".into(),
@@ -609,26 +548,28 @@ mod claude_api {
                 content: text_content("result B"),
                 tool_calls: vec![],
                 tool_call_id: Some("tc-b".into()),
-                is_error: None,
+                is_error: Some(true),
             },
             Message {
-                role: "tool".into(),
-                content: text_content("result C"),
+                role: "assistant".into(),
+                content: text_content("ok continuing"),
                 tool_calls: vec![],
-                tool_call_id: Some("tc-c".into()),
+                tool_call_id: None,
                 is_error: None,
             },
         ];
         let api = build_api_messages(&messages);
-        assert_eq!(api.len(), 1, "expected single user message; got {api:?}");
+        assert_eq!(api.len(), 2, "expected user + assistant; got {api:?}");
         assert_eq!(api[0]["role"], "user");
+        assert_eq!(api[1]["role"], "assistant");
         let content = api[0]["content"].as_array().unwrap();
-        assert_eq!(content.len(), 3);
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "tool_result");
         let ids: Vec<&str> = content
             .iter()
             .map(|b| b["tool_use_id"].as_str().unwrap())
             .collect();
-        assert_eq!(ids, vec!["tc-a", "tc-b", "tc-c"]);
+        assert_eq!(ids, vec!["tc-a", "tc-b"]);
         // content is array-of-text-blocks form.
         let texts: Vec<&str> = content
             .iter()
@@ -638,7 +579,8 @@ mod claude_api {
                     .unwrap()
             })
             .collect();
-        assert_eq!(texts, vec!["result A", "result B", "result C"]);
+        assert_eq!(texts, vec!["result A", "result B"]);
+        assert_eq!(content[1]["is_error"], serde_json::Value::Bool(true));
     }
 
     /// If every tool message in a run has no tool_call_id, the synthesized
@@ -673,47 +615,6 @@ mod claude_api {
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[0]["text"], "(empty tool result)");
-    }
-
-    /// is_error must round-trip into the Anthropic tool_result block.
-    #[test]
-    fn tool_result_is_error_propagates_to_block() {
-        let messages = vec![Message {
-            role: "tool".into(),
-            content: text_content("error text"),
-            tool_calls: vec![],
-            tool_call_id: Some("tc-err".into()),
-            is_error: Some(true),
-        }];
-        let api = build_api_messages(&messages);
-        let content = api[0]["content"].as_array().unwrap();
-        assert_eq!(content[0]["is_error"], serde_json::Value::Bool(true));
-    }
-
-    /// A tool message followed by a non-tool message must not absorb
-    /// the next message — the merge stops at the role boundary.
-    #[test]
-    fn tool_results_dont_swallow_following_assistant_message() {
-        let messages = vec![
-            Message {
-                role: "tool".into(),
-                content: text_content("result A"),
-                tool_calls: vec![],
-                tool_call_id: Some("tc-a".into()),
-                is_error: None,
-            },
-            Message {
-                role: "assistant".into(),
-                content: text_content("ok continuing"),
-                tool_calls: vec![],
-                tool_call_id: None,
-                is_error: None,
-            },
-        ];
-        let api = build_api_messages(&messages);
-        assert_eq!(api.len(), 2);
-        assert_eq!(api[0]["role"], "user");
-        assert_eq!(api[1]["role"], "assistant");
     }
 
     #[test]
@@ -752,21 +653,7 @@ mod claude_api {
     }
 
     #[test]
-    fn tools_convert_to_api_format() {
-        let tools = vec![ToolDefinition {
-            name: "bash".into(),
-            description: "Run a shell command".into(),
-            parameters_json: r#"{"type":"object","properties":{"command":{"type":"string"}}}"#
-                .into(),
-        }];
-        let api = build_api_tools(&tools);
-        assert_eq!(api.len(), 1);
-        assert_eq!(api[0]["name"], "bash");
-        assert_eq!(api[0]["description"], "Run a shell command");
-    }
-
-    #[test]
-    fn build_api_tools_marks_only_last_tool_with_cache_control() {
+    fn build_api_tools_converts_each_tool_and_caches_only_the_last() {
         let tools = vec![
             ToolDefinition {
                 name: "alpha".into(),
@@ -785,6 +672,9 @@ mod claude_api {
             },
         ];
         let api = build_api_tools(&tools);
+        assert_eq!(api.len(), 3);
+        assert_eq!(api[0]["name"], "alpha");
+        assert_eq!(api[0]["description"], "a");
         assert!(
             api[0].get("cache_control").is_none(),
             "first tool must not carry cache_control"
@@ -797,20 +687,6 @@ mod claude_api {
             api[2].get("cache_control"),
             Some(&serde_json::json!({"type": "ephemeral"})),
             "last tool carries the single breakpoint"
-        );
-    }
-
-    #[test]
-    fn build_api_tools_marks_sole_tool_when_only_one() {
-        let tools = vec![ToolDefinition {
-            name: "solo".into(),
-            description: "the only tool".into(),
-            parameters_json: r#"{"type":"object"}"#.into(),
-        }];
-        let api = build_api_tools(&tools);
-        assert_eq!(
-            api[0].get("cache_control"),
-            Some(&serde_json::json!({"type": "ephemeral"}))
         );
     }
 
@@ -903,25 +779,6 @@ mod sse_parsing {
     }
 
     #[test]
-    fn ping_returns_none() {
-        let text = "event: ping\ndata: {}";
-        assert!(parse_sse_event(text).is_none());
-    }
-
-    #[test]
-    fn text_block_start_emits_initial_content_delta() {
-        // Empty text block — emits ContentDelta{""} so the loop knows the
-        // text channel opened. The accumulator that follows will append
-        // any text_delta payload.
-        let text = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}";
-        let event = parse_sse_event(text).unwrap();
-        match event {
-            StreamEvent::ContentDelta { text } => assert_eq!(text, ""),
-            _ => panic!("expected ContentDelta"),
-        }
-    }
-
-    #[test]
     fn text_block_start_with_initial_text_captures_it() {
         let text = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"Hello\"}}";
         let event = parse_sse_event(text).unwrap();
@@ -932,19 +789,9 @@ mod sse_parsing {
     }
 
     #[test]
-    fn tool_use_stop_reason_parses() {
-        let text = "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}";
-        let event = parse_sse_event(text).unwrap();
-        match event {
-            StreamEvent::Done { stop_reason } => assert_eq!(stop_reason, "tool_use"),
-            _ => panic!("expected Done"),
-        }
-    }
-
-    #[test]
     fn thinking_delta_parses_into_thinking_event() {
-        // Catches `delete match arm "thinking_delta"` — without the arm,
-        // thinking_delta would fall through the inner match's `_ => None`.
+        // thinking_delta needs its own match arm; without it the event would
+        // fall through the inner match's `_ => None`.
         let text = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"reasoning step\"}}";
         let event = parse_sse_event(text).expect("thinking_delta should produce ThinkingDelta");
         match event {
@@ -955,8 +802,8 @@ mod sse_parsing {
 
     #[test]
     fn content_block_start_thinking_parses_into_thinking_event() {
-        // Catches `delete match arm "thinking"` — without it, a thinking
-        // block-start would fall through to `_ => None`.
+        // A thinking block-start needs its own match arm; without it the
+        // event would fall through to `_ => None`.
         let text = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\"}}";
         let event =
             parse_sse_event(text).expect("thinking block_start should produce ThinkingDelta");

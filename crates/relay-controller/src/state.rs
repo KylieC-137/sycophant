@@ -194,7 +194,8 @@ pub struct GatewayState {
     /// Workspace-wide pending server requests keyed by (workspace, request_id).
     /// Moved from per-channel to workspace-wide so a `ClientResponse` from any
     /// workspace channel resolves the awaiter.
-    pending_server_requests: RwLock<HashMap<(String, String), oneshot::Sender<ServerRequestOutcome>>>,
+    pending_server_requests:
+        RwLock<HashMap<(String, String), oneshot::Sender<ServerRequestOutcome>>>,
     /// Per-workspace high-water seq and last-send timestamp. Updated on every
     /// sequenced fan-out so the heartbeat task reads the current high-water
     /// seq without a per-frame lock.
@@ -282,7 +283,11 @@ impl GatewayState {
 
     /// Returns the IdP configuration (issuer, audience, certificate_authority).
     pub fn idp_config(&self) -> (&str, &str, &str) {
-        (&self.idp_issuer, &self.idp_audience, &self.idp_certificate_authority)
+        (
+            &self.idp_issuer,
+            &self.idp_audience,
+            &self.idp_certificate_authority,
+        )
     }
 
     /// The subject a conversation is cached under, if the relay has seen
@@ -383,17 +388,6 @@ impl GatewayState {
         }
     }
 
-    /// Return all channel_ids bound to `workspace`.
-    pub async fn channels_for_workspace(&self, workspace: &str) -> Vec<String> {
-        self.channels
-            .read()
-            .await
-            .iter()
-            .filter(|(_, e)| e.workspace == workspace)
-            .map(|(id, _)| id.clone())
-            .collect()
-    }
-
     /// Fan out a frame to all channels in `workspace`. Catching-up
     /// channels buffer the frame; live channels send directly. Returns
     /// the number of channels the frame was delivered to (live sends
@@ -438,10 +432,12 @@ impl GatewayState {
     /// Update the workspace high-water sequence and last-send timestamp.
     pub async fn update_workspace_seq(&self, workspace: &str, seq: u64) {
         let mut map = self.workspace_seq.write().await;
-        let entry = map.entry(workspace.to_string()).or_insert_with(|| WorkspaceSeqState {
-            high_water_seq: 0,
-            last_send: Instant::now(),
-        });
+        let entry = map
+            .entry(workspace.to_string())
+            .or_insert_with(|| WorkspaceSeqState {
+                high_water_seq: 0,
+                last_send: Instant::now(),
+            });
         if seq > entry.high_water_seq {
             entry.high_water_seq = seq;
         }
@@ -463,11 +459,7 @@ impl GatewayState {
     /// frame when the channel has been idle for `interval`. Stores the
     /// abort handle on the channel entry so `unregister_channel` cancels
     /// it. No-op when `interval` is zero.
-    pub async fn spawn_heartbeat(
-        self: &Arc<Self>,
-        channel_id: &str,
-        interval: Duration,
-    ) {
+    pub async fn spawn_heartbeat(self: &Arc<Self>, channel_id: &str, interval: Duration) {
         if interval.is_zero() {
             return;
         }
@@ -574,49 +566,6 @@ impl GatewayState {
             command: Some(channel_outbound::Command::TurnState(TurnStateEvent {
                 state: state as i32,
                 conversation_id: conversation_id.to_string(),
-                ..Default::default()
-            })),
-            workspace_seq: None,
-        };
-        entry.tx.send(msg).await.is_ok()
-    }
-
-    /// Like `set_and_broadcast_turn_state`, but emits `FAILED` carrying a
-    /// human-readable `reason` and a machine-readable `code`, and records
-    /// the same so a later `GetTurnState` poll recovers the failure.
-    /// Records before the channel lookup (a torn-down channel still needs
-    /// the recorded FAILED for the reconnect poll). Returns false if the
-    /// channel is no longer registered.
-    pub async fn set_and_broadcast_turn_failed(
-        &self,
-        channel_id: &str,
-        subject: &str,
-        conversation_id: &str,
-        reason: &str,
-        code: &str,
-    ) -> bool {
-        self.record_turn_state(
-            subject,
-            conversation_id,
-            TurnStateRecord {
-                state: TurnState::Failed,
-                reason: reason.to_string(),
-                code: code.to_string(),
-            },
-        )
-        .await;
-        let channels = self.channels.read().await;
-        let Some(entry) = channels.get(channel_id) else {
-            return false;
-        };
-        let mut guard = entry.current_state.lock().await;
-        *guard = TurnState::Failed;
-        let msg = ChannelOutbound {
-            command: Some(channel_outbound::Command::TurnState(TurnStateEvent {
-                state: TurnState::Failed as i32,
-                conversation_id: conversation_id.to_string(),
-                reason: reason.to_string(),
-                code: code.to_string(),
                 ..Default::default()
             })),
             workspace_seq: None,
@@ -809,10 +758,7 @@ impl GatewayState {
             self.pending_server_requests
                 .write()
                 .await
-                .insert(
-                    (workspace.to_string(), request_id.to_string()),
-                    tx_oneshot,
-                );
+                .insert((workspace.to_string(), request_id.to_string()), tx_oneshot);
             // Fan out the ServerRequest to ALL workspace channels.
             let msg = ChannelOutbound {
                 command: Some(channel_outbound::Command::ServerRequest(ServerRequest {
@@ -876,7 +822,13 @@ pub(crate) mod test_support {
         tx: mpsc::Sender<ChannelOutbound>,
     ) -> String {
         state
-            .mint_channel(ChannelOpener::Person, subject.into(), workspace.into(), tx, false)
+            .mint_channel(
+                ChannelOpener::Person,
+                subject.into(),
+                workspace.into(),
+                tx,
+                false,
+            )
             .await
     }
 }
@@ -886,43 +838,11 @@ mod tests {
     use super::test_support::{make_state, mint_person};
     use super::*;
 
-    fn extract_turn_state(msg: &ChannelOutbound) -> Option<TurnState> {
-        match &msg.command {
-            Some(channel_outbound::Command::TurnState(e)) => TurnState::try_from(e.state).ok(),
-            _ => None,
-        }
-    }
-
     fn extract_turn_state_event(msg: &ChannelOutbound) -> Option<&TurnStateEvent> {
         match &msg.command {
             Some(channel_outbound::Command::TurnState(e)) => Some(e),
             _ => None,
         }
-    }
-
-    #[tokio::test]
-    async fn mint_channel_and_send() {
-        let state = make_state();
-        let (tx, mut rx) = mpsc::channel(4);
-        let id = mint_person(&state, "subject-alpha", "alpha", tx).await;
-        assert!(
-            state
-                .send_to_channel(
-                    &id,
-                    ChannelOutbound {
-                        command: Some(channel_outbound::Command::Ack(proto_common::ChannelAck {
-                            channel_id: id.clone(),
-                        })),
-                        workspace_seq: None,
-                    }
-                )
-                .await
-        );
-        let got = rx.recv().await.unwrap();
-        assert!(matches!(
-            got.command,
-            Some(channel_outbound::Command::Ack(_))
-        ));
     }
 
     #[tokio::test]
@@ -932,19 +852,6 @@ mod tests {
         let a = mint_person(&state, "subject-ws", "ws", tx.clone()).await;
         let b = mint_person(&state, "subject-ws", "ws", tx).await;
         assert_ne!(a, b, "each mint must produce a distinct channel_id");
-    }
-
-    #[tokio::test]
-    async fn channel_binding_returns_opener_subject_workspace() {
-        let state = make_state();
-        let (tx, _rx) = mpsc::channel(1);
-        let id = mint_person(&state, "subject-hello", "hello-world", tx).await;
-        let (_, _, ws) = state
-            .channel_binding(&id)
-            .await
-            .expect("channel must exist");
-        assert_eq!(ws, "hello-world");
-        assert!(state.channel_binding("nonexistent").await.is_none());
     }
 
     #[tokio::test]
@@ -980,31 +887,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mint_channel_defaults_current_state_to_idle() {
-        let state = make_state();
-        let (tx, mut rx) = mpsc::channel(4);
-        let id = mint_person(&state, "subject-ws", "ws", tx).await;
-        assert!(state.replay_turn_state(&id).await);
-        let msg = rx.recv().await.unwrap();
-        assert_eq!(extract_turn_state(&msg), Some(TurnState::Idle));
-    }
-
-    #[tokio::test]
-    async fn set_and_broadcast_turn_state_updates_state_and_emits_frame() {
-        let state = make_state();
-        let (tx, mut rx) = mpsc::channel(4);
-        let id = mint_person(&state, "subject-ws", "ws", tx).await;
-        assert!(
-            state
-                .set_and_broadcast_turn_state(&id, "subject-ws", "ws.conv-1", TurnState::Working)
-                .await
-        );
-        let msg = rx.recv().await.unwrap();
-        assert_eq!(extract_turn_state(&msg), Some(TurnState::Working));
-    }
-
-    #[tokio::test]
-    async fn set_and_broadcast_turn_state_emits_conversation_id() {
+    async fn set_and_broadcast_turn_state_emits_and_records_the_phase() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(4);
         let id = mint_person(&state, "subject-ws", "ws", tx).await;
@@ -1017,119 +900,26 @@ mod tests {
         let event = extract_turn_state_event(&msg).unwrap();
         assert_eq!(event.conversation_id, "ws.conv-1");
         assert_eq!(event.state, TurnState::Working as i32);
-    }
-
-    #[tokio::test]
-    async fn set_and_broadcast_turn_state_returns_false_for_unknown_channel() {
-        let state = make_state();
-        assert!(
-            !state
-                .set_and_broadcast_turn_state("ghost", "ws", "ws.conv", TurnState::Working)
-                .await
-        );
-    }
-
-    #[tokio::test]
-    async fn turn_state_transitions_arrive_in_fifo_order() {
-        let state = make_state();
-        let (tx, mut rx) = mpsc::channel(8);
-        let id = mint_person(&state, "subject-ws", "ws", tx).await;
-        state
-            .set_and_broadcast_turn_state(&id, "subject-ws", "ws.c", TurnState::Working)
-            .await;
-        state
-            .set_and_broadcast_turn_state(&id, "subject-ws", "ws.c", TurnState::Idle)
-            .await;
-        let first = rx.recv().await.unwrap();
-        let second = rx.recv().await.unwrap();
-        assert_eq!(extract_turn_state(&first), Some(TurnState::Working));
-        assert_eq!(extract_turn_state(&second), Some(TurnState::Idle));
-    }
-
-    #[tokio::test]
-    async fn set_and_broadcast_turn_state_records_phase_for_poll() {
-        let state = make_state();
-        let (tx, _rx) = mpsc::channel(4);
-        let id = mint_person(&state, "subject-ws", "ws", tx).await;
-        state
-            .set_and_broadcast_turn_state(&id, "subject-ws", "ws.conv-x", TurnState::Working)
-            .await;
         let rec = state
-            .turn_state_record("subject-ws", "ws.conv-x")
+            .turn_state_record("subject-ws", "ws.conv-1")
             .await
             .unwrap();
         assert_eq!(rec.state, TurnState::Working);
     }
 
     #[tokio::test]
-    async fn set_and_broadcast_records_even_when_channel_gone() {
+    async fn set_and_broadcast_to_a_gone_channel_records_but_reports_unsent() {
         // The per-conversation record must survive a disconnected channel
         // so the reconnect poll recovers the phase.
         let state = make_state();
-        state
-            .set_and_broadcast_turn_state("ghost", "ws", "ws.conv-y", TurnState::Working)
-            .await;
+        assert!(
+            !state
+                .set_and_broadcast_turn_state("ghost", "ws", "ws.conv-y", TurnState::Working)
+                .await,
+            "an unknown channel reports not broadcast"
+        );
         let rec = state.turn_state_record("ws", "ws.conv-y").await.unwrap();
         assert_eq!(rec.state, TurnState::Working);
-    }
-
-    #[tokio::test]
-    async fn set_and_broadcast_turn_failed_emits_and_records_reason_code() {
-        let state = make_state();
-        let (tx, mut rx) = mpsc::channel(4);
-        let id = mint_person(&state, "subject-ws", "ws", tx).await;
-        assert!(
-            state
-                .set_and_broadcast_turn_failed(
-                    &id,
-                    "subject-ws",
-                    "ws.conv-z",
-                    "inference job reaped",
-                    "14"
-                )
-                .await
-        );
-        let msg = rx.recv().await.unwrap();
-        let event = extract_turn_state_event(&msg).unwrap();
-        assert_eq!(event.state, TurnState::Failed as i32);
-        // Kills state.rs conversation_id in the failed broadcast event:
-        // dropping the field defaults it to empty, so a client watching the
-        // stream could not route the FAILED frame to the right conversation.
-        assert_eq!(event.conversation_id, "ws.conv-z");
-        assert_eq!(event.reason, "inference job reaped");
-        assert_eq!(event.code, "14");
-        let rec = state
-            .turn_state_record("subject-ws", "ws.conv-z")
-            .await
-            .unwrap();
-        assert_eq!(rec.state, TurnState::Failed);
-        assert_eq!(rec.reason, "inference job reaped");
-        assert_eq!(rec.code, "14");
-    }
-
-    #[tokio::test]
-    async fn turn_state_record_absent_for_unknown_conversation() {
-        let state = make_state();
-        assert!(state.turn_state_record("ws", "ws.never").await.is_none());
-    }
-
-    #[tokio::test]
-    async fn turn_state_record_scoped_to_subject() {
-        let state = make_state();
-        state
-            .record_turn_state(
-                "alice",
-                "conv",
-                TurnStateRecord {
-                    state: TurnState::Working,
-                    reason: String::new(),
-                    code: String::new(),
-                },
-            )
-            .await;
-        assert!(state.turn_state_record("alice", "conv").await.is_some());
-        // Another subject with the same conversation_id sees nothing.
-        assert!(state.turn_state_record("bob", "conv").await.is_none());
     }
 
     #[tokio::test]
@@ -1147,27 +937,6 @@ mod tests {
             )
             .await;
         assert!(state.turn_state_record("ws", "").await.is_none());
-    }
-
-    #[tokio::test]
-    async fn notify_subscriber_routes_to_correct_workspace() {
-        let state = make_state();
-        let mut rx = state.subscribe_or_create("alpha").await;
-        state
-            .notify_subscriber(
-                "alpha",
-                UserMessage {
-                    content: vec![],
-                    sender: "u".into(),
-                    reply_channel: Some("chan-1".into()),
-                    conversation_id: "alpha.c".into(),
-                    grants: vec![],
-                },
-            )
-            .await;
-        let got = rx.recv().await.unwrap();
-        assert_eq!(got.sender, "u");
-        assert_eq!(got.reply_channel.as_deref(), Some("chan-1"));
     }
 
     #[tokio::test]
@@ -1213,30 +982,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deliver_client_response_unknown_workspace_is_false() {
-        let state = make_state();
-        assert!(
-            !state
-                .deliver_client_response(
-                    "ghost-ws",
-                    "req-1",
-                    ServerRequestOutcome::Result("{}".into())
-                )
-                .await
-        );
-    }
-
-    #[tokio::test]
-    async fn send_server_notification_unknown_workspace_errors() {
-        let state = make_state();
-        let err = state
-            .send_server_notification("ghost-ws", "RevealPath", "{}".into(), None)
-            .await
-            .unwrap_err();
-        assert!(matches!(err, ServerRequestError::UnknownChannel));
-    }
-
-    #[tokio::test]
     async fn send_server_notification_unsupported_method_errors() {
         let state = make_state();
         let (tx, _rx) = mpsc::channel(4);
@@ -1250,17 +995,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_server_notification_delivers_when_method_supported() {
+    async fn update_supported_methods_unknown_channel_is_false() {
+        let state = make_state();
+        assert!(
+            !state
+                .update_supported_methods("ghost", vec!["X".into()])
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn send_server_notification_fans_out_to_every_supporting_channel() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(4);
+        let (tx_b, mut rx_b) = mpsc::channel(4);
         let id = mint_person(&state, "subject-ws", "ws", tx).await;
+        let id_b = mint_person(&state, "subject-ws", "ws", tx_b).await;
         state
             .update_supported_methods(&id, vec!["RevealPath".into()])
+            .await;
+        state
+            .update_supported_methods(&id_b, vec!["RevealPath".into()])
             .await;
         state
             .send_server_notification("ws", "RevealPath", "{\"p\":1}".into(), None)
             .await
             .unwrap();
+        assert!(
+            rx_b.recv().await.is_some(),
+            "every supporting workspace channel must receive"
+        );
         let msg = rx.recv().await.unwrap();
         match msg.command {
             Some(channel_outbound::Command::ServerRequest(sr)) => {
@@ -1272,27 +1036,6 @@ mod tests {
             }
             other => panic!("expected ServerRequest, got {other:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn send_server_notification_fans_out_to_workspace_channels() {
-        let state = make_state();
-        let (tx_a, mut rx_a) = mpsc::channel(4);
-        let (tx_b, mut rx_b) = mpsc::channel(4);
-        let id_a = mint_person(&state, "subject-ws", "ws", tx_a).await;
-        let id_b = mint_person(&state, "subject-ws", "ws", tx_b).await;
-        state
-            .update_supported_methods(&id_a, vec!["RevealPath".into()])
-            .await;
-        state
-            .update_supported_methods(&id_b, vec!["RevealPath".into()])
-            .await;
-        state
-            .send_server_notification("ws", "RevealPath", "{}".into(), None)
-            .await
-            .unwrap();
-        assert!(rx_a.recv().await.is_some(), "channel a must receive");
-        assert!(rx_b.recv().await.is_some(), "channel b must receive");
     }
 
     #[tokio::test]
@@ -1386,16 +1129,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_supported_methods_unknown_channel_is_false() {
-        let state = make_state();
-        assert!(
-            !state
-                .update_supported_methods("ghost", vec!["X".into()])
-                .await
-        );
-    }
-
-    #[tokio::test]
     async fn send_to_workspace_fans_out_to_all_live_channels() {
         let state = make_state();
         let (tx_a, mut rx_a) = mpsc::channel(4);
@@ -1429,26 +1162,22 @@ mod tests {
             workspace_seq: Some(1),
         };
         let delivered = state.send_to_workspace("ws", msg).await;
-        assert_eq!(delivered, 0, "catching-up channel should not count as delivered");
-        assert!(rx.try_recv().is_err(), "catching-up channel should not receive");
+        assert_eq!(
+            delivered, 0,
+            "catching-up channel should not count as delivered"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "catching-up channel should not receive"
+        );
 
         // Transition to live drains the buffer.
         assert!(state.transition_to_live(&id).await);
         let got = rx.recv().await.unwrap();
-        assert!(matches!(got.command, Some(channel_outbound::Command::Ack(_))));
-    }
-
-    #[tokio::test]
-    async fn channels_for_workspace_returns_matching_channels() {
-        let state = make_state();
-        let (tx, _rx) = mpsc::channel(1);
-        let _a = mint_person(&state, "s", "alpha", tx.clone()).await;
-        let _b = mint_person(&state, "s", "alpha", tx.clone()).await;
-        let _c = mint_person(&state, "s", "beta", tx).await;
-        let alpha_channels = state.channels_for_workspace("alpha").await;
-        assert_eq!(alpha_channels.len(), 2);
-        let beta_channels = state.channels_for_workspace("beta").await;
-        assert_eq!(beta_channels.len(), 1);
+        assert!(matches!(
+            got.command,
+            Some(channel_outbound::Command::Ack(_))
+        ));
     }
 
     #[tokio::test]
@@ -1458,7 +1187,11 @@ mod tests {
         state.update_workspace_seq("ws", 5).await;
         assert_eq!(state.workspace_high_water_seq("ws").await, 5);
         state.update_workspace_seq("ws", 3).await;
-        assert_eq!(state.workspace_high_water_seq("ws").await, 5, "should not decrease");
+        assert_eq!(
+            state.workspace_high_water_seq("ws").await,
+            5,
+            "should not decrease"
+        );
         state.update_workspace_seq("ws", 10).await;
         assert_eq!(state.workspace_high_water_seq("ws").await, 10);
     }

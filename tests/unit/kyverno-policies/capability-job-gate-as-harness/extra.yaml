@@ -1,0 +1,207 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: approved-secret-env
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: tool
+    spec:
+      restartPolicy: Never
+      serviceAccountName: ws-research-unprivileged
+      containers:
+        - name: runtime
+          image: registry.k8s.io/pause:3.9
+          env:
+            - name: T
+              valueFrom:
+                secretKeyRef:
+                  name: approved-secret
+                  key: t
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: off-secret-volume
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: tool
+    spec:
+      restartPolicy: Never
+      serviceAccountName: ws-research-unprivileged
+      volumes:
+        - name: c
+          secret:
+            secretName: not-approved
+      containers:
+        - name: runtime
+          image: registry.k8s.io/pause:3.9
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: off-secret-projected
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: tool
+    spec:
+      restartPolicy: Never
+      serviceAccountName: ws-research-unprivileged
+      volumes:
+        - name: c
+          projected:
+            sources:
+              - secret:
+                  name: not-approved
+      containers:
+        - name: runtime
+          image: registry.k8s.io/pause:3.9
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: off-secret-env-init
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: tool
+    spec:
+      restartPolicy: Never
+      serviceAccountName: ws-research-unprivileged
+      initContainers:
+        - name: seed
+          image: registry.k8s.io/pause:3.9
+          env:
+            - name: T
+              valueFrom:
+                secretKeyRef:
+                  name: not-approved
+                  key: t
+      containers:
+        - name: runtime
+          image: registry.k8s.io/pause:3.9
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: off-secret-envfrom
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: tool
+    spec:
+      restartPolicy: Never
+      serviceAccountName: ws-research-unprivileged
+      containers:
+        - name: runtime
+          image: registry.k8s.io/pause:3.9
+          envFrom:
+            - secretRef:
+                name: not-approved
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: off-image-pull-secret
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: tool
+    spec:
+      restartPolicy: Never
+      serviceAccountName: ws-research-unprivileged
+      imagePullSecrets:
+        - name: not-approved
+      containers:
+        - name: runtime
+          image: registry.k8s.io/pause:3.9
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cross-workspace-secret
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: tool
+    spec:
+      restartPolicy: Never
+      serviceAccountName: ws-research-unprivileged
+      volumes:
+        - name: c
+          secret:
+            secretName: other-secret
+      containers:
+        - name: runtime
+          image: registry.k8s.io/pause:3.9
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: csi-volume
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: tool
+    spec:
+      restartPolicy: Never
+      serviceAccountName: ws-research-unprivileged
+      volumes:
+        - name: s
+          csi:
+            driver: secrets-store.csi.k8s.io
+      containers:
+        - name: runtime
+          image: registry.k8s.io/pause:3.9
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wrong-sa
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: tool
+    spec:
+      restartPolicy: Never
+      serviceAccountName: attacker-sa
+      containers:
+        - name: runtime
+          image: registry.k8s.io/pause:3.9
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bad-job-kind
+  namespace: tenant-offline
+spec:
+  template:
+    metadata:
+      labels:
+        sycophant.md/job-kind: malware
+    spec:
+      restartPolicy: Never
+      serviceAccountName: ws-research-unprivileged
+      containers:
+        - name: runtime
+          image: registry.k8s.io/pause:3.9

@@ -14,6 +14,10 @@
 # key material. The apiserver fetches the issuer's public keys from its
 # Discovery endpoint (`.well-known/openid-configuration`) at runtime. The IdP
 # signing key is the IdP's and never lands here.
+#
+# The anonymous block replaces the apiserver's default anonymous access, so
+# /healthz, /livez, /readyz and /version answer 401 to callers without
+# credentials. A load balancer that health-checks the apiserver must send them.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -25,6 +29,14 @@ data:
   auth-config.yaml: |
     apiVersion: apiserver.config.k8s.io/v1beta1
     kind: AuthenticationConfiguration
+    # Unauthenticated callers may read the service-account key set and nothing
+    # else, so the object store can verify workspace pod tokens. No other path
+    # is anonymous. Kept above jwt: because setup appends extra issuers to the
+    # end of this file, so jwt: must stay the last key.
+    anonymous:
+      enabled: true
+      conditions:
+        - path: /openid/v1/jwks
     jwt:
       - issuer:
           url: {{ .Values.idp.issuer | quote }}

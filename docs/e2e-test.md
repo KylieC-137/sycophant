@@ -2,7 +2,7 @@
 
 Stand up sycophant from nothing and assert the security clauses hold — driven by the `sycoadm` CLI. Agent-executed tool code runs in gVisor-isolated toolset pods (capability-job); the workspace/harness pod itself runs on the kubelet-default runtime with the seccomp/caps/read-only-rootfs + egress-policy envelope.
 
-The e2e is the CLI plus the [examples](../examples/sycoadm/README.md): `sycoadm setup` brings up the cluster and builds the images; the example values provision the tenant and its workspace, which the script exercises over the app path with the operator's Dex token (grpcurl, until the Flutter app has its own login); `sycoadm tenant audit` asserts the security clauses. This doc covers the prereqs, what each phase lays down, the architecture rationale behind those steps, and how to debug when something breaks.
+The e2e is the CLI plus the [examples](../examples/sycoadm/README.md): `sycoadm setup` brings up the cluster and builds the images; the example values provision the tenant and its workspace, which the script exercises over the app path with the operator's Dex token through the `syco` CLI; `sycoadm tenant audit` asserts the security clauses. This doc covers the prereqs, what each phase lays down, the architecture rationale behind those steps, and how to debug when something breaks.
 
 > [`scripts/e2e.sh`](../scripts/e2e.sh) is the legacy maintainer harness — it also drives the app path over the tailnet and compile-checks the Flutter app, which the CLI does not. It's retained until the CLI bring-up (`sycoadm setup`'s image build + `sycoadm tenant audit`) is verified on a live cluster, then retired.
 
@@ -28,7 +28,7 @@ To skip the scans entirely, add your terminal to System Settings → Privacy & S
 
 Follow the examples end to end:
 
-- [examples](../examples/sycoadm/README.md) — the reference run: `setup` → `tenant up` → exercise (grpcurl over the app path with the operator's Dex token) → `audit`, including the secret-scrubber assertion.
+- [examples](../examples/sycoadm/README.md) — the reference run: `setup` → `tenant up` → exercise (the `syco` CLI over the app path with the operator's Dex token) → `audit`, including the secret-scrubber assertion.
 
 The shape:
 
@@ -48,7 +48,7 @@ sycoadm tenant audit <workspace> --ns tenant-e2e-test     # 7-check pass/fail (t
 | Images | `sycoadm setup` (from a checkout) | Cross-compile Rust → Docker build all images → `k3d image import` + push toolsets to the in-cluster registry |
 | Content | `sycoadm tenant secret set` | LLM creds and grant Secrets, applied from outside the tenant |
 | Deploy | `sycoadm tenant up` | Prompts for the operator password, then renders the tenant provision command from its values file and writes it under a fresh 10-minute Dex ID token (`tenant` and `capacity`; Kyverno generates the `part-of=sycophant-tenant` namespace, its quota, and the base-release installer Job, which installs chart defaults; its install-wait hook holds that Job until the relay-controller is Available). `sycoadm inference up -f`, `sycoadm toolset up -f`, `sycoadm workspace up -f`, `sycoadm user up -f` and `sycoadm channel up -f` then render and write one provision command per model, toolset, workspace, bound user and channel, each waiting on its installer Job |
-| Exercise | grpcurl + operator token | Over the app path with the operator's Dex token: a Shell call inside a fresh conversation (no model; lazy-spawns the stdlib toolset pod the audit probes), a denied call on an ungranted workspace, and one model turn carrying the `ssh-credentials/demo-key` grant. Step 6 inspects exactly those two conversations |
+| Exercise | `syco` CLI + operator token | Over the app path with the operator's Dex token: a Shell call inside a fresh conversation (no model; lazy-spawns the stdlib toolset pod the audit probes), a denied call on an ungranted workspace, and one model turn carrying the `ssh-credentials/demo-key` grant. Step 6 inspects exactly those two conversations |
 | Audit | `sycoadm tenant audit` | gVisor `dmesg`, secret-scrubbing count, tool `exit_code=0`, egress timeout, L7 DNS block, no LLM creds in the sandbox, workspace SA |
 
 ## Architecture notes
@@ -63,11 +63,9 @@ sycoadm tenant audit <workspace> --ns tenant-e2e-test     # 7-check pass/fail (t
 
 **Why Kyverno is mandatory.** The cluster chart ships Kyverno CEL policies and ValidatingAdmissionPolicies. Without Kyverno's admission + background controllers, the policies install but never enforce. The mismatch only surfaces when downstream calls fail (e.g., the `relay-controller` SA tries `TokenReview` and the per-tenant ClusterRoleBinding the generator should have created doesn't exist).
 
-**Why the namespace label provisions it.** The cluster chart's `tenant-rolebinding-generator` Kyverno policy matches any namespace carrying `app.kubernetes.io/part-of=sycophant-tenant` — name-independent, needing no dedicated provisioning ServiceAccount. In Step 3, `sycoadm tenant up` writes the tenant provision command, and the `provision-tenant-base` reactor generates the `tenant-e2e-test` namespace carrying that label. The label then chains into the generator, which mints the per-tenant relay TokenReview ClusterRoleBinding and the pod ValidatingAdmissionPolicyBinding (it generates no namespaced RoleBinding; the installer's `provision-write` RoleBinding comes from the installer reactor). Generation is asynchronous, so Step 3 waits for the namespace, checks its label, waits for both bindings, then applies a deliberately VAP-violating pod to assert the binding actually enforces.
+**Why the namespace label provisions it.** The cluster chart's `tenant-rolebinding-generator` Kyverno policy matches any namespace carrying `app.kubernetes.io/part-of=sycophant-tenant` — name-independent, needing no dedicated provisioning ServiceAccount. In Step 3, `sycoadm tenant up` writes the tenant provision command, and the `provision-tenant-base` reactor generates the `tenant-e2e-test` namespace carrying that label. The label then chains into the generator, which mints the per-tenant relay TokenReview ClusterRoleBinding and the pod ValidatingAdmissionPolicyBinding (it generates no namespaced RoleBinding; the installer's `provision-write` RoleBinding comes from the installer reactor). Generation is asynchronous, so Step 3 waits for the namespace and both bindings.
 
 **Why the registry hostname has no TLD.** k3d's `--registry-create sycophant-registry:0.0.0.0:5555` provisions an in-cluster OCI registry. The hostname `sycophant-registry` (no `.localhost` TLD) avoids RFC 6761's libc loopback-bypass — musl-linked Rust controllers resolve it via CoreDNS like any other in-cluster name. From the host, the same registry is reachable at `localhost:5555`.
-
-**Why `--port "9090:9090@loadbalancer"`.** The cluster's serverlb maps host:9090 → cluster Service `relay-controller:9090` (the internal listener). That's enough for the Layer 1 chat sanity.
 
 **Why the app path uses `relay:9090` over the tailnet.** The relay's app port is never forwarded to the host, so the only way in is the app adapter's tsnet node, reached by its MagicDNS name. Step 5 forwards headscale's HTTP API alone, which is what lets the host's Tailscale join the in-cluster control plane. A client that could dial the relay directly would skip the adapter and leave the assertions that cover it untested.
 

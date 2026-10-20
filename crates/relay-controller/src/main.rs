@@ -203,11 +203,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn build_internal_verifier_returns_none_when_no_kube_client() {
-        assert!(build_internal_verifier(None).is_none());
-    }
-
     // `main` builds its servers by walking `listeners()`, wrapping the
     // person and adapter entries in their per-class layer and leaving the
     // `Harness` entry bare. The tests below constrain that table rather

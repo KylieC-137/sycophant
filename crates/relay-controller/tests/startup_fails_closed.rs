@@ -159,8 +159,8 @@ fn serve_connection(conn: TcpStream) {
 /// The identity table alone failing to sync is fatal. The toolset-grants
 /// watcher syncs, so only the identity watcher's timeout can end the process.
 ///
-/// Materiality: ignore the identity watcher's sync result in `main` and the
-/// relay goes on to serve an empty identity table.
+/// Ignoring the identity watcher's sync result in `main` would let the
+/// relay serve an empty identity table.
 #[test]
 fn relay_exits_nonzero_when_the_identity_watcher_never_syncs() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock apiserver");

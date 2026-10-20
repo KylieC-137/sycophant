@@ -7,3 +7,10 @@
 tenant:
   name: e2e-test
   capacity: 12Gi
+
+# In-cluster headscale on plain HTTP :8080. The operator reaches headscale by
+# `sycoadm connect --tenant e2e-test` (port-forward + tailscale up); the app
+# adapter joins it at the Service DNS name.
+headscale:
+  enabled: true
+  serverUrl: http://localhost:8080

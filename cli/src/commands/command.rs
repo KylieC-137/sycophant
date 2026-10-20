@@ -155,6 +155,15 @@ pub(crate) fn up(kind: &str, values: &Values) -> Result<(), String> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let manifest = render(&format!("{kind}-provision"), &args)?;
     let op = Operator::login(&Scope::global()?.oidc_dir())?;
+
+    // The channel adapter needs a headscale pre-auth key to join the tailnet.
+    // Mint it before the provisioner Job runs so the adapter pod can start.
+    if kind == "channel" {
+        if let Some(ns) = manifest_namespace(&manifest) {
+            mint_adapter_authkey(&ns)?;
+        }
+    }
+
     apply(&op, kind, &manifest)
 }
 
@@ -182,6 +191,27 @@ pub(crate) fn suspend(op: &Operator, ns: &str, keepalive: Option<&str>) -> Resul
     Ok(())
 }
 
+/// Extract the target namespace from a rendered provision command manifest.
+pub(crate) fn manifest_namespace(manifest: &str) -> Option<String> {
+    let doc: serde_yaml::Value = serde_yaml::from_str(manifest).ok()?;
+    doc["metadata"]["namespace"].as_str().map(|s| s.to_string())
+}
+
+/// Mint a headscale pre-auth key for the adapter and store it as a Secret.
+fn mint_adapter_authkey(ns: &str) -> Result<(), String> {
+    use crate::runner::run_passthrough;
+    run_passthrough("sh", &["-c", &format!(
+        "kubectl exec -n {ns} deploy/headscale -- headscale users create adapter 2>/dev/null; \
+         uid=$(kubectl exec -n {ns} deploy/headscale -- headscale users list -o json | jq -r '.[] | select(.name == \"adapter\") | .id'); \
+         kubectl exec -n {ns} deploy/headscale -- headscale preauthkeys create -u \"$uid\" -e 8760h \
+           | tr -d '\\n' \
+           | kubectl create secret generic relay-tsnet-authkey -n {ns} --from-file=authkey=/dev/stdin --dry-run=client -o yaml \
+           | kubectl apply -n {ns} -f - >/dev/null"
+    )]).map_err(|e| format!("failed to mint adapter authkey: {e}"))?;
+    ok("adapter pre-auth key minted");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,21 +230,16 @@ mod tests {
     }
 
     #[test]
-    fn job_state_succeeded_is_done() {
+    fn job_state_is_done_on_success_err_on_failure_else_pending() {
+        // done
         assert_eq!(job_state(&json!({"succeeded": 1})), Ok(true));
-    }
-
-    #[test]
-    fn job_state_failed_condition_is_an_error() {
+        // failed
         assert!(job_state(&json!({
             "failed": 1,
             "conditions": [{"type": "Failed", "status": "True"}],
         }))
         .is_err());
-    }
-
-    #[test]
-    fn job_state_running_is_pending() {
+        // pending
         assert_eq!(job_state(&json!({"active": 1})), Ok(false));
         assert_eq!(
             job_state(&json!({"conditions": [{"type": "Failed", "status": "False"}]})),

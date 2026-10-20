@@ -43,7 +43,6 @@ spec:
         - ports:
             - port: "9091"
               protocol: TCP
-    {{- if (include "sycophant.headscale" . | fromYaml).enabled }}
     # In-cluster headscale control plane registration.
     - toEndpoints:
         - matchLabels:
@@ -53,7 +52,6 @@ spec:
         - ports:
             - port: "8080"
               protocol: TCP
-    {{- end }}
     # Public internet for external headscale (when not bundled) AND for
     # Tailscale DERP relay fallback when direct NAT punching fails.
     #   - 443/TCP: headscale HTTPS + DERP HTTPS

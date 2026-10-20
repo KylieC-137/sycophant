@@ -131,19 +131,14 @@ mod tests {
     }
 
     #[test]
-    fn load_config_missing_format_errors() {
+    fn load_config_errors_on_a_missing_or_unknown_format() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_env();
         std::env::set_var("INFERENCE_MODEL", "m");
         std::env::set_var("INFERENCE_BASE_URL", "http://x");
         assert!(load_config().is_err());
-        clear_env();
-    }
 
-    #[test]
-    fn load_config_invalid_format_errors() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_env();
+        // An unknown format errors the same way as a missing one.
         std::env::set_var("INFERENCE_FORMAT", "banana");
         std::env::set_var("INFERENCE_MODEL", "m");
         std::env::set_var("INFERENCE_BASE_URL", "http://x");

@@ -22,6 +22,11 @@ spec:
               path: token
               audience: harness.relay.sycophant.md
               expirationSeconds: 3600
+    # The conversation-log-mount VAP admits a harness mounting its own
+    # ws-*-conversation PVC. The PVC need not exist: admission is the check.
+    - name: conversation-data
+      persistentVolumeClaim:
+        claimName: ws-chainsaw-conversation
   containers:
     - name: harness
       image: registry.k8s.io/pause:3.9
@@ -29,6 +34,8 @@ spec:
         - name: harness-auth
           mountPath: /var/run/secrets/kubernetes.io/serviceaccount
           readOnly: true
+        - name: conversation-data
+          mountPath: /var/lib/harness/conversations
       resources:
         requests: { cpu: "100m", memory: "64Mi" }
         limits:   { cpu: "100m", memory: "64Mi" }

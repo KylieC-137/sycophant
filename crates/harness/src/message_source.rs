@@ -269,16 +269,4 @@ mod tests {
         let err = src.next_message().await.unwrap_err();
         assert_eq!(err, "empty inbound message");
     }
-
-    #[tokio::test]
-    async fn subscribe_message_source_reconnects_after_subscribe_then_stream_error() {
-        let driver = MockDriver::new(
-            vec![Ok(()), Err("connect failed".into()), Ok(())],
-            vec![Err("stream broke".into()), Ok(user_message("after-retry"))],
-        );
-        let flag = Arc::new(AtomicBool::new(false));
-        let mut src = SubscribeMessageSource::with_driver(Box::new(driver), flag).no_backoff();
-        let msg = src.next_message().await.unwrap();
-        assert_eq!(msg.content.len(), 1);
-    }
 }

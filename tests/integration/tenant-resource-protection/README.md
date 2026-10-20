@@ -7,23 +7,12 @@ resource kind. External callers (cluster-admin, operator-owned ServiceAccounts)
 are excluded by the match condition, which fires only for a caller inside the
 namespace it is writing to.
 
-One test per protected resource:
-- `capability-grants-configmap-immutable/` — an in-namespace SA cannot
-  create, update, or delete a ConfigMap labeled
-  `sycophant.md/type=capability-grants`
-- `cilium-network-policy-immutable/` — an in-namespace SA cannot CRUD a
-  CiliumNetworkPolicy in its own namespace
-- `relay-identity-configmap-immutable/` — an in-namespace SA cannot create,
-  update, or delete a ConfigMap labeled
-  `sycophant.md/type=relay-identity`
+The per-resource denials run offline in `tests/unit/kyverno-policies/`. The
+cluster-wide gVisor rule cannot be guarded at admission; the provision-installer
+provision-write check in `tests/unit/provision-installer/` pins that the
+installer's role reaches no admission rule. Live here:
 - `network-policy-immutable/` — an in-namespace SA cannot create, update, or
   delete a NetworkPolicy
-- `rbac-roles-immutable/` — an in-namespace SA cannot CRUD Roles or
-  RoleBindings in its own namespace
-- `workspace-admission-rule-immutable/` — the most privileged tenant identity
-  cannot delete or change the cluster-wide gVisor rule
-- `workspace-service-accounts-immutable/` — an in-namespace SA cannot CRUD the
-  workspace ServiceAccounts
 
 Plus:
 - `external-sa-can-write/` — pair test proving the check isn't a blanket deny

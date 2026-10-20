@@ -23,8 +23,12 @@ fn main() {
         Command::Destroy(_) => commands::destroy::run(),
         Command::Upgrade(cmd) => commands::upgrade::run(cmd),
         Command::Tenant(cmd) => commands::tenant::run(cmd),
+        Command::Connect(cmd) => commands::connect::run(cmd),
         Command::Toolset(cmd) => component("toolset", cmd),
-        Command::Workspace(cmd) => component("workspace", cmd),
+        Command::Workspace(cli::ComponentCmd { sub }) => match sub {
+            cli::ComponentSub::Up(c) => commands::workspace::up(&c.values),
+            cli::ComponentSub::Down(c) => commands::workspace::down(&c.name, &c.tenant),
+        },
         Command::User(cli::UserCmd {
             sub: cli::UserSub::Up(c),
         }) => commands::command::up("user", &c.values),

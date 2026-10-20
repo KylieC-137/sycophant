@@ -22,12 +22,15 @@ harness:
   tag: local
   pullPolicy: Never
   instructions:
-    # Object-storage delivery of instruction content. At
-    # pod start the harness init container syncs this workspace's prefix from
-    # <bucket>/<namespace>/<workspace> at <endpoint> into an emptyDir the serving
-    # container mounts read-only. The read-only, prefix-scoped credential
-    # (credentialName, a Secret the operator provides) is mounted into the
-    # init container ONLY; the serving container holds no credential.
+    # Object-storage delivery of instruction content. At pod start the harness
+    # init container syncs this workspace's folder
+    # <bucket>/system:serviceaccount:<namespace>:ws-<workspace>/ at <endpoint>
+    # into an emptyDir the serving container mounts read-only. It authenticates
+    # with the pod's own projected service-account token, exchanged through the
+    # store's STS for a short-lived read-only credential scoped to that folder.
+    # The token is mounted into the init container ONLY; no Secret is read.
+    # `sycoadm workspace up` uploads the folder from the workspace values
+    # file's `instructions` directory.
     #
     # The store is one shared cluster component in the operator-owned system
     # namespace (charts/sycophant-objectstore), not a per-tenant instance. The
@@ -37,7 +40,6 @@ harness:
     # side carries only the harness egress permission.
     endpoint: seaweedfs.sycophant-system.svc.cluster.local:8333
     bucket: sycophant-instructions
-    credentialName: instructions-reader
     # The init container's `rclone sync` mirrors the prefix into the emptyDir.
     syncImage: rclone/rclone:1.75.1
 

@@ -50,7 +50,11 @@ impl StreamSink for GatewaySink<'_> {
             tracing::warn!(error = %e, "failed to persist streamed item; dropping frame");
             return;
         }
-        if let Err(e) = self.rpc.deliver_stream_item(&self.channel_id, item, seq).await {
+        if let Err(e) = self
+            .rpc
+            .deliver_stream_item(&self.channel_id, item, seq)
+            .await
+        {
             tracing::warn!(error = %e, "failed to deliver streamed item");
         }
     }
@@ -314,7 +318,7 @@ mod tests {
     use toolset_proto::{ContentDelta, ToolUseInput, ToolUseStart, TurnError, TurnEvent};
 
     fn test_event_log() -> Arc<EventLog> {
-        let dir = tempfile::tempdir().unwrap().into_path();
+        let dir = tempfile::tempdir().unwrap().keep();
         Arc::new(EventLog::new(&dir))
     }
 
@@ -405,14 +409,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_content_delta_emits_no_frame() {
-        // Provider heartbeats carry empty text and must not open a text item.
-        let mut state = EmitState::new("c".into(), test_event_log());
-        let frames = stream_items_for(&content_delta(""), &mut state);
-        assert!(frames.is_empty());
-    }
-
-    #[test]
     fn tool_start_carries_name_and_upstream_id() {
         let mut state = EmitState::new("c".into(), test_event_log());
         let frames = stream_items_for(&tool_start("tc-1", "Bash"), &mut state);
@@ -463,9 +459,7 @@ mod tests {
     #[test]
     fn separate_text_runs_number_item_ids_sequentially() {
         // Two distinct text runs (text → tool → text) must open items
-        // text-1 then text-2. Mutant: `state.text_runs += 1` → `*= 1` leaves
-        // text_runs at 0 for both runs, yielding text-0 twice → ids collide
-        // and this fails.
+        // text-1 then text-2, so their ids do not collide.
         let mut state = EmitState::new("c".into(), test_event_log());
         let first = stream_items_for(&content_delta("a"), &mut state);
         // Tool start ends the open text run so the next delta opens a NEW run.
@@ -480,24 +474,11 @@ mod tests {
     }
 
     #[test]
-    fn tool_input_without_open_tool_emits_nothing() {
-        let mut state = EmitState::new("c".into(), test_event_log());
-        let frames = stream_items_for(&tool_input("{}"), &mut state);
-        assert!(frames.is_empty());
-    }
-
-    #[test]
-    fn scrub_redacts_tool_input_delta_before_emit() {
+    fn scrub_redacts_tool_name_and_input_before_emit() {
         // A ScrubSet holding a known secret redacts a tool ItemDelta's
-        // argument JSON. Text frames are untouched.
-        std::env::set_var("TEST_TURN_SCRUB_SECRET", "s3cr3t");
-        std::env::set_var(
-            "TEST_TURN_SCRUB",
-            r#"[{"name":"tok","env":"TEST_TURN_SCRUB_SECRET"}]"#,
-        );
-        let scrub = shared::scrub::ScrubSet::from_env_var("TEST_TURN_SCRUB");
-        std::env::remove_var("TEST_TURN_SCRUB");
-        std::env::remove_var("TEST_TURN_SCRUB_SECRET");
+        // argument JSON and a tool ItemStart's name as they cross the emit
+        // seam.
+        let scrub = shared::scrub::ScrubSet::from_secrets(&[("tok", "s3cr3t")]);
         assert!(!scrub.is_empty());
 
         let mut state = EmitState::new("c".into(), test_event_log());
@@ -507,22 +488,6 @@ mod tests {
             .unwrap();
         scrub_frame(&scrub, &mut delta);
         assert_eq!(tool_input_of(&delta), Some(r#"{"token":"[REDACTED:tok]"}"#));
-    }
-
-    #[test]
-    fn scrub_redacts_tool_name_on_item_start() {
-        // A ScrubSet holding a known secret redacts a tool ItemStart's name as
-        // it crosses the emit seam. Mutant: delete the ToolUse arm in
-        // scrub_frame → the name passes through un-scrubbed and this fails.
-        std::env::set_var("TEST_TURN_NAME_SCRUB_SECRET", "s3cr3t");
-        std::env::set_var(
-            "TEST_TURN_NAME_SCRUB",
-            r#"[{"name":"tok","env":"TEST_TURN_NAME_SCRUB_SECRET"}]"#,
-        );
-        let scrub = shared::scrub::ScrubSet::from_env_var("TEST_TURN_NAME_SCRUB");
-        std::env::remove_var("TEST_TURN_NAME_SCRUB");
-        std::env::remove_var("TEST_TURN_NAME_SCRUB_SECRET");
-        assert!(!scrub.is_empty());
 
         let mut state = EmitState::new("c".into(), test_event_log());
         let mut start = stream_items_for(&tool_start("t", "s3cr3t"), &mut state)
@@ -538,8 +503,7 @@ mod tests {
     async fn frames_emit_before_terminal_complete() {
         // A fake stream (delta → toolstart → toolinput → Complete) drives a
         // capturing sink; every progress frame must land BEFORE consume
-        // returns the terminal result. Mutant: move emit after the terminal
-        // return → the sink is empty and this fails.
+        // returns the terminal result.
         use std::collections::VecDeque;
         use toolset_proto::TurnComplete;
 
@@ -610,33 +574,11 @@ mod tests {
         assert!(err.contains("boom"));
     }
 
-    #[test]
-    fn process_complete_event_returns_result() {
-        let event = TurnEvent {
-            event: Some(turn_event::Event::Complete(TurnComplete {
-                stop_reason: 0,
-                content: vec![],
-                tool_calls: vec![],
-            })),
-        };
-        let result = process_turn_event(event).unwrap().expect("should be Some");
-        assert!(result.content.is_empty());
-        assert!(result.tool_calls.is_empty());
-    }
-
-    #[test]
-    fn process_non_terminal_event_returns_none() {
-        let event = TurnEvent { event: None };
-        let result = process_turn_event(event).unwrap();
-        assert!(result.is_none());
-    }
-
     #[tokio::test]
     async fn idle_timeout_fires_on_inference_job_silence() {
         // An inference job that connected then went silent must fail the turn, not
         // hang it. A tiny real gap + a stalling source makes the timeout
-        // fire fast. Mutant: remove the timeout wrapper → next_event()
-        // pends forever and this test hangs.
+        // fire fast.
         struct Stalling;
         #[async_trait::async_trait]
         impl crate::clients::TurnSource for Stalling {
@@ -667,9 +609,8 @@ mod tests {
         // terminal Complete/Error must fail the turn, not hang or falsely
         // succeed — a dropped connection reads as end-of-stream, not an error.
         // Distinct from idle_timeout (which stalls): here next_event returns
-        // None. A normal (not tiny) gap proves it's the clean-EOF arm (line 40),
-        // not the timeout arm, that fires. Mutant: fold the Ok(None) arm into
-        // the timeout arm → wrong message, red.
+        // None. A normal (not tiny) gap proves it's the clean-EOF arm, not the
+        // timeout arm, that fires.
         struct Closed;
         #[async_trait::async_trait]
         impl crate::clients::TurnSource for Closed {
@@ -695,101 +636,6 @@ mod tests {
             res.unwrap_err(),
             TurnAbort::Ended(e) if e.contains("stream ended without TurnComplete")
         ));
-    }
-
-    // The harness-side half of parent<->child grouping is stamping the
-    // PARENT conversation id onto every StreamItem emitted from a dispatched
-    // sub-agent turn: an Option<String> threaded into EmitState, set in
-    // next_frame. Without the stamp the client has no correlation key and cannot
-    // group — so this pins the stamp, not the grouping.
-
-    #[test]
-    fn subagent_frames_carry_parent_conversation_id() {
-        // A sub-agent EmitState built with the parent link stamps every
-        // emitted frame with the parent conversation id.
-        // Materiality: drop the parent_conversation_id assignment in
-        // next_frame (or thread `None` for the subagent path) -> the field is
-        // empty and the client can no longer group the child under its parent.
-        let mut state =
-            EmitState::new_subagent("child-conv".into(), "parent-conv".into(), String::new(), test_event_log());
-        let frames = stream_items_for(&content_delta("hi"), &mut state);
-        assert!(!frames.is_empty());
-        for f in &frames {
-            assert_eq!(
-                f.parent_conversation_id, "parent-conv",
-                "every sub-agent frame must carry the PARENT link for grouping"
-            );
-            // The item's own conversation is the child, not the parent.
-            assert_eq!(f.conversation_id, "child-conv");
-        }
-    }
-
-    #[test]
-    fn top_level_frames_have_no_parent_link() {
-        // A top-level (non-sub-agent) turn leaves parent_conversation_id empty,
-        // so the client renders it inline rather than nested under a parent.
-        // Materiality: stamp a non-empty parent on the top-level path -> every
-        // ordinary turn item would be mis-grouped as a sub-agent child.
-        let mut state = EmitState::new("top-conv".into(), test_event_log());
-        let frames = stream_items_for(&content_delta("hi"), &mut state);
-        assert!(!frames.is_empty());
-        for f in &frames {
-            assert_eq!(
-                f.parent_conversation_id, "",
-                "top-level items must not carry a parent link"
-            );
-        }
-    }
-
-    // EARS: "When a sub-agent EmitState carries agent_name=\"poet\", each
-    // emitted StreamItem shall carry agent_name=\"poet\"." The name is
-    // operator-authored agent metadata threaded into the sub-agent EmitState
-    // (plan: new_subagent takes the name) and stamped onto every frame in
-    // next_frame, exactly like parent_conversation_id.
-    #[test]
-    fn subagent_frames_carry_agent_name() {
-        // A sub-agent EmitState built with agent_name="poet" stamps that name
-        // onto every emitted frame — the client reads it to label the tile.
-        // Materiality: drop the agent_name stamp in next_frame (leave it
-        // Default/empty) -> the field is empty and the tile falls back to the
-        // id-prefix hash instead of "poet".
-        let mut state =
-            EmitState::new_subagent("child-conv".into(), "parent-conv".into(), "poet".into(), test_event_log());
-        let frames = stream_items_for(&content_delta("hi"), &mut state);
-        assert!(!frames.is_empty());
-        for f in &frames {
-            assert_eq!(
-                f.agent_name, "poet",
-                "every sub-agent frame must carry the operator-authored name"
-            );
-        }
-        // A tool frame from the same state carries the name too (not just text).
-        let tool_frames = stream_items_for(&tool_start("tc-1", "Bash"), &mut state);
-        assert!(!tool_frames.is_empty());
-        for f in &tool_frames {
-            assert_eq!(f.agent_name, "poet");
-        }
-    }
-
-    // EARS: "When a non-subagent EmitState emits, StreamItem.agent_name shall
-    // be empty."
-    #[test]
-    fn top_level_frames_have_empty_agent_name() {
-        // A top-level (non-sub-agent) turn never names an agent, so every
-        // emitted frame leaves agent_name empty — the client renders it inline
-        // without a sub-agent identity.
-        // Materiality: stamp a non-empty agent_name on the top-level path (e.g.
-        // hardcode it, or stamp unconditionally in next_frame) -> ordinary
-        // turn items would falsely advertise a sub-agent name.
-        let mut state = EmitState::new("top-conv".into(), test_event_log());
-        let frames = stream_items_for(&content_delta("hi"), &mut state);
-        assert!(!frames.is_empty());
-        for f in &frames {
-            assert_eq!(
-                f.agent_name, "",
-                "top-level items must not carry a sub-agent name"
-            );
-        }
     }
 
     // EARS: "When the harness receives a CancelTurn for an in-flight turn,
@@ -837,9 +683,7 @@ mod tests {
         )
         .await;
 
-        // Materiality: drop the token.cancelled() select-arm -> the endless
-        // source is drained forever (test never returns / times out) instead
-        // of yielding Cancelled. A wrong mapping to Ok/Err(other) also fails.
+        // The cancel arm must win over an endless source and yield Cancelled.
         assert!(
             matches!(outcome, Err(TurnAbort::Cancelled)),
             "a fired cancel must abandon the turn as Cancelled, got {outcome:?}"

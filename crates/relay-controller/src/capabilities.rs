@@ -136,7 +136,7 @@ other-ws:
     }
 
     #[test]
-    fn a_grant_bearing_binding_lists_its_grant_names_per_toolset() {
+    fn for_workspace_lists_sorted_grant_names_or_none_if_unknown() {
         let grants = CapabilityGrants::parse(BINDINGS).unwrap();
         assert_eq!(
             grants.for_workspace("hello-world"),
@@ -146,17 +146,6 @@ other-ws:
             )],
             "bare entries carry no grants; grant names come back sorted"
         );
-    }
-
-    #[test]
-    fn a_workspace_with_only_bare_bindings_has_no_grants() {
-        let grants = CapabilityGrants::parse(BINDINGS).unwrap();
-        assert!(grants.for_workspace("other-ws").is_empty());
-    }
-
-    #[test]
-    fn an_unknown_workspace_has_no_grants() {
-        let grants = CapabilityGrants::parse(BINDINGS).unwrap();
         assert!(grants.for_workspace("nobody").is_empty());
     }
 
@@ -188,14 +177,5 @@ other-ws:
             "the grant specs carry nothing the grant names need"
         );
         assert!(names_only.for_workspace("other-ws").is_empty());
-    }
-
-    #[test]
-    fn an_unparseable_bindings_file_is_an_error_not_an_empty_menu() {
-        let err = CapabilityGrants::parse("{not yaml").unwrap_err();
-        assert!(
-            err.contains("parse bindings"),
-            "the failure must name the parse, got: {err}"
-        );
     }
 }

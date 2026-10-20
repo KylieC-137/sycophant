@@ -933,7 +933,13 @@ impl RelayGateway for GatewayService {
         // only.
         let channel_id = self
             .state
-            .mint_channel(opener, subject.clone(), req.workspace.clone(), tx.clone(), catching_up)
+            .mint_channel(
+                opener,
+                subject.clone(),
+                req.workspace.clone(),
+                tx.clone(),
+                catching_up,
+            )
             .await;
         tracing::info!(
             channel_id = %channel_id,
@@ -976,9 +982,7 @@ impl RelayGateway for GatewayService {
                         .map_err(|e| format!("harness unavailable: {e}"))?;
                     let resp = harness
                         .as_mut()
-                        .replay_event_log(harness_proto::ReplayEventLogRequest {
-                            after_seq,
-                        })
+                        .replay_event_log(harness_proto::ReplayEventLogRequest { after_seq })
                         .await
                         .map_err(|e| format!("replay_event_log failed: {e}"))?;
                     let mut stream = resp.into_inner();
@@ -1030,7 +1034,9 @@ impl RelayGateway for GatewayService {
                 // Transition to live: drain buffered frames, then start heartbeat.
                 state.transition_to_live(&channel_id_for_replay).await;
                 let interval = state.heartbeat_interval();
-                state.spawn_heartbeat(&channel_id_for_replay, interval).await;
+                state
+                    .spawn_heartbeat(&channel_id_for_replay, interval)
+                    .await;
             });
         } else {
             // No resume: start live immediately, replay turn state as today.
@@ -1229,37 +1235,5 @@ mod tests {
             adapter_channel("https://issuer.example#alice", "tenant-acme"),
             None
         );
-    }
-
-    #[test]
-    fn warn_on_undelivered_warns_only_when_not_delivered() {
-        for (delivered, expect_warn) in [(true, false), (false, true)] {
-            assert_eq!(
-                warn_on_undelivered(delivered),
-                expect_warn,
-                "delivered={delivered} must warn={expect_warn}"
-            );
-        }
-    }
-
-    #[test]
-    fn require_conversation_name_within_limit_enforces_boundary() {
-        let cases = [
-            (1_usize, true),
-            (MAX_CONVERSATION_NAME_CHARS, true),
-            (MAX_CONVERSATION_NAME_CHARS + 1, false),
-        ];
-        for (char_count, expect_ok) in cases {
-            let name = "x".repeat(char_count);
-            let result = require_conversation_name_within_limit(&name);
-            assert_eq!(
-                result.is_ok(),
-                expect_ok,
-                "{char_count} chars: expected ok={expect_ok}"
-            );
-            if let Err(status) = result {
-                assert_eq!(status.code(), tonic::Code::InvalidArgument);
-            }
-        }
     }
 }

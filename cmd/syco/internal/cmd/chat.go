@@ -43,9 +43,8 @@ func newChatCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "chat [message]",
 		Short: "Send a message and stream the reply",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			message := args[0]
 			cfgDir := config.ConfigDir()
 			profileFlag, _ := cmd.Flags().GetString("profile")
 			p, err := config.LoadProfile(cfgDir, profileFlag, "")
@@ -58,9 +57,32 @@ func newChatCmd() *cobra.Command {
 				return err
 			}
 
+			// Parse grants (shared by both paths).
+			var grantSelections []*commonpb.GrantSelection
+			for _, g := range grants {
+				toolset, grant, err := config.ParseGrant(g)
+				if err != nil {
+					return err
+				}
+				grantSelections = append(grantSelections, &commonpb.GrantSelection{
+					Toolset: toolset,
+					Grant:   grant,
+				})
+			}
+
+			// Interactive TUI mode when no message argument is given.
+			// The TUI handles workspace selection if none is set.
+			if len(args) == 0 {
+				return runTUI(cfgDir, p, token, continueFlag, resumeID, grantSelections)
+			}
+
+			// One-shot mode requires a workspace.
 			if p.Workspace == "" {
 				return fmt.Errorf("workspace is required; set it with `syco session workspace <ws>`")
 			}
+
+			// One-shot mode.
+			message := args[0]
 
 			// Resolve conversation ID
 			var conversationID string
@@ -72,19 +94,6 @@ func newChatCmd() *cobra.Command {
 				conversationID = entry.ConversationID
 			} else if resumeID != "" {
 				conversationID = resumeID
-			}
-
-			// Parse grants
-			var grantSelections []*commonpb.GrantSelection
-			for _, g := range grants {
-				toolset, grant, err := config.ParseGrant(g)
-				if err != nil {
-					return err
-				}
-				grantSelections = append(grantSelections, &commonpb.GrantSelection{
-					Toolset: toolset,
-					Grant:   grant,
-				})
 			}
 
 			ctx := grpcclient.WithToken(context.Background(), token)

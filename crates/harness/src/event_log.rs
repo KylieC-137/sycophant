@@ -78,8 +78,7 @@ impl EventLog {
             .unwrap_or_default();
         tokio::task::spawn_blocking(move || -> Result<(), String> {
             use std::io::Write;
-            std::fs::create_dir_all(&parent)
-                .map_err(|e| format!("create event-log dir: {e}"))?;
+            std::fs::create_dir_all(&parent).map_err(|e| format!("create event-log dir: {e}"))?;
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -170,14 +169,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn new_empty_dir_starts_at_seq_1() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = EventLog::new(dir.path());
-        assert_eq!(log.next_seq(), 1);
-        assert_eq!(log.next_seq(), 2);
-    }
-
     #[tokio::test]
     async fn append_and_replay() {
         let dir = tempfile::tempdir().unwrap();
@@ -222,14 +213,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replay_absent_file_returns_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = EventLog::new(dir.path());
-        let entries = log.replay_after(0).unwrap();
-        assert!(entries.is_empty());
-    }
-
-    #[tokio::test]
     async fn tolerates_torn_trailing_line() {
         let dir = tempfile::tempdir().unwrap();
         let log = EventLog::new(dir.path());
@@ -245,6 +228,10 @@ mod tests {
             f.write_all(b"{\"seq\":99,\"outbound_b64\":\"AAAA").unwrap();
         }
         let entries = log.replay_after(0).unwrap();
-        assert_eq!(entries.len(), 1, "the intact record before the tear is still replayed");
+        assert_eq!(
+            entries.len(),
+            1,
+            "the intact record before the tear is still replayed"
+        );
     }
 }

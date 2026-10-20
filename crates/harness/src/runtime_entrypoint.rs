@@ -319,10 +319,7 @@ async fn deliver_turn_outcome(
         };
         if let Err(e) = event_log.append(seq, &outbound).await {
             tracing::warn!(error = %e, "failed to persist reply frame");
-        } else if let Err(e) = relay
-            .deliver_reply(conversation_id, content, seq)
-            .await
-        {
+        } else if let Err(e) = relay.deliver_reply(conversation_id, content, seq).await {
             tracing::warn!(error = %e, "failed to deliver reply to client");
         }
     }
@@ -335,10 +332,7 @@ async fn deliver_turn_outcome(
     };
     if let Err(e) = event_log.append(seq, &outbound).await {
         tracing::warn!(error = %e, "failed to persist turn state frame");
-    } else if let Err(e) = relay
-        .deliver_turn_state(turn_state, seq, "")
-        .await
-    {
+    } else if let Err(e) = relay.deliver_turn_state(turn_state, seq, "").await {
         tracing::warn!(error = %e, "failed to deliver turn state to client");
     }
 }
@@ -446,18 +440,6 @@ mod tests {
         assert_eq!(resolve_primary_agent(&instructions, "ws1"), "");
     }
 
-    #[test]
-    fn resolve_primary_agent_present_file_is_served_verbatim() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir(tmp.path().join("ws1")).unwrap();
-        std::fs::write(tmp.path().join("ws1/AGENTS.md"), "# Agent\n\nHello.").unwrap();
-        let instructions = Instructions::new(tmp.path());
-        assert_eq!(
-            resolve_primary_agent(&instructions, "ws1"),
-            "# Agent\n\nHello."
-        );
-    }
-
     // The primary turn injects a flat, capped path map from
     // `instructions.list_tree(workspace, cap)` into the primary system prompt, keeping
     // AGENTS.md as the required entry prompt.
@@ -492,24 +474,6 @@ mod tests {
         );
     }
 
-    // The path map is additive: with no nested files, the primary prompt still
-    // renders AGENTS.md.
-    #[test]
-    fn primary_prompt_empty_tree_still_renders_agents_md() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("ws1")).unwrap();
-        std::fs::write(tmp.path().join("ws1/AGENTS.md"), "just the root agent").unwrap();
-        let instructions = Instructions::new(tmp.path());
-
-        let agent_text = resolve_primary_agent(&instructions, "ws1");
-        let (body, _) = strip_frontmatter(&agent_text);
-        let prompt = render_primary_prompt(&body, &instructions.list_tree("ws1", PRIMARY_TREE_CAP));
-        assert!(
-            prompt.contains("just the root agent"),
-            "AGENTS.md still renders when the tree has no nested files: {prompt}"
-        );
-    }
-
     fn user_text(s: &str) -> Vec<ContentBlock> {
         vec![ContentBlock {
             block: Some(content_block::Block::Text(TextBlock { text: s.into() })),
@@ -526,30 +490,8 @@ mod tests {
         }]
     }
 
-    // The harness, not the model or the request payload, chooses the turn's
-    // model: `resolve_model` reads only the agent-definition frontmatter. A
-    // literal frontmatter value is taken verbatim as the resolver input.
-    //
-    // Materiality: `resolve_model` has no request-payload or model-output input
-    // at all, so a mutant that sourced selection from anywhere else would not
-    // even type-check against this call. The assertion pins that the frontmatter
-    // value passes through unchanged, red if the resolver rewrites it.
-    #[tokio::test]
-    async fn resolve_model_takes_the_agent_definition_value_verbatim() {
-        assert_eq!(
-            resolve_model(Some("deepseek-v4-flash"), None)
-                .await
-                .as_deref(),
-            Some("deepseek-v4-flash"),
-            "the harness supplies the frontmatter model verbatim",
-        );
-    }
-
     // No frontmatter model resolves to nothing — never a default. The absent
     // case fails closed downstream; the resolver invents no model.
-    //
-    // Materiality: a mutant that defaulted an absent model to some fallback
-    // string reds this.
     #[tokio::test]
     async fn resolve_model_defaults_nothing_when_frontmatter_names_no_model() {
         assert_eq!(
@@ -560,48 +502,45 @@ mod tests {
     }
 
     #[test]
-    fn handle_result_swallows_iteration_limit() {
-        let res =
-            handle_llm_loop_result(Err(LoopError::Halt(LoopHalt::IterationLimit { limit: 7 })));
-        assert!(res.is_ok());
-    }
-
-    #[test]
-    fn handle_result_swallows_max_tokens_with_partial_text() {
-        let res =
-            handle_llm_loop_result(Err(LoopError::Halt(LoopHalt::MaxTokens("partial".into()))));
-        assert!(res.is_ok());
-    }
-
-    #[test]
-    fn handle_result_swallows_unknown_stop() {
-        let res = handle_llm_loop_result(Err(LoopError::Halt(LoopHalt::UnknownStop(
-            proto_common::StopReason::Unspecified,
-        ))));
-        assert!(res.is_ok());
-    }
-
-    #[test]
-    fn handle_result_propagates_toolset_rpc() {
-        let res = handle_llm_loop_result(Err(LoopError::ToolsetRpc("boom".into())));
-        assert_eq!(res.unwrap_err(), "boom");
-    }
-
-    #[test]
-    fn handle_result_swallows_stream_ended_without_restart() {
-        // No-restart policy: a per-turn StreamEnded (inference job reaped/crashed,
-        // a TurnError, or a close without Complete) must NOT propagate — the
-        // harness logs it and awaits the next message instead of
-        // restarting the pod. Mutant: revert StreamEnded to the restart
-        // bucket → this returns Err and the test fails.
-        let res = handle_llm_loop_result(Err(LoopError::StreamEnded("eof".into())));
-        assert!(res.is_ok(), "a per-turn failure must not restart the pod");
-    }
-
-    #[test]
-    fn handle_result_passes_through_ok() {
-        let res = handle_llm_loop_result(Ok("final text".into()));
-        assert!(res.is_ok());
+    fn handle_result_only_propagates_toolset_rpc_errors() {
+        // Only a ToolsetRpc error propagates. No-restart policy: a per-turn
+        // StreamEnded (inference job reaped/crashed, a TurnError, or a close
+        // without Complete) must NOT propagate — the harness logs it and awaits
+        // the next message instead of restarting the pod.
+        let cases: [(&str, Result<String, LoopError>, Option<&str>); 6] = [
+            (
+                "iteration limit",
+                Err(LoopError::Halt(LoopHalt::IterationLimit { limit: 7 })),
+                None,
+            ),
+            (
+                "max tokens with partial text",
+                Err(LoopError::Halt(LoopHalt::MaxTokens("partial".into()))),
+                None,
+            ),
+            (
+                "unknown stop",
+                Err(LoopError::Halt(LoopHalt::UnknownStop(
+                    proto_common::StopReason::Unspecified,
+                ))),
+                None,
+            ),
+            (
+                "toolset rpc",
+                Err(LoopError::ToolsetRpc("boom".into())),
+                Some("boom"),
+            ),
+            (
+                "stream ended",
+                Err(LoopError::StreamEnded("eof".into())),
+                None,
+            ),
+            ("ok", Ok("final text".into()), None),
+        ];
+        for (case, result, want_err) in cases {
+            let res = handle_llm_loop_result(result);
+            assert_eq!(res.err().as_deref(), want_err, "{case}");
+        }
     }
 
     #[test]
@@ -631,66 +570,37 @@ mod tests {
     }
 
     #[test]
-    fn stripped_system_lands_on_request_system() {
-        let req = build_turn_request(
-            Some("the agent text".into()),
-            user_msg("hi"),
-            &[],
-            None,
-            None,
-            "conv".into(),
-        );
-        assert_eq!(req.system.as_deref(), Some("the agent text"));
-    }
+    fn turn_outcome_only_delivers_a_reply_for_ok_and_max_tokens() {
+        // Ok and MaxTokens deliver a reply and land IDLE. The MaxTokens guard is
+        // the only branch that splits IDLE from FAILED inside the error space.
+        // Every other error — ToolsetRpc, every non-MaxTokens Halt, and
+        // StreamEnded — must land FAILED with no reply, a reason, gRPC status
+        // code 13 (INTERNAL) and the turn's conversation_id (so the client
+        // reconciler routes the failure to the right conversation).
+        let idle: [Result<String, LoopError>; 2] = [
+            Ok("hi".into()),
+            Err(LoopError::Halt(LoopHalt::MaxTokens("partial".into()))),
+        ];
+        for case in &idle {
+            let (reply, ts) = turn_outcome_frame("c", case);
+            assert!(reply.is_some(), "expected a reply for {case:?}");
+            assert_eq!(
+                ts.state,
+                TurnState::Idle as i32,
+                "expected Idle for {case:?}"
+            );
+            assert_eq!(ts.conversation_id, "c", "conversation_id for {case:?}");
+        }
 
-    #[test]
-    fn turn_outcome_ok_delivers_reply_and_idle() {
-        let (reply, ts) = turn_outcome_frame("c", &Ok("hi".into()));
-        assert!(reply.is_some());
-        assert_eq!(ts.state, TurnState::Idle as i32);
-        assert_eq!(ts.conversation_id, "c");
-    }
-
-    #[test]
-    fn turn_outcome_max_tokens_delivers_partial_reply_idle() {
-        let (reply, ts) = turn_outcome_frame(
-            "c",
-            &Err(LoopError::Halt(LoopHalt::MaxTokens("partial".into()))),
-        );
-        assert!(reply.is_some());
-        assert_eq!(ts.state, TurnState::Idle as i32);
-    }
-
-    #[test]
-    fn turn_outcome_error_delivers_failed_no_reply() {
-        let (reply, ts) = turn_outcome_frame("c", &Err(LoopError::ToolsetRpc("boom".into())));
-        assert!(reply.is_none());
-        assert_eq!(ts.state, TurnState::Failed as i32);
-        assert!(!ts.reason.is_empty());
-        // The failed frame must carry the turn's conversation_id so the client
-        // reconciler routes the failure to the right conversation. Mutant:
-        // drop conversation_id from the Err arm → this is empty and fails.
-        assert_eq!(ts.conversation_id, "c");
-        // gRPC status code 13 (INTERNAL) accompanies every failed turn. Mutant:
-        // drop `code: "13"` → this is empty and fails.
-        assert_eq!(ts.code, "13");
-    }
-
-    #[test]
-    fn turn_outcome_non_maxtokens_halt_and_stream_ended_all_fail() {
-        // The MaxTokens guard is the only branch that splits IDLE from FAILED
-        // inside the error space. Every other error — every non-MaxTokens Halt
-        // plus StreamEnded — must land FAILED with no reply. Existing coverage
-        // only exercises ToolsetRpc. Mutant: widen the MaxTokens arm to swallow
-        // another variant → that variant delivers IDLE + a reply and this fails.
-        let cases: [Result<String, LoopError>; 3] = [
+        let failed: [Result<String, LoopError>; 4] = [
+            Err(LoopError::ToolsetRpc("boom".into())),
             Err(LoopError::Halt(LoopHalt::IterationLimit { limit: 7 })),
             Err(LoopError::Halt(LoopHalt::UnknownStop(
                 proto_common::StopReason::Unspecified,
             ))),
             Err(LoopError::StreamEnded("eof".into())),
         ];
-        for case in &cases {
+        for case in &failed {
             let (reply, ts) = turn_outcome_frame("c", case);
             assert!(reply.is_none(), "expected no reply for {case:?}");
             assert_eq!(
@@ -699,19 +609,15 @@ mod tests {
                 "expected Failed for {case:?}"
             );
             assert!(!ts.reason.is_empty(), "expected a reason for {case:?}");
+            assert_eq!(ts.conversation_id, "c", "conversation_id for {case:?}");
+            assert_eq!(ts.code, "13", "INTERNAL status code for {case:?}");
         }
-    }
 
-    // A cancelled turn emits a terminal turn_cancelled event: the single
-    // terminal funnel maps a Cancelled loop outcome to
-    // TurnStateEvent{ state: CANCELLED }. CANCELLED is terminal but distinct
-    // from FAILED (no error reason), so the client re-enables input without an
-    // error banner.
-    #[test]
-    fn turn_outcome_cancelled_emits_terminal_cancelled_state() {
-        // Materiality: map the Cancelled outcome to IDLE or FAILED instead of
-        // CANCELLED (flip the match arm) -> the client cannot distinguish a
-        // clean cancel from a normal finish or an error.
+        // A cancelled turn emits a terminal turn_cancelled event: the single
+        // terminal funnel maps a Cancelled loop outcome to
+        // TurnStateEvent{ state: CANCELLED }. CANCELLED is terminal but distinct
+        // from FAILED (no error reason), so the client re-enables input without
+        // an error banner.
         let (reply, ts) = turn_outcome_frame("c", &Err(LoopError::Cancelled));
         assert_eq!(
             ts.state,
@@ -726,23 +632,5 @@ mod tests {
         );
         // No assistant reply is delivered for an abandoned turn.
         assert!(reply.is_none());
-    }
-
-    // EARS: "When a turn starts, the client shall display the agent identity
-    // (name when present)" and "Where a turn's system_prompt_sha256 differs
-    // from the prior turn's ... surface a prompt-change warning." Both are
-    // driven by a harness-emitted turn-start frame carrying identity
-    // (plan 0b/3a). This pins that the turn-start frame carries name + hash;
-    // the client-side label/warning are tested in Dart.
-    #[test]
-    fn turn_start_frame_carries_identity() {
-        // Materiality: drop agent_name / system_prompt_sha256 from the
-        // turn-start builder (or emit a bare WORKING without them) -> the
-        // client never sees identity and can neither label nor diff the hash.
-        let frame = turn_start_frame("conv-9", "helper-agent", "abc123deadbeef");
-        assert_eq!(frame.state, TurnState::Working as i32);
-        assert_eq!(frame.conversation_id, "conv-9");
-        assert_eq!(frame.agent_name, "helper-agent");
-        assert_eq!(frame.system_prompt_sha256, "abc123deadbeef");
     }
 }

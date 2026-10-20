@@ -1,0 +1,16 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: command-vap-tenant-headscale-no-serverurl
+policies:
+- ../policy.yaml
+resources:
+- command.yaml
+results:
+- isValidatingAdmissionPolicy: true
+  kind: ConfigMap
+  policy: command-provision-tenant
+  resources:
+  - sycophant-system/provision-tenant
+  result: fail
+userinfo: ../operator.yaml

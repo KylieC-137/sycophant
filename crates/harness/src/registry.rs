@@ -332,7 +332,6 @@ mod tests {
 
     #[tokio::test]
     async fn mint_persist_failure_leaves_registry_empty() {
-        // Mutation target: insert into the registry before write_meta.
         let reg = failing_registry(FailureModes {
             write_meta: true,
             ..Default::default()
@@ -351,11 +350,6 @@ mod tests {
     // `get_or_create_does_not_register_unknown_id`: a non-UUID id is no longer
     // quietly rebuilt-but-unregistered — get_or_create's own tightened check
     // rejects it outright, while a freshly minted (bare UUID) id still loads.
-    //
-    // Materiality: drop the UUID check in `get_or_create` and "never-minted"
-    // rebuilds an empty log and returns Ok -> `is_err()` reds. Regress `mint`
-    // to a non-bare id (e.g. a `<workspace>.<uuid>` prefix) and the parse +
-    // accept assertions red.
     //
     // Pins the reject-non-UUID behavior (first-party path segments only) AND that
     // the real mint->load flow the Flutter client depends on survives the
@@ -390,12 +384,6 @@ mod tests {
     // conv_id straight to `make_store` then a write, so it pins that the boundary
     // — not just `get_or_create` — refuses a non-first-party segment.
     //
-    // Materiality: skip the UUID check at the make_store boundary and join the
-    // raw string, and `set_name("../escape-marker-not-a-uuid", ..)` writes
-    // `root/escape-marker-not-a-uuid/meta.json` (`..` climbs out of the `default`
-    // workspace dir) and returns Ok -> both the `is_err` and the "no escape dir"
-    // assertions red.
-    //
     // Asserts validate-and-reject (Err, not a silently sanitized path) plus the
     // observable filesystem invariant "a rejected id never becomes a directory".
     #[tokio::test]
@@ -420,13 +408,8 @@ mod tests {
     // whose log it lands in, so the on-disk record is self-describing (resolution,
     // or any audit, can read the owning conversation off the record itself).
     //
-    // Materiality: the id is threaded from `execution_log_for` ->
-    // `LocalFsExecutionLog::new` -> `frame_to_record`, so the persisted line
-    // carries it. A mutant that stamps an empty string (`conversation_id:
-    // String::new()`) or the wrong id (e.g. reusing `call_id`) reds the
-    // exact-value assert. The test drives the production seam that binds a
-    // conversation id to its writer (`execution_log_for`), never a direct `::new`
-    // call, so it reds semantically (wrong on-disk content), not structurally.
+    // The test drives the production seam that binds a conversation id to its
+    // writer (`execution_log_for`), never a direct `::new` call.
     #[tokio::test]
     async fn execution_record_is_stamped_with_its_conversation_id() {
         use proto_common::tool_result_frame::Frame;
@@ -570,59 +553,27 @@ mod tests {
     // consume_turn_stream_cancellable (turn.rs) pins the abandon half.
 
     #[tokio::test]
-    async fn cancel_fires_the_in_flight_turns_token() {
-        // A registered in-flight turn's token is triggered by cancel(), and
-        // cancel reports that a turn WAS in flight.
-        // Materiality: no-op the token.cancel() in the handler (or fire a
-        // fresh token instead of the registered one) -> consume_turn_stream_cancellable's
-        // cancel arm never trips and the turn runs to completion.
+    async fn cancel_reports_true_only_for_a_turn_in_flight_and_fires_its_token() {
+        // No turn registered -> cancel reports false (CancelTurnResponse
+        // { cancelled: false }); nothing to abandon.
         let (reg, _root) = local_registry();
         let id = reg.mint("test-owner").await.unwrap();
+        assert!(
+            !reg.cancel(&id).await,
+            "an idle conversation reports no turn"
+        );
+
+        // A registered in-flight turn's token is triggered by cancel(), and
+        // cancel reports that a turn WAS in flight.
         let token = reg.register_turn(&id).await;
         assert!(!token.is_cancelled());
 
-        let was_in_flight = reg.cancel(&id).await;
-        assert!(was_in_flight, "an in-flight turn is reported cancelled");
-        assert!(token.is_cancelled(), "the in-flight turn's token must fire");
-    }
-
-    #[tokio::test]
-    async fn cancel_of_idle_conversation_reports_no_turn() {
-        // No turn registered -> cancel reports false (CancelTurnResponse
-        // { cancelled: false }); nothing to abandon.
-        // Materiality: return true unconditionally -> the client is told a
-        // turn was cancelled when none was running.
-        let (reg, _root) = local_registry();
-        let id = reg.mint("test-owner").await.unwrap();
-        let was_in_flight = reg.cancel(&id).await;
-        assert!(!was_in_flight);
-    }
-
-    // Cancelling a turn more than once is a safe no-op: no panic and no
-    // duplicate terminal emission.
-    #[tokio::test]
-    async fn double_cancel_of_in_flight_turn_is_a_safe_no_op() {
-        // Cancel an in-flight turn, then cancel the SAME conversation again.
-        // The first cancel reports true and fires the token; the second must
-        // NOT report another in-flight cancel (it would be a duplicate terminal
-        // emission downstream) and must not panic. The shared token stays
-        // cancelled throughout.
-        //
-        // Materiality: make `cancel` re-insert the token, fire without removing,
-        // or otherwise leave the id registered after the first call -> the
-        // second `cancel` returns true, telling the caller a second turn was
-        // cancelled and driving a duplicate terminal Cancelled emission. That
-        // flips the `assert!(!second)` below to red. (A double-fire panic in a
-        // non-idempotent token would also red by crashing the test.)
-        let (reg, _root) = local_registry();
-        let id = reg.mint("test-owner").await.unwrap();
-        let token = reg.register_turn(&id).await;
-
         let first = reg.cancel(&id).await;
-        assert!(first, "first cancel of an in-flight turn reports true");
-        assert!(token.is_cancelled(), "first cancel fires the token");
+        assert!(first, "an in-flight turn is reported cancelled");
+        assert!(token.is_cancelled(), "the in-flight turn's token must fire");
 
-        // The second cancel is the load-bearing case: it must be a no-op.
+        // Cancelling a turn more than once is a safe no-op: no panic and no
+        // duplicate terminal emission. The shared token stays cancelled.
         let second = reg.cancel(&id).await;
         assert!(
             !second,

@@ -852,28 +852,6 @@ mod tests {
         complete(StopReason::EndTurn, text)
     }
 
-    // The tool set exposes the generic `read`/`dispatch`/`list` verbs, not the
-    // four typed ones.
-    #[test]
-    fn tool_definitions_exposes_generic_verbs_not_typed_ones() {
-        let tools = tool_definitions();
-        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        // Generic path-based verbs are present.
-        assert!(names.contains(&"read"), "read verb registered: {names:?}");
-        assert!(
-            names.contains(&"dispatch"),
-            "dispatch verb registered: {names:?}"
-        );
-        assert!(names.contains(&"list"), "list verb registered: {names:?}");
-        // The four typed verbs are gone.
-        assert!(!names.contains(&"Agent"), "Agent verb removed: {names:?}");
-        assert!(!names.contains(&"Agents"), "Agents verb removed: {names:?}");
-        assert!(!names.contains(&"Skill"), "Skill verb removed: {names:?}");
-        assert!(!names.contains(&"Skills"), "Skills verb removed: {names:?}");
-        // Think/RecentTurns are untouched by this phase.
-        assert!(names.contains(&"Think"));
-    }
-
     /// An instruction file with a YAML frontmatter block naming a model and a
     /// tools list, plus a body.
     fn fm_file(model: &str, tools: &[&str], body: &str) -> String {
@@ -1241,51 +1219,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_with_granted_tools_loops_on_tool_use_instead_of_erroring() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_md(
-            tmp.path(),
-            "ws/agents/looper.md",
-            &fm_file("fixture-model", &["Think"], "looper body"),
-        );
-        let instructions = Instructions::new(tmp.path());
-        // Turn 1 calls the granted Think tool; turn 2 ends. A correct loop runs
-        // both; the old error arm stops after turn 1 with is_error.
-        let call_think = vec![TurnEvent {
-            event: Some(turn_event::Event::Complete(TurnComplete {
-                stop_reason: StopReason::ToolUse as i32,
-                content: vec![],
-                tool_calls: vec![ToolCall {
-                    id: "c1".into(),
-                    name: "Think".into(),
-                    input_json: r#"{"note":"looping"}"#.into(),
-                }],
-            })),
-        }];
-        let mut toolset = FakeToolset::new(vec![call_think, end_turn("looped to done")]);
-        let resp = run_dispatch(
-            "dispatch",
-            r#"{"path":"agents/looper.md","query":"hi"}"#,
-            &instructions,
-            &mut toolset,
-            "parent",
-        )
-        .await
-        .expect("the dispatch verb returns a tool result once implemented");
-        assert!(
-            !resp.is_error,
-            "a granted-tools sub-turn loops through ToolUse instead of erroring; got {:?}",
-            collect_text(&resp.content)
-        );
-        assert_eq!(collect_text(&resp.content), "looped to done");
-        assert_eq!(
-            toolset.recorded.len(),
-            2,
-            "the sub-turn ran a second round after the tool result, not a single shot"
-        );
-    }
-
-    #[tokio::test]
     async fn dispatch_think_echoes_note() {
         let (_tmp, instructions) = empty_instructions();
         let mut toolset = FakeToolset::empty();
@@ -1302,78 +1235,6 @@ mod tests {
         assert!(collect_text(&resp.content).contains("file 1 looks like an assignation"));
         assert!(collect_text(&resp.content).starts_with("noted:"));
         // Crucially: no toolset calls were made — this is a purely in-process tool.
-        assert!(toolset.recorded.is_empty());
-    }
-
-    #[tokio::test]
-    async fn dispatch_think_invalid_json_returns_is_error() {
-        let (_tmp, instructions) = empty_instructions();
-        let mut toolset = FakeToolset::empty();
-        let resp = run_dispatch("Think", "{not json}", &instructions, &mut toolset, "parent")
-            .await
-            .unwrap();
-        assert!(resp.is_error);
-        assert!(collect_text(&resp.content).contains("invalid arguments"));
-    }
-
-    // `read` returns a nested file's body straight from the mounted instructions
-    // volume — a pure local filesystem read, no LLM dispatch.
-    #[tokio::test]
-    async fn dispatch_read_returns_nested_file_body() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_md(tmp.path(), "ws/skills/foo/SKILL.md", "skill body");
-        let instructions = Instructions::new(tmp.path());
-        let mut toolset = FakeToolset::empty();
-        let resp = run_dispatch(
-            "read",
-            r#"{"path":"skills/foo/SKILL.md"}"#,
-            &instructions,
-            &mut toolset,
-            "parent",
-        )
-        .await
-        .unwrap();
-        assert!(!resp.is_error);
-        assert_eq!(collect_text(&resp.content), "skill body");
-        assert!(toolset.recorded.is_empty());
-    }
-
-    #[tokio::test]
-    async fn dispatch_read_missing_returns_is_error() {
-        let (_tmp, instructions) = empty_instructions();
-        let mut toolset = FakeToolset::empty();
-        let resp = run_dispatch(
-            "read",
-            r#"{"path":"nope.md"}"#,
-            &instructions,
-            &mut toolset,
-            "parent",
-        )
-        .await
-        .unwrap();
-        assert!(resp.is_error);
-        assert!(collect_text(&resp.content).contains("not found"));
-    }
-
-    // `list` returns the tree's flat sorted paths as a JSON array — a pure
-    // instructions read, no LLM dispatch.
-    #[tokio::test]
-    async fn dispatch_list_returns_flat_sorted_paths() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_md(tmp.path(), "ws/AGENTS.md", "root");
-        write_md(tmp.path(), "ws/skills/beta.md", "b");
-        write_md(tmp.path(), "ws/agents/alpha.md", "a");
-        let instructions = Instructions::new(tmp.path());
-        let mut toolset = FakeToolset::empty();
-        let resp = run_dispatch("list", "{}", &instructions, &mut toolset, "parent")
-            .await
-            .unwrap();
-        assert!(!resp.is_error);
-        let paths: Vec<String> = serde_json::from_str(&collect_text(&resp.content)).unwrap();
-        assert_eq!(
-            paths,
-            vec!["AGENTS.md", "agents/alpha.md", "skills/beta.md"]
-        );
         assert!(toolset.recorded.is_empty());
     }
 

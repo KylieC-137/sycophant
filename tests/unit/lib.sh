@@ -2,6 +2,7 @@
 # tests/unit/lib.sh — shared boilerplate for unit acceptance scripts.
 # The caller must set HERE before sourcing.
 # shellcheck disable=SC2154  # HERE is set by the caller.
+# shellcheck disable=SC2034  # ROOT is used by the scripts that source this file.
 ROOT="$(cd "$HERE/../../.." && pwd)"
 readonly ROOT
 WORK="$(mktemp -d)"

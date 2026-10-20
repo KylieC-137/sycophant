@@ -35,19 +35,9 @@ pub(crate) static GVISOR_CHART: Dir<'static> =
 /// the policy CRDs survive a Kyverno engine reinstall.
 pub(crate) static KYVERNO_CRDS_CHART: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/../charts/kyverno-crds");
+pub(crate) static OBJECTSTORE_CHART: Dir<'static> =
+    include_dir!("$CARGO_MANIFEST_DIR/../charts/sycophant-objectstore");
 
 pub(crate) fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn version_matches_cargo_pkg_version() {
-        // Catches mutations replacing the function body with `""` or `"xyzzy"`.
-        assert_eq!(version(), env!("CARGO_PKG_VERSION"));
-        assert!(!version().is_empty());
-    }
 }

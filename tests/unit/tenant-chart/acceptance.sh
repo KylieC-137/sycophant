@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Offline: renders the tenant charts and checks what each one emits.
+# Offline: renders the tenant charts and the object store, and checks what each one emits.
 # No cluster.
 #
 #   bash tests/unit/tenant-chart/acceptance.sh
@@ -12,15 +12,16 @@ source "$HERE/../lib.sh"
 LOCAL='{"format":"openai","model":"liquid/lfm2.5-8b-a1b","server.image":"llama-server:local","server.weights":"ghcr.io/example/weights:1","server.weightsPath":"/weights/model.gguf"}'
 REMOTE='{"format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","image":"inference-runtime:local","secret":"llm-openrouter"}'
 TOOLSET='{"image":"ghcr.io/sycophant-md/git@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","keepalive":"false","tool.git-status.description":"Show the working tree status.","tool.git-commit.description":"Commit staged changes.","tool.git-commit.arg.message.type":"string","tool.git-commit.arg.message.required":"true","tool.git-commit.arg.message.env":"MESSAGE"}'
-WORKSPACE='{"toolsets":"git,ssh","models":"a,b","storage":"5Gi","grant.ssh.demo.secret":"demo-key","grant.ssh.demo.path":"/home/agent/.ssh/id","grant.ssh.demo.egress":"github.com"}'
-CHANNEL='{"kind":"app","loginServer":"http://headscale:8080","headscale.enabled":"true","headscale.serverUrl":"http://localhost:8080"}'
+WORKSPACE='{"toolsets":"git,ssh","models":"a,b","storage":"5Gi","grant.ssh.demo.secret":"demo-key","grant.ssh.demo.path":"/home/agent/.ssh/id","grant.ssh.demo.egress":"github.com","grant.ssh.local.secret":"local-key","grant.ssh.local.path":"/home/agent/.ssh/local","instructions-hash":"abababababababababababababababababababababababababababababababab"}'
+CHANNEL='{"kind":"app","loginServer":"http://headscale:8080"}'
 SUBJECT="https://issuer.example#alice"
 HASH="$(printf '%s' "$SUBJECT" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)"
 # Offline there is no cluster, so a listed workspace never exists: the user
 # chart must refuse it. The positive shape is rendered with no workspaces.
 USER_COMMAND="$(printf '{"user":"%s","handle.slack":"U12345"}' "$SUBJECT")"
 USER_MISSING_WS="$(printf '{"user":"%s","workspaces":"alpha,beta","handle.slack":"U12345"}' "$SUBJECT")"
-readonly LOCAL REMOTE TOOLSET WORKSPACE CHANNEL SUBJECT HASH USER_COMMAND USER_MISSING_WS
+REMOTE_IP='{"format":"openai","model":"m","baseUrl":"http://10.42.0.9:8080/v1","image":"inference-runtime:local"}'
+readonly LOCAL REMOTE REMOTE_IP TOOLSET WORKSPACE CHANNEL SUBJECT HASH USER_COMMAND USER_MISSING_WS
 
 render() {
   local out="$1" chart="$2"; shift 2
@@ -29,19 +30,29 @@ render() {
   echo $? > "$WORK/$out.rc"
 }
 render bare tenant --set namespace.create=false
+render ns tenant --show-only templates/tenant-ns.yaml
 render channel channel --set name=app --set-json "command=$CHANNEL"
-render headscale-off channel --set name=app --set-json 'command={"kind":"app","loginServer":"https://hs.example.test"}'
-render acme channel --set name=app --set-json "command=$(printf '%s' "$CHANNEL" \
-  | jq -c '. + {"headscale.acme.enabled":"true","headscale.acme.email":"op@example.com"}')"
-render no-magic channel --set name=app --set-json "command=$(printf '%s' "$CHANNEL" \
-  | jq -c '. + {"headscale.magicDns":"false"}')"
+render headscale-off tenant --set namespace.create=false
+render headscale tenant --set namespace.create=false --set headscale.enabled=true --set headscale.serverUrl=http://localhost:8080
+render acme tenant --set namespace.create=false --set headscale.enabled=true --set headscale.serverUrl=http://localhost:8080 --set headscale.acme.enabled=true --set headscale.acme.email=op@example.com
+render no-magic tenant --set namespace.create=false --set headscale.enabled=true --set headscale.serverUrl=http://localhost:8080 --set headscale.magicDns=false
 render local inference --set name=local --set-json "command=$LOCAL"
 render remote inference --set name=deepseek --set-json "command=$REMOTE"
+render remote-ip inference --set name=ipdirect --set-json "command=$REMOTE_IP"
 render toolset toolset --set name=git --set-json "command=$TOOLSET"
 render workspace workspace --set name=one --set-json "command=$WORKSPACE"
 render wsbase workspace --set name=one --set-json 'command={}'
 render user user --set-string name="$HASH" --set-json "command=$USER_COMMAND"
 render user-missing-ws user --set-string name="$HASH" --set-json "command=$USER_MISSING_WS"
+OIDC=(--set oidc.issuer=https://issuer.example.com --set oidc.clientId=sycophant-objectstore)
+render store objectstore
+render store-oidc objectstore "${OIDC[@]}" --set oidc.egress.external.port=443
+render store-oidc-again objectstore "${OIDC[@]}" --set oidc.egress.external.port=443
+render store-incluster objectstore --set oidc.issuer=http://oidc-fixture.sycophant-system.svc.cluster.local \
+  --set oidc.clientId=sycophant-objectstore --set oidc.egress.inCluster.port=8080 \
+  --set oidc.egress.inCluster.endpointSelector.matchLabels.app\\.kubernetes\\.io/name=oidc-fixture
+render store-emptylabels objectstore "${OIDC[@]}" --set oidc.egress.inCluster.port=8080 \
+  --set-json 'oidc.egress.inCluster.endpointSelector={"matchLabels":{}}'
 for m in override:'{"server.weightsPath":"/opt/m.gguf","server.contextBudget":"8192","server.slots":"1","server.outputCap":"512","server.threads":"2","server.memory":"4Gi","server.cpu":"2"}' \
          mount:'{"server.weightsDelivery":"mount"}' \
          tpl-copy:'{"server.chatTemplate":"TEMPLATE-BODY"}' \
@@ -52,7 +63,7 @@ for m in override:'{"server.weightsPath":"/opt/m.gguf","server.contextBudget":"8
 done
 
 python3 - "$WORK" "$REMOTE" "$TOOLSET" "$WORKSPACE" "$SUBJECT" "$HASH" <<'PY'
-import json, sys, yaml
+import json, os, re, sys, yaml
 
 work, remote, toolset, workspace = sys.argv[1], json.loads(sys.argv[2]), json.loads(sys.argv[3]), json.loads(sys.argv[4])
 subject, hash10 = sys.argv[5], sys.argv[6]
@@ -112,13 +123,6 @@ def argv(d):
 def pair(av, flag):
     return av[av.index(flag) + 1] if flag in av else None
 
-def channel_objects(docs):
-    return sorted(
-        f"{d['kind']}/{d['metadata']['name']}" for d in docs
-        if (d["metadata"].get("labels") or {}).get("app.kubernetes.io/component") in ("adapter", "headscale")
-        or d["metadata"]["name"].startswith(("adapter-", "headscale"))
-    )
-
 def model_cm(docs, key):
     for d in docs:
         labels = d["metadata"].get("labels") or {}
@@ -137,35 +141,12 @@ BASE = ["CiliumNetworkPolicy/default-deny-egress", "CiliumNetworkPolicy/install-
 check("base chart renders only the tenant's shared objects", "bare",
       lambda docs: None if objects(docs) == BASE else f"want {BASE}, got {objects(docs)}")
 
-check("channel renders the adapter and headscale", "channel",
-      lambda docs: None if all(get(docs, k, n) for k, n in [
-          ("Deployment", "adapter-app"),
-          ("Deployment", "headscale"),
-          ("Role", "adapter-app-state"),
-          ("CiliumNetworkPolicy", "adapter-transport-egress"),
-          ("CiliumNetworkPolicy", "adapter-principal-egress"),
-          ("CiliumNetworkPolicy", "headscale-egress")]) else channel_objects(docs))
-
-transport = {
-    "app.kubernetes.io/component": "adapter",
-    "sycophant.md/adapter-class": "transport",
-    "app.kubernetes.io/part-of": "sycophant",
-}
-
 def relay_rules(docs):
     d = get(docs, "CiliumNetworkPolicy", "relay-ingress")
     return (d or {}).get("spec", {}).get("ingress") or []
 
-def admits_transport(docs):
-    rules = relay_rules(docs)
-    if any([e.get("matchLabels") for e in r.get("fromEndpoints") or []] == [transport]
-           and [p for t in r.get("toPorts") or [] for p in t.get("ports") or []]
-               == [{"port": "9091", "protocol": "TCP"}]
-           for r in rules):
-        return None
-    return f"no 9091 transport rule in relay-ingress {rules}"
-check("base with no channels admits the transport adapter on 9091", "bare", admits_transport)
-
+# relay-ingress alone fences the relay, and its rule set is exactly: the
+# transport adapter on 9091, harness on 9090, principal adapters on 9092.
 def relay_fence(docs):
     relay = pod(get(docs, "Deployment", "relay-controller"))["metadata"]["labels"]
     fences = [d["metadata"]["name"] for d in cnps(docs)
@@ -173,15 +154,18 @@ def relay_fence(docs):
     if fences != ["relay-ingress"]:
         return f"want only relay-ingress fencing the relay, got {fences}"
     key = lambda r: json.dumps(r, sort_keys=True)
-    got = sorted(key(([e.get("matchLabels") for e in r.get("fromEndpoints") or []], sorted(ports(r))))
-                 for r in relay_rules(docs) if ports(r) != {9091})
+    got = sorted(key(([e.get("matchLabels") for e in r.get("fromEndpoints") or []],
+                      [p for t in r.get("toPorts") or [] for p in t.get("ports") or []]))
+                 for r in relay_rules(docs))
+    adapter = lambda cls: {"app.kubernetes.io/component": "adapter", "sycophant.md/adapter-class": cls,
+                           "app.kubernetes.io/part-of": "sycophant"}
     want = sorted(key(r) for r in [
-        ([{"app.kubernetes.io/component": "harness", "app.kubernetes.io/part-of": "sycophant"}], [9090]),
-        ([{"app.kubernetes.io/component": "adapter", "sycophant.md/adapter-class": "principal",
-           "app.kubernetes.io/part-of": "sycophant"}], [9092]),
+        ([adapter("transport")], [{"port": "9091", "protocol": "TCP"}]),
+        ([{"app.kubernetes.io/component": "harness", "app.kubernetes.io/part-of": "sycophant"}], [{"port": "9090", "protocol": "TCP"}]),
+        ([adapter("principal")], [{"port": "9092", "protocol": "TCP"}]),
     ])
     return None if got == want else f"want {want}, got {got}"
-check("relay-ingress alone fences the relay: harness on 9090, principal adapters on 9092", "bare", relay_fence)
+check("relay-ingress alone fences the relay: transport adapter on 9091, harness on 9090, principal adapters on 9092", "bare", relay_fence)
 
 def listeners(docs):
     relay = get(docs, "Deployment", "relay-controller")
@@ -250,8 +234,8 @@ def headscale(_):
         fqdn = sorted(n.get("matchName") or "pattern" for r in eg for n in r.get("toFQDNs") or [])
         return p["spec"]["endpointSelector"]["matchLabels"].get("app.kubernetes.io/component"), dns, fqdn
     cp, acme = "controlplane.tailscale.com", "acme-v02.api.letsencrypt.org"
-    got = {o: hosts(o) for o in ("channel", "acme", "headscale-off")}
-    want = {"channel": ("headscale", [cp], [cp]),
+    got = {o: hosts(o) for o in ("headscale", "acme", "headscale-off")}
+    want = {"headscale": ("headscale", [cp], [cp]),
             "acme": ("headscale", [acme, cp], [acme, cp]),
             "headscale-off": None}
     return None if got == want else f"want {want}, got {got}"
@@ -261,8 +245,8 @@ def magic_dns(_):
     def value(out):
         cm = get(load(out)[0] or [], "ConfigMap", "headscale-config")
         return cm and yaml.safe_load(cm["data"]["config.yaml"])["dns"]["magic_dns"]
-    got = {o: value(o) for o in ("channel", "no-magic")}
-    return None if got == {"channel": True, "no-magic": False} else f"magic_dns {got}"
+    got = {o: value(o) for o in ("headscale", "no-magic")}
+    return None if got == {"headscale": True, "no-magic": False} else f"magic_dns {got}"
 check("headscale magic_dns defaults on and turns off with \"false\"", ([], None), magic_dns)
 
 def workspace_init_unselected(docs):
@@ -281,9 +265,16 @@ def harness_reaches_inference(docs):
                for r in eg for e in r.get("toEndpoints") or [])
     dns = [n for r in eg for t in r.get("toPorts") or [] for n in (t.get("rules") or {}).get("dns") or []]
     want = [{"matchPattern": "inf-*.tenant-acme.svc.cluster.local"},
-            {"matchPattern": "*.ws-one-capability.tenant-acme.svc.cluster.local"}]
-    return None if warm and all(w in dns for w in want) else f"warm={warm} dns={dns}"
-check("harness egress reaches the inference pods and resolves their Services", "wsbase", harness_reaches_inference)
+            {"matchPattern": "*.ws-one-capability.tenant-acme.svc.cluster.local"},
+            {"matchName": "relay-controller.tenant-acme.svc.cluster.local"},
+            {"matchName": "seaweedfs.sycophant-system.svc.cluster.local"}]
+    def reaches(labels, port):
+        return any(port in ports(r) and any(e.get("matchLabels") == labels for e in r.get("toEndpoints") or []) for r in eg)
+    relay = reaches({"app.kubernetes.io/name": "relay-controller", "app.kubernetes.io/part-of": "sycophant"}, 9090)
+    store = reaches({"app.kubernetes.io/component": "objectstorage", "app.kubernetes.io/part-of": "sycophant",
+                     "k8s:io.kubernetes.pod.namespace": "sycophant-system"}, 8333)
+    return None if warm and relay and store and all(w in dns for w in want) else f"warm={warm} relay={relay} store={store} dns={dns}"
+check("harness egress reaches the inference pods, the relay on 9090 and the store on 8333, and resolves only their names", "wsbase", harness_reaches_inference)
 
 def harness_dials_tool_pods(docs):
     p = get(docs, "CiliumNetworkPolicy", "ws-one-egress")
@@ -293,8 +284,10 @@ def harness_dials_tool_pods(docs):
     dials = any(9090 in ports(r) and any((e.get("matchLabels") or {}).get("app.kubernetes.io/component") == "capability-job"
                                          for e in r.get("toEndpoints") or [])
                 for r in p["spec"].get("egress") or [])
-    return None if not ingress and dials else f"ingress on 9090 {ingress}, egress to capability-job on 9090 {dials}"
-check("harness admits no ingress on 9090 and dials capability-job pods on 9090", "wsbase", harness_dials_tool_pods)
+    relay = [[e.get("matchLabels") for e in r.get("fromEndpoints") or []] for r in p["spec"].get("ingress") or [] if 9091 in ports(r)]
+    want = [[{"app.kubernetes.io/name": "relay-controller", "app.kubernetes.io/part-of": "sycophant"}]]
+    return None if not ingress and dials and relay == want else f"ingress on 9090 {ingress}, egress to capability-job on 9090 {dials}, 9091 from {relay}"
+check("harness admits only the relay on 9091, nothing on 9090, and dials capability-job pods on 9090", "wsbase", harness_dials_tool_pods)
 
 def local_server(docs):
     want = ["CiliumNetworkPolicy/inf-local", "ConfigMap/inf-local", "Deployment/inf-local", "Service/inf-local"]
@@ -342,7 +335,7 @@ check("a workspace command naming no toolsets lists none and approves no Secret"
 
 def command_grant_objects(docs):
     cm = get(docs, "ConfigMap", "ws-one-capability-grants") or {"metadata": {}}
-    if (cm.get("data"), (cm["metadata"].get("labels") or {}).get("sycophant.md/type")) != ({"demo-key": "ssh"}, "capability-grants"):
+    if (cm.get("data"), (cm["metadata"].get("labels") or {}).get("sycophant.md/type")) != ({"demo-key": "ssh", "local-key": "ssh"}, "capability-grants"):
         return f"ws-one-capability-grants {cm}"
     sel = {"sycophant.md/workspace": "one", "sycophant.md/toolset": "ssh", "sycophant.md/grant": "demo"}
     fqdns = [(p["metadata"]["name"], n.get("matchName")) for p in cnps(docs)
@@ -352,21 +345,41 @@ def command_grant_objects(docs):
         return f"grant egress toFQDNs {fqdns}"
     relay = get(docs, "ConfigMap", "ws-one-relay-grants")
     names = yaml.safe_load(((relay or {}).get("data") or {}).get("grants.yaml") or "null")
-    want = {"one": ["git", {"name": "ssh", "grants": {"demo": {}}}]}
+    want = {"one": ["git", {"name": "ssh", "grants": {"demo": {}, "local": {}}}]}
     return None if names == want else f"ws-one-relay-grants {names}"
 check("a workspace command grant renders its Secret approval, its egress and its relay grant name", "workspace", command_grant_objects)
 
-def command_harness_storage(docs):
+# The init container syncs the folder keyed by the workspace service account's
+# token subject, and the source ends with "/" so rclone lists the folder rather
+# than HEADing a bare key the read grant denies.
+def command_instructions_sync(docs):
     d = get(docs, "Deployment", "ws-one")
     if d is None:
         return "Deployment/ws-one missing"
     sync = " ".join(a for c in pod(d)["spec"].get("initContainers") or [] if c["name"] == "instructions-sync"
-                    for a in c.get("args") or [])
+                    for a in (c.get("command") or []) + (c.get("args") or []))
+    want = r"os:sycophant-instructions/system:serviceaccount:tenant-acme:ws-one/(?=[\"'\s]|$)"
+    if not re.search(want, sync):
+        return f"sync source must be os:sycophant-instructions/system:serviceaccount:tenant-acme:ws-one/ (trailing slash); got {sync!r}"
+    vol = next((v for v in pod(d)["spec"].get("volumes") or [] if v["name"] == "instructions-one"), None)
+    if vol is None or set(vol) != {"name", "emptyDir"}:
+        return f"the instructions volume must be an emptyDir, got {vol}"
+check("a workspace command syncs instructions from <bucket>/system:serviceaccount:<ns>:ws-<ws>/ into an emptyDir", "workspace", command_instructions_sync)
+
+def command_data_size(docs):
     pvc = get(docs, "PersistentVolumeClaim", "ws-one-data")
     size = (pvc or {}).get("spec", {}).get("resources", {}).get("requests", {}).get("storage")
-    if "/tenant-acme/one\"" not in sync or size != "5Gi":
-        return f"sync {sync!r}, ws-one-data {size}"
-check("a workspace command syncs instructions from <namespace>/<workspace> and sizes its storage", "workspace", command_harness_storage)
+    return None if size == "5Gi" else f"ws-one-data must request the command's 5Gi; got {size}"
+check("a workspace command sizes its data volume at 5Gi", "workspace", command_data_size)
+
+# The instructions hash rides the pod template, so changed instructions roll the pod.
+def command_instructions_checksum(docs):
+    d = get(docs, "Deployment", "ws-one")
+    ann = (pod(d)["metadata"].get("annotations") or {}) if d else {}
+    want = "abababababababababababababababababababababababababababababababab"
+    got = ann.get("checksum/instructions")
+    return None if got == want else f"pod template checksum/instructions must be the command's instructions-hash; got {got!r}"
+check("a workspace command stamps its instructions-hash on the pod template", "workspace", command_instructions_checksum)
 
 WORKSPACE_OBJECTS = sorted([
     "CiliumNetworkPolicy/ws-one-egress", "CiliumNetworkPolicy/ws-one-grant-ssh-demo", "CiliumNetworkPolicy/ws-one-job-ingress",
@@ -551,6 +564,228 @@ def membership_binding(docs):
     if (ref.get("kind"), ref.get("name")) != ("ClusterRole", "provision-identity"):
         return f"membership binding must reference provision-identity, got {ref}"
 check("the provision-identity membership RoleBinding renders for the subject", "user", membership_binding)
+
+def tenant_ns(docs):
+    labels = get(docs, "Namespace", "tenant-acme")["metadata"]["labels"]
+    want = {"app.kubernetes.io/part-of": "sycophant-tenant", "pod-security.kubernetes.io/enforce": "restricted",
+            "pod-security.kubernetes.io/enforce-version": "latest", "pod-security.kubernetes.io/warn": "restricted",
+            "pod-security.kubernetes.io/audit": "restricted"}
+    got = {k: labels.get(k) for k in want}
+    return None if got == want else f"want {want}, got {got}"
+check("the tenant chart renders the namespace with the perimeter and restricted PSA labels", "ns", tenant_ns)
+
+def workspace_identities(docs):
+    sas = {d["metadata"]["name"]: d for d in docs if d["kind"] == "ServiceAccount"}
+    if any((d["metadata"].get("labels") or {}).get("sycophant.md/type") != "workspace-sa" for d in sas.values()):
+        return "every workspace ServiceAccount must carry sycophant.md/type: workspace-sa"
+    if sas["ws-one-unprivileged"].get("automountServiceAccountToken") is not False:
+        return "ws-one-unprivileged must not automount a token"
+    rules = sorted((tuple(r.get("apiGroups") or []), tuple(r.get("resources") or []), tuple(sorted(r.get("verbs") or [])))
+                   for r in get(docs, "Role", "ws-one").get("rules") or [])
+    want = sorted([(("batch",), ("jobs",), ("create",)), (("",), ("configmaps",), ("list", "watch"))])
+    return None if rules == want else f"harness Role must be exactly {want}, got {rules}"
+check("workspace ServiceAccounts are labelled, the unprivileged one mounts no token, the harness Role only creates Jobs", "workspace", workspace_identities)
+
+# Every Role bound to relay-controller, in the tenant and channel charts: the
+# identity table (ConfigMaps) is read-only, and no workload or Secret is reachable.
+def relay_roles(docs):
+    names = [rb["roleRef"]["name"] for rb in docs if rb["kind"] == "RoleBinding"
+             and any(s.get("name") == "relay-controller" for s in rb.get("subjects") or [])]
+    rules = [r for d in docs if d["kind"] == "Role" and d["metadata"]["name"] in names for r in d.get("rules") or []]
+    cm = set().union(*[set(r.get("verbs") or []) for r in rules if "configmaps" in (r.get("resources") or [])])
+    reach = {res for r in rules for res in r.get("resources") or []} & {"pods", "jobs", "deployments", "replicasets",
+                                                                         "statefulsets", "daemonsets", "secrets", "*"}
+    if not names or cm != {"get", "list", "watch"} or reach:
+        return f"roles {names}: ConfigMap verbs {sorted(cm)} (want get/list/watch), forbidden resources {sorted(reach)}"
+check("the relay reads ConfigMaps only and reaches no workload or Secret", (load("bare")[0] + load("channel")[0], None), relay_roles)
+
+def floor(docs):
+    spec = get(docs, "CiliumNetworkPolicy", "default-deny-egress")["spec"]
+    got = (spec.get("endpointSelector"), spec.get("enableDefaultDeny"), spec.get("egress"))
+    return None if got == ({}, {"egress": True}, [{}]) else f"want an empty selector, egress default-deny and one empty rule, got {got}"
+check("the namespace egress floor selects every pod and allows nothing", "bare", floor)
+
+def install_wait_egress(docs):
+    spec = get(docs, "CiliumNetworkPolicy", "install-wait-egress")["spec"]
+    want = ({"app.kubernetes.io/component": "install-wait", "app.kubernetes.io/part-of": "sycophant"},
+            [{"toEntities": ["kube-apiserver"], "toPorts": [{"ports": [{"port": "6443", "protocol": "TCP"}]}]}])
+    got = (spec["endpointSelector"].get("matchLabels"), spec.get("egress"))
+    return None if got == want else f"want {want}, got {got}"
+check("install-wait reaches only the apiserver on 6443", "bare", install_wait_egress)
+
+# Cilium unions same-port L7 DNS rules across policies on a pod: one L4-only
+# kube-dns rule reopens DNS tunnelling for every sibling policy of the
+# workspace and model pods.
+def kube_dns_l7(_):
+    outs = [o for o in sorted(os.listdir(work)) if o.endswith(".yaml") and o.startswith(("workspace", "wsbase", "local", "remote"))
+            and load(o[:-5])[0] is not None]
+    bare_dns = [(o[:-5], p["metadata"]["name"]) for o in outs for p in cnps(load(o[:-5])[0])
+                for r in p["spec"].get("egress") or [] if any((e.get("matchLabels") or {}).get("k8s-app") == "kube-dns"
+                                                              for e in r.get("toEndpoints") or [])
+                for t in r.get("toPorts") or [] if "dns" not in (t.get("rules") or {})]
+    grant = get(load("workspace")[0], "CiliumNetworkPolicy", "ws-one-grant-ssh-demo")["spec"]["egress"]
+    names = [n for r in grant for t in r.get("toPorts") or [] for n in (t.get("rules") or {}).get("dns") or []]
+    wide = [r for r in grant if r.get("toEntities") or r.get("toCIDR")]
+    return (bare_dns or names != [{"matchName": "github.com"}] or wide) and \
+        f"kube-dns rules without L7 dns {bare_dns}; grant dns {names}; grant entity/CIDR rules {wide}"
+check("every workspace and model kube-dns rule carries an L7 allowlist; a grant resolves only its own name", ([], None), kube_dns_l7)
+
+def model_egress(_):
+    def shape(out, key):
+        p = get(load(out)[0], "CiliumNetworkPolicy", f"inf-{key}")["spec"]
+        eg = p.get("egress") or []
+        return (p["endpointSelector"].get("matchLabels"),
+                sorted(n.get("matchName") or "pattern" for r in eg for t in r.get("toPorts") or [] for n in (t.get("rules") or {}).get("dns") or []),
+                [(sorted(r.get("toFQDNs") or [], key=str), r.get("toCIDR"), r.get("toEntities"), r.get("toPorts"))
+                 for r in eg if not r.get("toEndpoints")])
+    sel = lambda key: {"sycophant.md/model": key, "sycophant.md/job-kind": "inference", "app.kubernetes.io/part-of": "sycophant"}
+    tcp = lambda port: [{"ports": [{"port": port, "protocol": "TCP"}]}]
+    want = {"remote": (sel("deepseek"), ["openrouter.ai"], [([{"matchName": "openrouter.ai"}], None, None, tcp("443"))]),
+            "remote-ip": (sel("ipdirect"), [], [([], ["10.42.0.9/32"], None, tcp("8080"))])}
+    got = {"remote": shape("remote", "deepseek"), "remote-ip": shape("remote-ip", "ipdirect")}
+    return None if got == want else f"want {want}, got {got}"
+check("a remote model's one egress hole derives from baseUrl: FQDN plus L7 DNS for a host, a /32 and no DNS for an IP", ([], None), model_egress)
+
+def inference_pod(docs):
+    spec = pod(get(docs, "Deployment", "inf-local"))["spec"]
+    conts = (spec.get("initContainers") or []) + spec["containers"]
+    sc = lambda c: c.get("securityContext") or {}
+    problems = [
+        spec.get("automountServiceAccountToken") is not False and "automountServiceAccountToken",
+        (spec.get("securityContext") or {}).get("runAsNonRoot") is not True and "runAsNonRoot",
+        (spec.get("securityContext") or {}).get("seccompProfile", {}).get("type") != "RuntimeDefault" and "seccompProfile",
+        spec.get("runtimeClassName") and "runtimeClassName",
+        any(spec.get(h) for h in ("hostNetwork", "hostPID", "hostIPC")) and "host namespace",
+        spec.get("serviceAccountName") not in (None, "default") and "serviceAccountName",
+        any("serviceAccountToken" in s for v in spec.get("volumes") or [] for s in (v.get("projected") or {}).get("sources") or []) and "projected token",
+        any("hostPath" in v for v in spec.get("volumes") or []) and "hostPath",
+        any(p.get("hostPort") for c in conts for p in c.get("ports") or []) and "hostPort",
+        any((sc(c).get("readOnlyRootFilesystem"), sc(c).get("allowPrivilegeEscalation")) != (True, False)
+            or "ALL" not in (sc(c).get("capabilities") or {}).get("drop", []) for c in conts) and "container floor",
+        any((sc(c).get("capabilities") or {}).get("add") for c in conts) and "capabilities.add",
+    ]
+    return [p for p in problems if p] or None
+check("the local model pod is hardened: no token, no host reach, no extra runtime or capability", "local", inference_pod)
+
+def inference_fence(docs):
+    spec = get(docs, "CiliumNetworkPolicy", "inf-local")["spec"]
+    ing, eg = spec.get("ingress") or [], spec.get("egress") or []
+    routes = sorted((h.get("method"), h.get("path")) for r in ing for t in r.get("toPorts") or [] for h in (t.get("rules") or {}).get("http") or [])
+    got = ([[e.get("matchLabels") for e in r.get("fromEndpoints") or []] for r in ing],
+           [p for r in ing for t in r.get("toPorts") or [] for p in t.get("ports") or []], routes,
+           [[(e.get("matchLabels") or {}).get("k8s-app") for e in r.get("toEndpoints") or []] + sorted(k for k in r if k not in ("toEndpoints", "toPorts")) for r in eg])
+    want = ([[{"app.kubernetes.io/component": "harness", "app.kubernetes.io/part-of": "sycophant"}]],
+            [{"port": "8080", "protocol": "TCP"}], [("POST", "/v1/chat/completions"), ("POST", "/v1/completions")], [["kube-dns"]])
+    return None if got == want else f"want {want}, got {got}"
+check("the local model admits only harness on 8080 for two POST routes and egresses only to kube-dns", "local", inference_fence)
+
+def store_ingress(docs):
+    d = get(docs, "CiliumNetworkPolicy", "objectstore")
+    rules = (d or {}).get("spec", {}).get("ingress") or []
+    froms = [fe.get("matchLabels") for r in rules for fe in r.get("fromEndpoints") or []]
+    want = [{"app.kubernetes.io/component": "harness", "app.kubernetes.io/part-of": "sycophant"}]
+    return None if froms == want and {p for r in rules for p in ports(r)} == {8333} else f"store ingress must admit only harness on 8333, got {froms} {[ports(r) for r in rules]}"
+check("the object store admits only harness pods, on 8333 only", "store", store_ingress)
+
+def store_egress(_):
+    def shape(out):
+        p = [d for d in cnps(load(out)[0]) if (d["spec"].get("endpointSelector") or {}).get("matchLabels", {}).get("app.kubernetes.io/component") == "objectstorage"]
+        if len(p) != 1:
+            return f"{len(p)} store policies"
+        eg = p[0]["spec"].get("egress") or []
+        peers = [e.get("matchLabels") for r in eg for e in r.get("toEndpoints") or [] if (e.get("matchLabels") or {}).get("k8s-app") != "kube-dns"]
+        dns = sorted(json.dumps(n, sort_keys=True) for r in eg for t in r.get("toPorts") or [] for n in (t.get("rules") or {}).get("dns") or [])
+        return (peers, [f.get("matchName") for r in eg for f in r.get("toFQDNs") or []], [c for r in eg for c in r.get("toCIDR") or []],
+                [r for r in eg if r.get("toEntities")], dns)
+    api = [{"toEntities": ["kube-apiserver"], "toPorts": [{"ports": [{"port": "6443", "protocol": "TCP"}]}]}]
+    names = lambda *h: sorted(json.dumps({"matchName": n}) for n in ("kubernetes.default.svc.cluster.local",) + h)
+    want = {"store": ([], [], [], api, names()),
+            "store-oidc": ([], ["issuer.example.com"], [], api, names("issuer.example.com")),
+            "store-incluster": ([{"app.kubernetes.io/name": "oidc-fixture"}], [], [], api, names("oidc-fixture.sycophant-system.svc.cluster.local"))}
+    got = {o: shape(o) for o in want}
+    return None if got == want else f"want {want}, got {got}"
+check("the store egresses to DNS and the apiserver, plus exactly one peer for an operator issuer", ([], None), store_egress)
+
+check("the store schema admits an external issuer and refuses an empty in-cluster selector", ([], None),
+      lambda _: None if int(open(f"{work}/store-oidc.rc").read()) == 0 and int(open(f"{work}/store-emptylabels.rc").read()) != 0
+      else "want store-oidc to render and store-emptylabels to fail")
+
+def store_deployment(out):
+    return next(d for d in load(out)[0] if d["kind"] == "Deployment" and pod(d)["metadata"]["labels"].get("app.kubernetes.io/component") == "objectstorage")
+
+def store_checksum(_):
+    sums = [(pod(store_deployment(o))["metadata"].get("annotations") or {}).get("checksum/config") for o in ("store", "store-oidc", "store-oidc-again")]
+    return None if sums[0] and sums[1] and sums[0] != sums[1] and sums[1] == sums[2] else f"checksum/config across default, oidc, oidc again: {sums}"
+check("the store pod's config checksum changes with the IAM config and only with it", ([], None), store_checksum)
+
+def store_pod(docs):
+    spec = pod(store_deployment("store"))["spec"]
+    c, = spec["containers"]
+    args = " ".join((c.get("args") or []) + (c.get("command") or []))
+    csc, psc = c.get("securityContext") or {}, spec.get("securityContext") or {}
+    problems = [
+        "-s3.iam.config" not in args and "-s3.iam.config", "--console-address" in args and "--console-address",
+        any(e.get("name", "").startswith("MINIO_") for e in c.get("env") or []) and "MINIO_ env",
+        (psc.get("runAsNonRoot"), psc.get("fsGroup")) != (True, 1000) and "pod securityContext",
+        spec.get("automountServiceAccountToken") is not False and "automountServiceAccountToken",
+        (csc.get("allowPrivilegeEscalation"), csc.get("readOnlyRootFilesystem"), (csc.get("capabilities") or {}).get("drop")) != (False, True, ["ALL"]) and "container securityContext",
+    ]
+    return [p for p in problems if p] or None
+check("the store pod runs SeaweedFS with its IAM config, no token and a read-only root", "store", store_pod)
+
+def iam(out):
+    import base64
+    sec, = [d for d in load(out)[0] if d["kind"] == "Secret" and d["metadata"]["name"] == "seaweedfs-iam"]
+    return json.loads(base64.b64decode(sec["data"]["iam.json"]))
+
+def trust(role):
+    st = (role.get("trustPolicy") or {}).get("Statement") or []
+    return [s.get("Condition") for s in st]
+
+def store_trust(_):
+    reader, writer = "arn:aws:iam::role/workspace-instructions-read", "arn:aws:iam::role/instructions-writer"
+    base, op = iam("store"), iam("store-oidc")
+    cluster = (base.get("providers") or [{}])[0].get("config") or {}
+    problems = [
+        [p.get("name") for p in base.get("providers") or []] != ["cluster"] and "default providers",
+        cluster.get("roleMapping") != {} and f"cluster roleMapping {cluster.get('roleMapping', '<absent>')!r} (absent falls back to readonly)",
+        [trust(r) for r in base.get("roles") or []] != [[{"StringEquals": {"oidc:iss": cluster.get("issuer")}}]] and "reader trust",
+        sorted(p.get("name") for p in base.get("policies") or []) != ["instructions-read"] and "default policies",
+        "instructions-write" in json.dumps(base) and "writer without an operator issuer",
+    ]
+    byname = {p.get("name"): p.get("config") or {} for p in op.get("providers") or []}
+    byarn = {r.get("roleArn"): r for r in op.get("roles") or []} if isinstance(op.get("roles"), list) else {}
+    problems += [
+        sorted(byname) != ["cluster", "operator-oidc"] and f"oidc providers {sorted(byname)}",
+        (byname.get("operator-oidc", {}).get("roleMapping") or {}).get("defaultRole") != writer and "operator roleMapping.defaultRole",
+        byname.get("operator-oidc", {}).get("issuer") != "https://issuer.example.com" and "operator issuer",
+        "roleMapping" in op and "top-level roleMapping",
+        sorted(byarn) != sorted([reader, writer]) and f"oidc roles {sorted(byarn)}",
+        trust(byarn.get(writer, {})) != [{"StringEquals": {"oidc:iss": "https://issuer.example.com"}}] and "writer trust",
+    ]
+    return [p for p in problems if p] or None
+check("the store trusts only the cluster issuer by default, and an operator issuer only for the writer role", ([], None), store_trust)
+
+def writer_scope(_):
+    pol = {p.get("name"): p for p in iam("store-oidc").get("policies") or []}.get("instructions-write") or {}
+    stmts = (pol.get("document") or {}).get("Statement") or []
+    res = [r for s in stmts for r in (s.get("Resource") if isinstance(s.get("Resource"), list) else [s.get("Resource")])]
+    want = {"arn:aws:s3:::sycophant-instructions", "arn:aws:s3:::sycophant-instructions/*"}
+    return None if len(stmts) == 1 and set(res) == want else f"writer Resource must be exactly {want}, got {stmts}"
+check("the store writer policy reaches only the instructions bucket", ([], None), writer_scope)
+
+def sync_token_only(docs):
+    spec = pod(next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["labels"].get("app.kubernetes.io/component") == "harness"))["spec"]
+    blob = json.dumps(spec)
+    holders = [c["name"] for c in (spec.get("initContainers") or []) + spec["containers"]
+               if any(m["name"] == "objectstore-token" for m in c.get("volumeMounts") or [])]
+    if holders != ["instructions-sync"]:
+        return f"objectstore-token must mount in instructions-sync only, got {holders}"
+    if "secretKeyRef" in blob or "AWS_ACCESS_KEY_ID" in blob or any("secret" in v for v in spec.get("volumes") or []):
+        return "the harness pod must hold no static store credential"
+    hostpaths = [v["name"] for d in docs if d["kind"] in ("Deployment", "Job") for v in pod(d)["spec"].get("volumes") or [] if "hostPath" in v]
+    return hostpaths and f"hostPath volumes rendered: {hostpaths}"
+check("only instructions-sync holds the store token; no static keys and no hostPath", "wsbase", sync_token_only)
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
