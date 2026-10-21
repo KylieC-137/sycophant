@@ -394,7 +394,10 @@ mod tests {
         assert!(version_gte("0.1.0", "0.1.0"), "equal is allowed");
         assert!(version_gte("0.2.0", "0.1.0"), "newer sycoadm is allowed");
         // Mutant using string compare would pass this (downgrade slips through).
-        assert!(!version_gte("0.1.0", "0.2.0"), "older sycoadm must be blocked");
+        assert!(
+            !version_gte("0.1.0", "0.2.0"),
+            "older sycoadm must be blocked"
+        );
         assert!(
             version_gte("0.10.0", "0.9.0"),
             "numeric, not lexical (0.10 > 0.9)"

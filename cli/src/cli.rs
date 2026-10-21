@@ -17,19 +17,14 @@ pub(crate) struct Cli {
     reason = "clap arg structs, parsed once at startup"
 )]
 pub(crate) enum Command {
-    /// Set up a local Sycophant cluster
     Setup(SetupCmd),
-    /// Delete the cluster and all tenant data (irreversible)
     Destroy(DestroyCmd),
-    /// Check or upgrade the cluster and its tenants
     Upgrade(UpgradeCmd),
-    /// Manage tenant lifecycle, secrets, and audits
     Tenant(TenantCmd),
     /// Install or remove one toolset through its provision and reap commands
     Toolset(ComponentCmd),
     /// Install or remove one workspace through its provision and reap commands
     Workspace(ComponentCmd),
-    /// Provision a framework user from configuration
     User(UserCmd),
     /// Install or remove one model through its provision and reap commands
     Inference(ComponentCmd),
@@ -39,6 +34,8 @@ pub(crate) enum Command {
 
 // --- setup / destroy (cluster — no --ns) ---
 
+/// Set up a local Sycophant cluster
+//  
 /// Stand up a sycophant-ready cluster from nothing: ensure the k3d cluster
 /// `sycophant` with the apiserver trusting the bundled Dex, install the gVisor
 /// node runtime, Cilium, Kyverno, the sycophant cluster layer, and Dex with the
@@ -47,6 +44,8 @@ pub(crate) enum Command {
 #[derive(Args)]
 pub(crate) struct SetupCmd {}
 
+/// Delete the cluster and all tenant data (irreversible)
+///
 /// Delete the sycophant k3d cluster, including every tenant and all data
 /// (irreversible). Inverse of `setup`.
 #[derive(Args)]
@@ -54,6 +53,8 @@ pub(crate) struct DestroyCmd {}
 
 // --- upgrade (validate the cluster, upgrade it, re-provision every tenant) ---
 
+/// Check or upgrade the cluster and its tenants
+///
 /// Validate the cluster, upgrade the cluster chart, then re-provision every
 /// tenant through its provision command. Prompts for the operator password. Any
 /// failed cluster or tenant check exits non-zero with nothing applied, and the
@@ -68,11 +69,13 @@ pub(crate) struct UpgradeCmd {
 
 // --- tenant ---
 
+/// Manage tenant lifecycle, secrets, and audits
+///
 /// Operate on a tenant. `--ns <name>` selects the namespace for secret and
 /// audit, and may appear anywhere on the line.
 #[derive(Args)]
 pub(crate) struct TenantCmd {
-    /// tenant namespace (secret and audit only)
+    /// Tenant namespace (secret and audit only)
     #[arg(long, global = true)]
     pub ns: Option<String>,
     #[command(subcommand)]
@@ -81,6 +84,8 @@ pub(crate) struct TenantCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum TenantSub {
+    /// Provision or re-provision a tenant from a values file
+    ///
     /// Provision or re-provision a tenant through its provision command. Prompts
     /// for the operator password. Renders the tenant provision command from
     /// values (`tenant: {name, capacity}`), writes it, and waits for its
@@ -96,22 +101,27 @@ pub(crate) enum TenantSub {
     Audit(AuditCmd),
 }
 
-/// Suspend the tenant: scales it to zero, keeps all data. Prompts for the
+/// Temporarily stop a tenant without deleting its stored data
+/// 
+// Suspend the tenant: scales it to zero, keeps all data. Prompts for the
 /// operator password
 #[derive(Args)]
 pub(crate) struct TenantDown {
-    /// tenant name (the namespace is tenant-<name>)
+    /// Tenant name (the namespace is tenant-<name>)
     pub name: String,
-    /// days to keep the suspended tenant before the cluster reaps it
+    /// Days to keep the suspended tenant before the cluster deletes it.
+    /// Without this flag the tenant stays suspended with no deadline
     #[arg(long)]
     pub keepalive: Option<String>,
 }
 
-/// Delete the tenant completely, including its PVCs/data (irreversible). The
+/// Delete a tenant completely, including its persistent data (irreversible)
+/// 
+// Delete the tenant completely, including its PVCs/data (irreversible). The
 /// cluster reaps it on its next sweep. Prompts for the operator password
 #[derive(Args)]
 pub(crate) struct TenantRemove {
-    /// tenant name (the namespace is tenant-<name>)
+    /// Tenant name (the namespace is tenant-<name>)
     pub name: String,
 }
 
@@ -155,7 +165,9 @@ pub(crate) struct SecretDelete {
 
 // --- audit ---
 
-/// Audit a running workspace against the security clauses (gVisor isolation,
+/// Audit a running workspace against Sycophant security controls
+/// 
+// Audit a running workspace against the security clauses (gVisor isolation,
 /// secret scrubbing, egress containment, L7 DNS allowlist, credential isolation,
 /// tool execution, workspace SA). Probes the live sandbox — the workspace must
 /// already have been exercised by a tool-calling message so the toolset pod exists.
@@ -167,6 +179,8 @@ pub(crate) struct AuditCmd {
 
 // --- provision commands rendered from a values file ---
 
+/// Provision a framework user from a values file
+///
 /// Install a framework user through its provision command
 #[derive(Args)]
 pub(crate) struct UserCmd {
@@ -176,6 +190,8 @@ pub(crate) struct UserCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum UserSub {
+    /// Install or update a user from a values file
+    ///
     /// Render the provision command from values, write it as the operator, and
     /// wait for its installer. Prompts for the operator password. A leftover
     /// command of the same name is replaced; a rejected command or a failed
@@ -228,6 +244,8 @@ pub(crate) struct ComponentCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum ComponentSub {
+    /// Install or update a component from a values file
+    ///
     /// Render the provision command from values, write it as the operator, and
     /// wait for its installer. Prompts for the operator password. A leftover
     /// command of the same name is replaced; a rejected command or a failed
@@ -237,14 +255,16 @@ pub(crate) enum ComponentSub {
     Down(ComponentDown),
 }
 
-/// Remove a component: write its reap command as the operator and wait for the
+/// Remove a component by name and wait for its uninstall to complete
+/// 
+// Remove a component: write its reap command as the operator and wait for the
 /// uninstall. Prompts for the operator password. A failed uninstall leaves the
 /// reap command and exits non-zero
 #[derive(Args)]
 pub(crate) struct ComponentDown {
     /// the component name (the command name suffix)
     pub name: String,
-    /// tenant name (the namespace is tenant-<name>)
+    /// Tenant name (the namespace is tenant-<name>)
     #[arg(long)]
     pub tenant: String,
 }
