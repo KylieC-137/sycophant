@@ -162,8 +162,32 @@ message ChannelOutbound {
     TurnStateEvent turn_state = 3;
     ServerRequest server_request = 4;
     StreamItem stream_item = 5;
+    Heartbeat heartbeat = 7;
+    CatchUpComplete catch_up_complete = 8;
+    ReplayImpossible replay_impossible = 9;
   }
+  // Workspace-scoped monotonic sequence number assigned by the harness.
+  // Present on every variant except ChannelAck and Heartbeat (heartbeat
+  // carries its own seq in the Heartbeat message). Supersedes
+  // StreamItem.workspace_seq for ordering/dedup.
+  optional uint64 workspace_seq = 6;
 }
+
+// Periodic liveness signal on idle streams. Carries the relay's current
+// high-water workspace sequence so the client can track the cursor without
+// advancing its own lastSeq (a heartbeat doesn't prove the client received
+// all events up to that seq).
+message Heartbeat {
+  uint64 workspace_seq = 1;
+}
+
+// Marks the transition from replayed historical events to live delivery.
+// Sent after the last replayed event and before the first live event.
+message CatchUpComplete {}
+
+// The harness cannot serve the requested resume position (event log
+// unavailable). The client should fall back to GetConversationHistory.
+message ReplayImpossible {}
 
 // --- Streamed activity items (client-harness protocol, first slice) ---
 //
@@ -174,7 +198,8 @@ message ChannelOutbound {
 // carries the standard envelope (`workspace_seq` + `event_id`) from its
 // first frame. Streaming-only: not persisted as individual log events.
 message StreamItem {
-  // Monotonic, 1-indexed per workspace, server-advanced on emit. No client ack.
+  // DEPRECATED: superseded by ChannelOutbound.workspace_seq at the envelope
+  // level. Retained for backward compatibility with old clients.
   uint64 workspace_seq = 1;
   // Stable per frame.
   string event_id = 2;
@@ -502,6 +527,11 @@ message ChannelReceiveRequest {
   // verbatim. The relay resolves it to a subject through the operator's
   // handle binding; the adapter vouches for no one.
   string sender = 3;
+  // Resume from cursor. When present, the relay replays events after this
+  // sequence from the harness event log, sends CatchUpComplete, then
+  // switches to live delivery. 0 = replay from the beginning (everything
+  // after seq 0). Absent = no replay, live delivery only (backward compat).
+  optional uint64 resume_after_seq = 4;
 }
 
 // --- Subscribe RPCs ---
@@ -545,9 +575,15 @@ message ClientResponseError {
 // --- Internal: harness → relay server-request emit ---
 
 message SendServerNotificationRequest {
-  string channel_id = 1;
+  reserved 1;
+  reserved "channel_id";
   string method = 2;
   string params_json = 3;
+  // The workspace to fan out to. All channels for this workspace that
+  // support the method receive the notification.
+  string workspace = 4;
+  // Workspace-scoped sequence number assigned by the harness.
+  uint64 workspace_seq = 5;
 }
 
 message SendServerNotificationResponse {
@@ -558,7 +594,8 @@ message SendServerNotificationResponse {
 }
 
 message SendServerRequestAndAwaitRequest {
-  string channel_id = 1;
+  reserved 1;
+  reserved "channel_id";
   // Caller-supplied correlation id. Harness uses the LLM's
   // tool_call_id so the agent loop carries one identifier.
   string request_id = 2;
@@ -567,6 +604,11 @@ message SendServerRequestAndAwaitRequest {
   // Server-side wait cap in seconds. The controller clamps to a sane
   // range. Zero falls back to a server default.
   uint32 timeout_seconds = 5;
+  // The workspace to fan out to. The first ClientResponse from any
+  // channel wins; subsequent responses are dropped by request_id.
+  string workspace = 6;
+  // Workspace-scoped sequence number assigned by the harness.
+  uint64 workspace_seq = 7;
 }
 
 message SendServerRequestAndAwaitResponse {

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# A fake helm for the workspace-cli acceptance suite: `helm get values` answers
+# the installed cluster release's idp block from a fixture, so the operator
+# login needs no cluster; every other call (the command renders) runs the real
+# helm.
+if [ "${1:-}" = get ] && [ "${2:-}" = values ]; then
+  cat "$FAKE_CLUSTER_VALUES"
+  exit 0
+fi
+exec "$REAL_HELM" "$@"

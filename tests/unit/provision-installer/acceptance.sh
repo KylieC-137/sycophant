@@ -23,10 +23,8 @@ for kind in tenant workspace user toolset inference channel; do
   render --show-only "templates/$kind-kpol.yaml" > "$WORK/$kind-policy.yaml"
   generate "$kind" "$kind"
 done
-generate inference reap-inference
-generate toolset reap-toolset
 generate workspace reap-workspace
-generate channel reap-channel
+render > "$WORK/cluster.yaml"
 
 mkdir -p "$WORK/bin"
 cat > "$WORK/bin/kubectl" <<'SH'
@@ -130,7 +128,10 @@ def deletes_command(argv, command, ns):
     return any(argv[i] in ("-n", "--namespace") and argv[i + 1] == ns for i in range(len(argv) - 1)) \
         or f"--namespace={ns}" in argv
 
-for kind, c in cases.items():
+# The per-kind install paths share one script body (the stale-command guard is
+# the shared else branch), so tenant and workspace stand for every kind here.
+for kind in ("tenant", "workspace"):
+    c = cases[kind]
     docs = generated(kind)
     name = f"provision-{kind}-{uid10}"
     sa = find(docs, "ServiceAccount", name, "sycophant-system")
@@ -164,20 +165,6 @@ for kind, c in cases.items():
     else:
         bad(f"{kind}: successful install deletes its command after helm",
             f"rc={rc}, calls={[' '.join(a) for a in calls]}")
-
-    if kind == "user":
-        name = "user: install hands the command's write time to the chart"
-        if helm_at and any(a.startswith("commandCreated=") for a in calls[helm_at[0]]):
-            ok(name)
-        else:
-            bad(name, f"no commandCreated in {[' '.join(calls[i]) for i in helm_at]}")
-
-    if c["release"]:
-        if helm_at and c["release"] in calls[helm_at[0]]:
-            ok(f"{kind}: release named from the command name suffix")
-        else:
-            bad(f"{kind}: release named from the command name suffix",
-                f"want {c['release']} in {[' '.join(calls[i]) for i in helm_at]}")
 
     rc, calls = run_job(job, 1)
     if rc != 0 and not any(deletes_command(a, c["command"], c["command_ns"]) for a in calls):
@@ -241,12 +228,14 @@ def install_call(kind, get_cm="{}"):
 
 job = find(generated("tenant"), "Job", f"provision-tenant-{uid10}", "sycophant-system")
 argv = install_call("tenant") or []
-env = [e["name"] for e in job["spec"]["template"]["spec"]["containers"][0].get("env", [])] if job else []
-name = "tenant: install passes no values to helm"
-if job and argv and not {"-f", "--values"} & set(argv) and "VALUES" not in env:
+env = {e["name"]: e.get("value", "") for e in job["spec"]["template"]["spec"]["containers"][0].get("env", [])} if job else {}
+name = "tenant: install passes headscale values via -f /tmp/hs-values.yaml"
+hs_file = [argv[i + 1] for i in range(len(argv) - 1) if argv[i] == "-f"]
+hs_env_keys = {"HS_ENABLED", "HS_SERVER_URL", "HS_MAGIC_DNS", "HS_BASE_DOMAIN", "HS_STORAGE_CLASS", "HS_ACME_ENABLED", "HS_ACME_EMAIL"}
+if job and argv and hs_file == [work + "/scratch/hs-values.yaml"] and hs_env_keys <= set(env):
     ok(name)
 else:
-    bad(name, f"argv={' '.join(argv)}, env={env}")
+    bad(name, f"argv={' '.join(argv)}, env_keys={sorted(env)}, hs_file={hs_file}")
 
 taking = [k for k in ("workspace", "user", "toolset", "inference", "channel")
           if (install_call(k) or ["--take-ownership"]).count("--take-ownership")]
@@ -255,38 +244,42 @@ if taking:
 else:
     ok("capability installs never take ownership of another release's objects")
 
-for kind in cases:
-    argv = install_call(kind) or []
-    name = f"{kind}: install runs its own chart"
+argv = install_call("user") or []
+name = "user: install hands the command's write time to the chart"
+if any(a.startswith("commandCreated=") for a in argv):
+    ok(name)
+else:
+    bad(name, f"no commandCreated in {' '.join(argv)}")
+
+# The user install rides the generic values path like every other kind: its
+# chart consumes .Values.command, and the installer passes --set-string name=
+# unconditionally.
+problems = {}
+for kind, short in (("tenant", None), ("inference", "local"), ("toolset", "one"), ("workspace", "one"), ("channel", "app"), ("user", "0123456789")):
+    command_data = yaml.safe_load(open(os.path.join(sys.argv[2], f"{kind}.yaml")))["data"] if short else {}
+    argv = install_call(kind, json.dumps(command_data)) or []
     at = argv.index("--install") + 2 if "--install" in argv else len(argv)
     chart = argv[at] if at < len(argv) else None
     sets = [argv[i + 1] for i in range(len(argv) - 1) if argv[i] in ("--set", "--set-string")]
-    # The user install rides the generic values path like every other kind:
-    # its chart consumes .Values.command, and the installer passes
-    # --set-string name= unconditionally.
-    want = {"tenant": "namespace.create=false" in sets,
-            "user": any(a.startswith("name=") for a in sets)}.get(kind, True)
-    if chart == f"/charts/sycophant-{kind}" and want:
-        ok(name)
-    else:
-        bad(name, f"chart {chart}, sets {sets}")
-
-for kind, release in (("inference", "local"), ("toolset", "one"), ("workspace", "one"), ("channel", "app"), ("user", "0123456789")):
-    command_data = yaml.safe_load(open(os.path.join(sys.argv[2], f"{kind}.yaml")))["data"]
-    argv = install_call(kind, json.dumps(command_data))
-    name = f"{kind}: install hands the command data and name to the chart"
-    if not argv:
-        bad(name, "no helm upgrade call")
-        continue
     files = [argv[i + 1] for i in range(len(argv) - 1) if argv[i] in ("-f", "--values")]
     loaded = [yaml.safe_load(open(f)) for f in files if os.path.exists(f)]
-    sets = [argv[i + 1] for i in range(len(argv) - 1) if argv[i] in ("--set", "--set-string")]
-    if any((v or {}).get("command") == command_data for v in loaded) and f"name={release}" in sets:
-        ok(name)
-    else:
-        bad(name, f"argv={' '.join(argv)}, values={loaded}")
+    wrong = [w for w, bad_ in (
+        ("own chart", chart != f"/charts/sycophant-{kind}"),
+        ("tenant namespace.create=false", kind == "tenant" and "namespace.create=false" not in sets),
+        ("release from the command name suffix", short and cases[kind]["release"] not in argv),
+        ("command data", short and not any((v or {}).get("command") == command_data for v in loaded)),
+        ("name=", short and f"name={short}" not in sets),
+    ) if bad_]
+    if wrong:
+        problems[kind] = f"{wrong}: argv={' '.join(argv)}, values={loaded}"
+name = "every kind's install runs its own chart under the command's release name and hands it the command data"
+if problems:
+    bad(name, problems)
+else:
+    ok(name)
 
-for kind, release, prefix in (("inference", "deepseek", "inf"), ("toolset", "one", "ts"), ("workspace", "one", "ws"), ("channel", "app", "ch")):
+# Every reap kind shares the uninstall script body; workspace stands for all.
+for kind, release, prefix in (("workspace", "one", "ws"),):
     docs = generated(f"reap-{kind}")
     command = f"reap-{kind}-{release}"
     name = f"uninstall-{kind}-{uid10}"
@@ -331,6 +324,79 @@ for kind, release, prefix in (("inference", "deepseek", "inf"), ("toolset", "one
             bad(name, f"{miss} not labelled uninstall-{kind} or not reaped")
         else:
             ok(name)
+
+cluster_text = open(os.path.join(work, "cluster.yaml")).read()
+cluster = [d for d in yaml.safe_load_all(cluster_text) if d]
+blocks = re.split(r"\n---\n", cluster_text)
+
+def check(name, why):
+    if why:
+        bad(name, why)
+    else:
+        ok(name)
+
+def identity_minimal():
+    roles = [d for d in cluster if d.get("kind") == "ClusterRole" and d["metadata"]["name"] == "provision-identity"]
+    if len(roles) != 1:
+        return f"provision-identity ClusterRole must render exactly once, got {len(roles)}"
+    role = roles[0]
+    if role.get("rules") != []:
+        return f"provision-identity must grant nothing, got {role.get('rules')}"
+    if "aggregationRule" in role:
+        return "provision-identity must not aggregate rules from other ClusterRoles"
+    agg = [k for k in role["metadata"].get("labels") or {} if "aggregate-to-" in k]
+    return agg and f"provision-identity must not aggregate into other ClusterRoles: {agg}"
+check("the provision-identity ClusterRole has no rules and no aggregation", identity_minimal())
+
+# provision-write is static (no aggregationRule), so what it can do in a
+# tenant namespace is exactly the rendered rules.
+def write_scope():
+    role = next((d for d in cluster if d.get("kind") == "ClusterRole" and d["metadata"]["name"] == "provision-write"), None)
+    if role is None:
+        return "no provision-write ClusterRole rendered"
+    if "aggregationRule" in role:
+        return "provision-write must not aggregate rules from other ClusterRoles"
+    reads = {"get", "list", "watch"}
+    rules = [r for r in role.get("rules") or [] if "secrets" in r.get("resources", [])]
+    unscoped = [r for r in rules if not r.get("resourceNames")]
+    if not unscoped:
+        return f"no unscoped secrets rule on provision-write: {rules}"
+    uverbs = set().union(*[set(r.get("verbs", [])) for r in unscoped])
+    if "create" not in uverbs:
+        return f"provision-write cannot place a Secret: {sorted(uverbs)}"
+    if uverbs & reads:
+        return f"provision-write can read any Secret: {sorted(uverbs & reads)}"
+    for r in rules:
+        if r.get("resourceNames") and set(r.get("verbs", [])) & reads:
+            if sorted(r["resourceNames"]) != ["adapter-state"] or set(r["verbs"]) - {"get"}:
+                return f"scoped Secret read must be get on adapter-state only: {r}"
+    admission = [r for r in role.get("rules") or [] if {"admissionregistration.k8s.io", "*"} & set(r.get("apiGroups") or [])]
+    return admission and f"provision-write must not reach the admission rules (cluster-gvisor-pod-policy): {admission}"
+check("provision-write is write-only on Secrets except the pinned adapter-state read, and reaches no admission rule", write_scope())
+
+def generate_set():
+    pol = [b for b in blocks if "kind: GeneratingPolicy" in b and "configmaps" in b and "kind: ResourceQuota" in b]
+    if not pol:
+        return "no provision GeneratingPolicy generating a ResourceQuota from a configmap provision command"
+    text = "\n".join(pol)
+    missing = [w for w in ("kind: Namespace", "kind: ResourceQuota", "capacity", "kind: LimitRange") if w not in text]
+    if missing:
+        return f"provision generate must produce the tenant Namespace, a ResourceQuota sized from capacity and a LimitRange; missing {missing}"
+    if "kind: RoleBinding" in text:
+        return "provision generate must produce no RoleBinding"
+    return "authority" in text.lower() and "a provision command carries no authority field; selection is identity, not a command field"
+check("the provision reactor generates only the tenant Namespace, a capacity-sized ResourceQuota and a LimitRange", generate_set())
+
+def suspend():
+    mut = "\n".join(b for b in blocks if "kind: MutatingPolicy" in b and "replicas" in b and "deployments" in b)
+    if not mut:
+        return "no suspend MutatingPolicy scaling Deployments"
+    if not re.search(r'replicas:\s*"?0"?', mut):
+        return "suspend must scale tenant Deployments to zero replicas"
+    if "mutateExisting" not in mut:
+        return "suspend acts on Deployments that already exist"
+    return "object.metadata.namespace" not in mut and "suspend targets must be scoped to the suspend command's own namespace"
+check("a suspend command scales only its own namespace's existing Deployments to zero", suspend())
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

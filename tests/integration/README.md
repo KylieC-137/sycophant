@@ -8,20 +8,17 @@ tenant namespace comes from the tenant-namespace fixture with real perimeter lab
 
 | Bucket                          | Property under test                                                  |
 |---------------------------------|----------------------------------------------------------------------|
-| privileged-workload-rejection/  | PSA rejects privileged pods in sycophant namespaces (orthogonality)  |
 | harness-pod-shape/            | Harness VAP enforces every required field on harness pods    |
 | tenant-namespace-creation/      | Perimeter label triggers per-tenant wiring; any name, any creator    |
 | tenant-resource-protection/     | Same-ns SAs cannot tamper with their own NetworkPolicy/RBAC/etc.     |
-| job-egress-baselines/           | toolset (capability-job) egress shape: chart fail-closed floor is L7, not L4-only |
 | sa-permission-bounds/           | provisioner + controller SAs hold only the verbs/names claimed       |
-| sa-token-audience/              | Apiserver enforces SA-token audience: one token, one controller      |
 | cluster-resources/              | Chart-shipped cluster-scoped resources (RuntimeClass, etc.) shape    |
 | gvisor-scope/                   | gVisor runtime scope pinned to toolsets only (capability-job); other components on runc |
 | conversation-log-mount/         | Only the harness may mount the `ws-*-conversation` PVC (VAP, label-agnostic)   |
 | user-reach/                     | A bound subject reaches exactly the listed workspaces; bindings and identity data follow the user command |
-| inference-workload/             | Applied shape of the in-cluster inference server and its fence |
 | namespace-egress-baseline/      | Namespace-wide egress default-deny floor; uncovered pods denied |
 | capability-job-gate/            | Identity-keyed Job CREATE gate: ws-<ws> Jobs forced into the envelope + secret allowlist or denied; the two per-workspace SAs |
+| instructions-read-contract/     | Store-agnostic read contract (S3 and STS only): a workspace pod's own token reads exactly its instructions folder, and nothing is written |
 
 ## Picking a bucket for a new test
 
@@ -31,14 +28,10 @@ Ask: "What property is this test asserting?"
 - Namespace lifecycle (create / label / name) → `tenant-namespace-creation/`
 - Same-tenant write isolation → `tenant-resource-protection/`
 - Job creation gated on creator identity → `capability-job-gate/`
-- toolset (capability-job) egress policy shape (chart baseline floor) → `job-egress-baselines/`
 - Verb-by-actor or name-by-actor (SA impersonation) → `sa-permission-bounds/`
-- SA-token audience handling → `sa-token-audience/`
 - Chart-shipped cluster-scoped resource shape → `cluster-resources/`
 - gVisor runtime scope (toolsets only) → `gvisor-scope/`
 - Subject reach, handle binding, or identity ConfigMap protection → `user-reach/` or `tenant-resource-protection/`
-- Applied pod shape or network fence of the in-cluster inference server →
-  `inference-workload/`
 - Namespace-wide egress default-deny floor, or a pod left uncovered by it →
   `namespace-egress-baseline/`
 - Job CREATE forced into a hardened, secret-bounded pod template keyed on the
@@ -54,7 +47,7 @@ Do not create a `misc/` or `other/` bucket. Force a property decision.
 ```bash
 chainsaw test tests/integration --config tests/integration/.chainsaw.yaml
 chainsaw test tests/integration/tenant-resource-protection --config tests/integration/.chainsaw.yaml
-chainsaw test tests/integration/harness-pod-shape/projected-sa-token-rejected --config tests/integration/.chainsaw.yaml
+chainsaw test tests/integration/harness-pod-shape/non-compliant-pods-rejected --config tests/integration/.chainsaw.yaml
 ```
 
 ## Authoring conventions

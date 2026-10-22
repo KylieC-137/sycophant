@@ -44,11 +44,15 @@ lint-shell: ## shellcheck on all tracked .sh files
 	git ls-files '*.sh' | xargs shellcheck -x -S warning
 
 .PHONY: test-unit
-test-unit: test-unit-rust test-unit-go test-unit-k8s ## All unit tests (hermetic, seconds)
+test-unit: test-unit-rust test-unit-go test-unit-k8s test-unit-cli ## All unit tests (hermetic, seconds)
 
 .PHONY: test-unit-rust
 test-unit-rust: ## Inline #[cfg(test)] units across the workspace
 	cargo test --workspace --lib --bins
+
+.PHONY: test-unit-cli
+test-unit-cli: ## The sycoadm workspace CLI suite, against fake kubectl and helm
+	@bash tests/unit/workspace-cli/acceptance.sh
 
 .PHONY: test-unit-go
 test-unit-go: ## Go unit tests for the syco CLI
@@ -89,7 +93,8 @@ syco: ## Build the Go syco CLI binary
 
 .PHONY: sycoadm
 sycoadm: ## Build the Rust sycoadm operator CLI binary
-	cargo build -p sycoadm
+	CARGO_BUILD_JOBS=3 cargo build -p sycoadm --release
+	@cp target/release/sycoadm target/sycoadm
 
 .PHONY: test-e2e
 test-e2e: ## Full install, real turn, security audit, client in the loop (CLEAN=1 rebuilds the cluster)

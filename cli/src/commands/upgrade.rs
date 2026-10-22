@@ -393,7 +393,7 @@ mod tests {
     fn version_gte_orders_numerically_not_lexically() {
         assert!(version_gte("0.1.0", "0.1.0"), "equal is allowed");
         assert!(version_gte("0.2.0", "0.1.0"), "newer sycoadm is allowed");
-        // Mutant using string compare would pass this (downgrade slips through).
+        // Versions compare numerically, not as strings: a downgrade must not slip through.
         assert!(
             !version_gte("0.1.0", "0.2.0"),
             "older sycoadm must be blocked"
@@ -411,26 +411,11 @@ mod tests {
             tenant_namespaces("alpha beta\ngamma  "),
             vec!["alpha", "beta", "gamma"]
         );
-        // Mutant returning [] unconditionally would silently upgrade nothing.
         assert!(tenant_namespaces("   \n").is_empty());
     }
 
     #[test]
-    fn summarize_failures_none_when_all_pass() {
-        // Mutant returning Some(..) unconditionally would abort a healthy platform.
-        assert_eq!(summarize_failures(&[], &[]), None);
-    }
-
-    #[test]
-    fn summarize_failures_reports_cluster_issues_alone() {
-        // Mutant ignoring cluster fails would apply onto a broken cluster.
-        let msg = summarize_failures(&["  \u{2717} CRDs present".to_string()], &[])
-            .expect("must abort when the cluster fails");
-        assert!(msg.contains("cluster"), "missing cluster section: {msg}");
-    }
-
-    #[test]
-    fn summarize_failures_names_every_failing_namespace() {
+    fn summarize_failures_only_aborts_on_failure_and_names_every_one() {
         let tenants = vec![
             (
                 "alpha".to_string(),
@@ -442,13 +427,17 @@ mod tests {
             ),
         ];
         let msg = summarize_failures(&[], &tenants).expect("must abort when any ns fails");
-        // Report ALL failing namespaces, not just the first. A mutant using
-        // `.first()`/`[0]`/`take(1)` drops beta.
+        // Report ALL failing namespaces, not just the first.
         assert!(msg.contains("alpha"), "missing alpha: {msg}");
         assert!(msg.contains("beta"), "missing beta: {msg}");
         assert!(
             msg.contains('2'),
             "count should reflect both failures: {msg}"
         );
+
+        assert_eq!(summarize_failures(&[], &[]), None);
+        let msg = summarize_failures(&["  \u{2717} CRDs present".to_string()], &[])
+            .expect("must abort when the cluster fails");
+        assert!(msg.contains("cluster"), "missing cluster section: {msg}");
     }
 }

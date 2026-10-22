@@ -3,6 +3,7 @@ mod channel_tools;
 mod clients;
 mod config;
 mod dispatch;
+pub(crate) mod event_log;
 mod execution_log;
 // `conversation` is the workspace-history library surface (log store,
 // scopes, frontmatter, snapshots). Exposed as a public module so its
@@ -83,6 +84,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_CONVERSATION_DIR));
     probe_dir_writable("conversation-log", &conversation_dir)?;
+    // Workspace event log for resumable streaming. Constructed early so the
+    // sequence counter is recovered from disk before any turn runs.
+    let event_log = Arc::new(event_log::EventLog::new(&conversation_dir));
+    let event_log_for_grpc = event_log.clone();
+    tracing::info!(dir = %conversation_dir.display(), "event log ready");
     let factory: Arc<dyn ConversationStoreFactory> =
         Arc::new(LocalFsFactory::new(conversation_dir.clone()));
     let registry = Arc::new(ConversationRegistry::new(factory));
@@ -254,7 +260,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Relay-facing forward surface (HarnessControl). Ingress: relay-ctrl only.
     tokio::spawn(async move {
-        let svc = grpc_server::HarnessService::new(grpc_router_handle, grpc_registry_handle);
+        let svc = grpc_server::HarnessService::new(grpc_router_handle, grpc_registry_handle)
+            .with_event_log(event_log_for_grpc);
         let server = Server::builder()
             .add_service(toolset_proto::harness_control_server::HarnessControlServer::new(svc))
             .serve(relay_forward_addr);
@@ -281,6 +288,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         tool_router,
         registry,
         source.as_mut(),
+        event_log.clone(),
     )
     .await?;
 
@@ -297,11 +305,6 @@ mod probe_tests {
 
     // A fresh, writable target probes Ok AND leaves no `.write-probe` residue on
     // the PVC.
-    //
-    // Materiality: dropping the `remove_file` step leaves `.write-probe` behind,
-    // reding the residue assertion. The dual assertion (Ok AND absence of the
-    // residue file) is what makes this load-bearing rather than a bare
-    // return-type restatement.
     #[test]
     fn probe_writable_dir_returns_ok_and_leaves_no_residue() {
         let dir = tempfile::tempdir().unwrap();
@@ -321,11 +324,11 @@ mod probe_tests {
 
     // An existing but read-only directory probes Err. `create_dir_all` alone
     // returns Ok on an already-present dir, so only the probe-file write catches
-    // a read-only mount.
+    // a read-only mount. The Err names the label and the not-writable
+    // condition, so a pod log points an operator at the exact failing mount.
     //
-    // Materiality: an impl that only `create_dir_all`s and never writes the probe
-    // file wrongly returns Ok here — this reds it. Guards cleanly under root,
-    // where mode bits are bypassed and the read-only premise does not hold.
+    // Guards cleanly under root, where mode bits are bypassed and the read-only
+    // premise does not hold.
     #[cfg(unix)]
     #[test]
     fn probe_existing_read_only_dir_returns_err() {
@@ -344,39 +347,9 @@ mod probe_tests {
             return;
         }
 
-        let result = super::probe_dir_writable("conversation-log", &ro);
-        assert!(
-            result.is_err(),
-            "an existing read-only dir must probe Err; create_dir_all alone would wrongly pass"
+        let msg = super::probe_dir_writable("conversation-log", &ro).expect_err(
+            "an existing read-only dir must probe Err; create_dir_all alone would wrongly pass",
         );
-    }
-
-    // The Err on the read-only case names the label and the not-writable
-    // condition, so a pod log points an operator at the exact failing mount.
-    //
-    // Materiality: an impl that returns a bare/opaque error (or omits the label)
-    // reds these substring assertions. Distinct from the presence-of-Err test
-    // above — this pins the diagnostic content, not merely that it failed.
-    #[cfg(unix)]
-    #[test]
-    fn probe_read_only_err_message_names_label_and_not_writable() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let ro = dir.path().join("ro");
-        std::fs::create_dir(&ro).unwrap();
-        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
-
-        let canary = ro.join(".root-canary");
-        if std::fs::write(&canary, b"x").is_ok() {
-            let _ = std::fs::remove_file(&canary);
-            eprintln!(
-                "skipping probe_read_only_err_message_names_label_and_not_writable: running as root"
-            );
-            return;
-        }
-
-        let msg = super::probe_dir_writable("conversation-log", &ro)
-            .expect_err("an existing read-only dir must probe Err");
         assert!(
             msg.contains("conversation-log"),
             "the error must name the label so the log identifies which mount, got {msg:?}"

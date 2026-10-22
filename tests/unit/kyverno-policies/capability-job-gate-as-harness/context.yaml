@@ -13,3 +13,21 @@ spec:
           sycophant.md/type: model
       data:
         secret: llm-openrouter
+    - apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: ws-research-capability-grants
+        namespace: tenant-offline
+        labels:
+          sycophant.md/type: capability-grants
+      data:
+        approved-secret: tool
+    - apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: ws-other-capability-grants
+        namespace: tenant-offline
+        labels:
+          sycophant.md/type: capability-grants
+      data:
+        other-secret: tool

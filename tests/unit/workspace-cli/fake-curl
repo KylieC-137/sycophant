@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# A fake host curl for the workspace-cli acceptance suite. The only host curl
+# `sycoadm` makes is the operator's IdP password grant; answer it with a token
+# the fake kubectl accepts. Store calls never reach this: they run curl inside
+# the store pod, through `kubectl exec`.
+cat >/dev/null
+printf '{"id_token":"fake.operator.token"}'

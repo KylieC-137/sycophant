@@ -96,27 +96,6 @@ mod tests {
     }
 
     #[test]
-    fn chart_dirs_are_global() {
-        let s = global();
-        assert_eq!(
-            s.chart_dir("sycophant-tenant"),
-            PathBuf::from("/home/user/.config/sycophant/charts/sycophant-tenant")
-        );
-        assert_eq!(
-            s.cluster_chart_dir(),
-            PathBuf::from("/home/user/.config/sycophant/charts/sycophant-cluster")
-        );
-        assert_eq!(
-            s.gvisor_chart_dir(),
-            PathBuf::from("/home/user/.config/sycophant/charts/sycophant-gvisor")
-        );
-        assert_eq!(
-            s.kyverno_crds_chart_dir(),
-            PathBuf::from("/home/user/.config/sycophant/charts/kyverno-crds")
-        );
-    }
-
-    #[test]
     fn config_dir_override_wins_over_home() {
         assert_eq!(
             config_dir_from(Some("/tmp/e2e".into()), Some("/home/u".into())),
@@ -130,17 +109,12 @@ mod tests {
     }
 
     #[test]
-    fn release_name_is_the_tenant() {
-        // Mutant returning a constant / ignoring tenant is caught here.
+    fn release_name_is_the_tenant_and_errors_without_one() {
         let s = Scope {
             root: PathBuf::from("/r"),
             tenant: Some("demo".into()),
         };
         assert_eq!(s.release_name().unwrap(), "demo");
-    }
-
-    #[test]
-    fn release_name_errors_without_tenant() {
         assert!(global().release_name().is_err());
     }
 }

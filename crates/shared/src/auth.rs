@@ -315,30 +315,20 @@ mod tests {
         );
         assert_eq!(parse_workspace_from_sa("ws-"), None);
         assert_eq!(parse_workspace_from_sa("ws--unprivileged"), None);
-    }
-
-    #[test]
-    fn parse_workspace_no_prefix() {
         assert_eq!(parse_workspace_from_sa("default"), None);
     }
 
     #[test]
-    fn extract_bearer_valid() {
+    fn extract_bearer_only_accepts_a_bearer_authorization_header() {
         let mut req = Request::new(());
         req.metadata_mut()
             .insert("authorization", "Bearer test-token".parse().unwrap());
         assert_eq!(extract_bearer_token(&req).unwrap(), "test-token");
-    }
 
-    #[test]
-    fn extract_bearer_missing() {
         let req = Request::new(());
         let err = extract_bearer_token(&req).unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
-    }
 
-    #[test]
-    fn extract_bearer_malformed() {
         let mut req = Request::new(());
         req.metadata_mut()
             .insert("authorization", "Basic xxx".parse().unwrap());
@@ -402,12 +392,6 @@ mod tests {
     }
 
     #[test]
-    fn workspace_from_username_harness_subject_resolves_workspace() {
-        let ws = workspace_from_username("system:serviceaccount:ns:ws-hello-world").unwrap();
-        assert_eq!(ws, "hello-world");
-    }
-
-    #[test]
     fn workspace_from_username_non_workspace_sa_denies() {
         let err = workspace_from_username("system:serviceaccount:ns:default").unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
@@ -438,18 +422,6 @@ mod tests {
     }
 
     #[test]
-    fn pinned_review_rejects_empty_audiences_echo() {
-        let review = review_with(
-            Some(true),
-            Some("system:serviceaccount:ns:ws-hello-world"),
-            Some(vec![]),
-        );
-        let err = username_from_review(review, Some(TEST_AUDIENCE)).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
-        assert!(err.message().contains("audience echo mismatch"));
-    }
-
-    #[test]
     fn pinned_review_rejects_audiences_echo_without_requested() {
         let review = review_with(
             Some(true),
@@ -464,7 +436,7 @@ mod tests {
     #[test]
     fn pinned_review_accepts_audiences_echo_containing_requested() {
         // Multi-audience echo with the requested audience among others — must
-        // succeed (catches a future mutant that flips `any` → strict equality).
+        // succeed: any listed audience matches, not strict equality.
         let review = review_with(
             Some(true),
             Some("system:serviceaccount:ns:ws-hello-world"),
@@ -475,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn build_token_review_includes_toolset_toolset_audience() {
+    fn build_token_review_carries_the_token_and_its_single_audience() {
         let tr = build_token_review("the-token", Some(TOOL_TOOLSET_AUDIENCE));
         assert_eq!(
             tr.spec.audiences,
@@ -483,15 +455,7 @@ mod tests {
             "TokenReviewSpec.audiences must carry the configured audience so \
              kube-apiserver rejects tokens minted for other audiences"
         );
-    }
-
-    #[test]
-    fn build_token_review_includes_harness_relay_audience() {
-        let tr = build_token_review("the-token", Some(HARNESS_RELAY_AUDIENCE));
-        assert_eq!(
-            tr.spec.audiences,
-            Some(vec![HARNESS_RELAY_AUDIENCE.to_string()]),
-        );
+        assert_eq!(tr.spec.token, Some("the-token".to_string()));
     }
 
     #[test]
@@ -510,12 +474,6 @@ mod tests {
                 assert_ne!(all[i], all[j], "audiences {i} and {j} must differ");
             }
         }
-    }
-
-    #[test]
-    fn build_token_review_includes_token() {
-        let tr = build_token_review("the-token", Some(TOOL_TOOLSET_AUDIENCE));
-        assert_eq!(tr.spec.token, Some("the-token".to_string()));
     }
 
     // --- Person-token reviews and the username they yield ---

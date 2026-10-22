@@ -22,13 +22,18 @@ pub(crate) enum Command {
     Destroy(DestroyCmd),
     Upgrade(UpgradeCmd),
     Tenant(TenantCmd),
+    /// Join this host to a tenant's headscale tailnet. Run after `tenant up`
+    /// provisions the tenant and its headscale instance
+    Connect(ConnectCmd),
     /// Install or remove one toolset through its provision and reap commands
     #[command(
         mut_subcommand("up", |c| c.after_long_help(TOOLSET_UP_EXAMPLES)),
         mut_subcommand("down", |c| c.after_long_help(TOOLSET_DOWN_EXAMPLES))
     )]
     Toolset(ComponentCmd),
-    /// Install or remove one workspace through its provision and reap commands
+    /// Install or remove one workspace. `up` takes exactly one -f and replaces
+    /// the workspace's instructions folder before provisioning; `down` deletes
+    /// the folder after the reap
     #[command(
         mut_subcommand("up", |c| c.after_long_help(WORKSPACE_UP_EXAMPLES)),
         mut_subcommand("down", |c| c.after_long_help(WORKSPACE_DOWN_EXAMPLES))
@@ -52,7 +57,7 @@ pub(crate) enum Command {
 // --- setup / destroy (cluster — no --ns) ---
 
 /// Set up a local Sycophant cluster
-//  
+//
 /// Stand up a sycophant-ready cluster from nothing: ensure the k3d cluster
 /// `sycophant` with the apiserver trusting the bundled Dex, install the gVisor
 /// node runtime, Cilium, Kyverno, the sycophant cluster layer, and Dex with the
@@ -68,6 +73,16 @@ pub(crate) struct SetupCmd {}
 /// (irreversible). Inverse of `setup`.
 #[derive(Args)]
 pub(crate) struct DestroyCmd {}
+
+/// Join this host to a tenant's headscale tailnet. Port-forwards headscale,
+/// mints a pre-auth key, runs `sudo tailscale up`, and verifies the join.
+/// Run once after `sycoadm tenant up`.
+#[derive(Args)]
+pub(crate) struct ConnectCmd {
+    /// tenant name (e.g. `e2e-test`; the namespace `tenant-<name>` is derived)
+    #[arg(long)]
+    pub tenant: String,
+}
 
 // --- upgrade (validate the cluster, upgrade it, re-provision every tenant) ---
 
@@ -125,7 +140,7 @@ pub(crate) enum TenantSub {
 }
 
 /// Temporarily stop a tenant without deleting its stored data
-/// 
+///
 // Suspend the tenant: scales it to zero, keeps all data. Prompts for the
 /// operator password
 #[derive(Args)]
@@ -139,7 +154,7 @@ pub(crate) struct TenantDown {
 }
 
 /// Delete a tenant completely, including its persistent data (irreversible)
-/// 
+///
 // Delete the tenant completely, including its PVCs/data (irreversible). The
 /// cluster reaps it on its next sweep. Prompts for the operator password
 #[derive(Args)]
@@ -189,7 +204,7 @@ pub(crate) struct SecretDelete {
 // --- audit ---
 
 /// Audit a running workspace against Sycophant security controls
-/// 
+///
 // Audit a running workspace against the security clauses (gVisor isolation,
 /// secret scrubbing, egress containment, L7 DNS allowlist, credential isolation,
 /// tool execution, workspace SA). Probes the live sandbox — the workspace must
@@ -280,7 +295,7 @@ pub(crate) enum ComponentSub {
 }
 
 /// Remove a component by name and wait for its uninstall to complete
-/// 
+///
 // Remove a component: write its reap command as the operator and wait for the
 /// uninstall. Prompts for the operator password. A failed uninstall leaves the
 /// reap command and exits non-zero
@@ -292,8 +307,6 @@ pub(crate) struct ComponentDown {
     #[arg(long)]
     pub tenant: String,
 }
-
-
 
 // --- long help: examples (shown by --help, not -h) ---
 
@@ -469,7 +482,7 @@ mod tests {
             "Delete the cluster and all tenant data (irreversible)",
             "Check or upgrade the cluster and its tenants",
             "Manage tenant lifecycle, secrets, and audits",
-            "Provision a framework user from configuration",
+            "Provision a framework user from a values file",
         ] {
             assert!(help.contains(expected), "help missing: {expected}");
         }

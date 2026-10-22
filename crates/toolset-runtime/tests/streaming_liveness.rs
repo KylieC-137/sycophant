@@ -25,12 +25,6 @@ fn no_scrub() -> ScrubSet {
 // within the timeout and the `recv` expect reds. An incremental producer
 // forwards the line the instant the reader yields it, so the frame arrives in
 // milliseconds, well before the child terminates.
-//
-// Materiality: reverting the producer to buffer-then-emit — emitting frames
-// only after `child.wait()` / `read_to_end` rather than per line as chunks
-// arrive — defers the first frame past the child's exit, timing out `recv` and
-// reding this test. (The shipped placeholder body of `stream_frames` is exactly
-// that buffered form, so this test is RED against the current code.)
 #[tokio::test]
 async fn a_stdout_frame_is_emitted_while_the_child_is_still_running() {
     // `sh`'s `echo` builtin write()s the line to the pipe and flushes before the

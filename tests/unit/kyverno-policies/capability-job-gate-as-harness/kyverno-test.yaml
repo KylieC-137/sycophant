@@ -8,6 +8,7 @@ resources:
   - resource-mounts.yaml
   - jobs.yaml
   - model-secret.yaml
+  - extra.yaml
 userinfo: user-harness-research.yaml
 context: context.yaml
 variables: values.yaml
@@ -18,6 +19,7 @@ results:
     resources:
       - tenant-offline/own-workspace-pvc
       - tenant-offline/inference-own-model-secret
+      - tenant-offline/approved-secret-env
   - policy: cluster-capability-job-gate
     kind: Job
     result: fail
@@ -29,6 +31,16 @@ results:
       - tenant-offline/configmap-envfrom
       - tenant-offline/inference-other-model-secret
       - tenant-offline/tool-model-secret
+      - tenant-offline/off-secret-volume
+      - tenant-offline/off-secret-projected
+      - tenant-offline/off-secret-env-init
+      - tenant-offline/off-secret-envfrom
+      - tenant-offline/off-image-pull-secret
+      - tenant-offline/cross-workspace-secret
+      - tenant-offline/csi-volume
+      - tenant-offline/wrong-sa
+      - tenant-offline/bad-job-kind
+      - tenant-offline/hostile-security-context
   - policy: cluster-capability-job-gate-envelope
     isMutatingPolicy: true
     kind: Job

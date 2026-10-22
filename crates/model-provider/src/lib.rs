@@ -2,9 +2,6 @@ pub mod claude;
 pub mod gemini;
 pub mod merge;
 pub mod openai;
-pub mod types;
-
-pub use types::*;
 
 use async_trait::async_trait;
 use futures::Stream;
@@ -34,28 +31,13 @@ mod sse_buffer_tests {
     }
 
     #[test]
-    fn split_returns_event_and_remainder_at_first_separator() {
-        let (event, rest) = split_first_sse_event("first\n\nsecond\n\nthird").unwrap();
-        assert_eq!(event, "first");
-        assert_eq!(rest, "second\n\nthird");
-    }
-
-    #[test]
     fn split_with_two_events_extracted_in_sequence() {
-        // Catches `pos + 2 -> pos - 2` and `pos + 2 -> pos * 2` mutations.
         // If the offset is wrong, the second event would be malformed.
         let (event1, rest) = split_first_sse_event("a\n\nb\n\nc").unwrap();
         assert_eq!(event1, "a");
         let (event2, rest2) = split_first_sse_event(&rest).unwrap();
         assert_eq!(event2, "b");
         assert_eq!(rest2, "c");
-    }
-
-    #[test]
-    fn split_with_empty_event_text() {
-        let (event, rest) = split_first_sse_event("\n\nremainder").unwrap();
-        assert_eq!(event, "");
-        assert_eq!(rest, "remainder");
     }
 }
 
@@ -235,20 +217,6 @@ pub fn collect_text(events: &[StreamEvent]) -> Option<String> {
     }
 }
 
-pub fn collect_thinking(events: &[StreamEvent]) -> Option<String> {
-    let mut text = String::new();
-    for event in events {
-        if let StreamEvent::ThinkingDelta { text: t } = event {
-            text.push_str(t);
-        }
-    }
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
-}
-
 #[cfg(test)]
 mod provider_helpers {
     use super::*;
@@ -264,14 +232,29 @@ mod provider_helpers {
             },
         ];
         assert_eq!(collect_text(&events), Some("Hello world".into()));
-    }
 
-    #[test]
-    fn collect_text_empty_when_no_deltas() {
         let events = vec![StreamEvent::Done {
             stop_reason: "end_turn".into(),
         }];
         assert_eq!(collect_text(&events), None);
+    }
+
+    #[test]
+    fn assemble_turn_complete_maps_stop_reasons() {
+        use toolset_proto::turn_event;
+        let cases = [
+            ("end_turn", proto_common::StopReason::EndTurn),
+            ("tool_use", proto_common::StopReason::ToolUse),
+            ("max_tokens", proto_common::StopReason::MaxTokens),
+        ];
+        for (raw, want) in cases {
+            let Some(turn_event::Event::Complete(complete)) =
+                assemble_turn_complete(&[], raw).event
+            else {
+                panic!("expected a TurnComplete for {raw}");
+            };
+            assert_eq!(complete.stop_reason, want as i32, "{raw}");
+        }
     }
 
     #[test]
@@ -287,27 +270,6 @@ mod provider_helpers {
             StreamEvent::ToolUseInput {
                 json: r#"and":"ls"}"#.into(),
             },
-            StreamEvent::Done {
-                stop_reason: "tool_use".into(),
-            },
-        ];
-        let calls = collect_tool_calls(&events);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].id, "tc-1");
-        assert_eq!(calls[0].name, "bash");
-        assert_eq!(calls[0].input_json, r#"{"command":"ls"}"#);
-    }
-
-    #[test]
-    fn collect_tool_calls_handles_multiple() {
-        let events = vec![
-            StreamEvent::ToolUseStart {
-                id: "tc-1".into(),
-                name: "bash".into(),
-            },
-            StreamEvent::ToolUseInput {
-                json: r#"{"command":"ls"}"#.into(),
-            },
             StreamEvent::ToolUseStart {
                 id: "tc-2".into(),
                 name: "read".into(),
@@ -321,8 +283,12 @@ mod provider_helpers {
         ];
         let calls = collect_tool_calls(&events);
         assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id, "tc-1");
         assert_eq!(calls[0].name, "bash");
+        assert_eq!(calls[0].input_json, r#"{"command":"ls"}"#);
+        assert_eq!(calls[1].id, "tc-2");
         assert_eq!(calls[1].name, "read");
+        assert_eq!(calls[1].input_json, r#"{"path":"foo.rs"}"#);
     }
 
     #[test]
@@ -336,27 +302,6 @@ mod provider_helpers {
                 id: "tc-1".into(),
                 name: "notion-whoami".into(),
             },
-            StreamEvent::Done {
-                stop_reason: "tool_use".into(),
-            },
-        ];
-        let calls = collect_tool_calls(&events);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].input_json, "{}");
-    }
-
-    #[test]
-    fn collect_tool_calls_zero_args_empty_input_event_yields_empty_object() {
-        // Variant: Anthropic streams a single empty partial_json fragment.
-        // Accumulator becomes Value::String("") which doesn't parse as
-        // JSON; we still must normalize to {} so the downstream message
-        // round-trips through the API.
-        let events = vec![
-            StreamEvent::ToolUseStart {
-                id: "tc-1".into(),
-                name: "notion-whoami".into(),
-            },
-            StreamEvent::ToolUseInput { json: "".into() },
             StreamEvent::Done {
                 stop_reason: "tool_use".into(),
             },
@@ -389,21 +334,13 @@ mod provider_helpers {
     }
 
     #[test]
-    fn format_enum_deserializes_from_lowercase() {
+    fn format_enum_parses_only_known_lowercase_names() {
         let f: Format = serde_json::from_str("\"anthropic\"").unwrap();
         assert_eq!(f, Format::Anthropic);
         let f: Format = serde_json::from_str("\"openai\"").unwrap();
         assert_eq!(f, Format::OpenAi);
-    }
-
-    #[test]
-    fn format_enum_deserializes_gemini() {
         let f: Format = serde_json::from_str("\"gemini\"").unwrap();
         assert_eq!(f, Format::Gemini);
-    }
-
-    #[test]
-    fn format_enum_rejects_unknown() {
         let result: Result<Format, _> = serde_json::from_str("\"banana\"");
         assert!(result.is_err());
     }
@@ -424,35 +361,5 @@ mod provider_helpers {
             provider.managed_fields(),
             &["model", "messages", "tools", "stream"]
         );
-    }
-
-    #[test]
-    fn gemini_managed_fields_returns_expected_keys() {
-        let provider = Format::Gemini.build("https://generativelanguage.googleapis.com");
-        assert_eq!(
-            provider.managed_fields(),
-            &["model", "contents", "systemInstruction", "tools"]
-        );
-    }
-
-    #[test]
-    fn collect_thinking_from_deltas() {
-        let events = vec![
-            StreamEvent::ThinkingDelta {
-                text: "Let me ".into(),
-            },
-            StreamEvent::ThinkingDelta {
-                text: "think...".into(),
-            },
-        ];
-        assert_eq!(collect_thinking(&events), Some("Let me think...".into()));
-    }
-
-    #[test]
-    fn collect_thinking_none_when_no_deltas() {
-        let events = vec![StreamEvent::ContentDelta {
-            text: "hello".into(),
-        }];
-        assert_eq!(collect_thinking(&events), None);
     }
 }

@@ -3,6 +3,7 @@
 {{- $data := pick . "storage" }}
 {{- with .toolsets }}{{ $_ := set $data "toolsets" (join "," .) }}{{ end }}
 {{- with .models }}{{ $_ := set $data "models" (join "," .) }}{{ end }}
+{{- with .instructionsHash }}{{ $_ := set $data "instructions-hash" . }}{{ end }}
 {{- range $toolset, $grants := .grants }}
 {{- range $grant, $fields := $grants }}
 {{- range $field, $v := $fields }}{{ $_ := set $data (printf "grant.%s.%s.%s" $toolset $grant $field) $v }}{{ end }}

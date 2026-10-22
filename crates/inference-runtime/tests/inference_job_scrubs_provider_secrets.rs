@@ -5,9 +5,13 @@
 //! (the prompt-injection shape) and asserts the streamed frames carry the
 //! redaction tag, not the plaintext key.
 //!
-//! Materiality: with the scrub unwired, the model's content delta and the
-//! assembled `TurnComplete` reach the harness with the raw credential in them,
-//! reding both the "no plaintext" and the "redaction tag present" assertions.
+//! It also pins the harness-dialed serve path: the pod is a gRPC SERVER, the
+//! harness dials it and sends the assignment as the first `RunInferenceCommand`
+//! on a held `InferenceJob.Run` stream, and the pod runs the model call and
+//! streams the `TurnEvent`s back on the same connection. No `ToolsetController`
+//! server exists here, so a runtime that dialed out for its assignment could
+//! never complete. The exact `TurnComplete` text proves the provider ran and
+//! the terminal frame was assembled (and scrubbed).
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -61,7 +65,7 @@ impl LlmProvider for LeakingProvider {
 
 #[tokio::test]
 #[serial]
-async fn the_pod_scrubs_the_provider_secret_from_every_outbound_frame() {
+async fn the_pod_serves_a_turn_and_scrubs_the_provider_secret_from_it() {
     // Arm the service's scrub set with the provider credential BEFORE the
     // service is constructed — it reads the registry at construction, exactly
     // as the pod does. Both env vars are removed once the set is built.
@@ -146,5 +150,9 @@ async fn the_pod_scrubs_the_provider_secret_from_every_outbound_frame() {
     assert!(
         joined.contains("[REDACTED:provider]"),
         "scrubbed frames carry the redaction tag (proves scrub ran, not that frames were dropped), got {joined:?}"
+    );
+    assert_eq!(
+        complete_text, "here is my key: [REDACTED:provider]",
+        "the pod must run the provider and stream a terminal TurnComplete assembled from its events"
     );
 }

@@ -43,6 +43,7 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: make test-unit-rust
+      - run: make test-unit-cli
       - run: make test-integration-rust
 
   test-unit-k8s:

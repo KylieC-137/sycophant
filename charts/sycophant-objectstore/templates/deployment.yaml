@@ -85,6 +85,9 @@ spec:
             - { name: tmp, mountPath: /tmp }
             - { name: s3-config, mountPath: /etc/seaweedfs/s3, readOnly: true }
             - { name: iam-config, mountPath: /etc/seaweedfs/iam, readOnly: true }
+            # The cluster root CA, to fetch the apiserver's service-account key
+            # set over TLS. The pod itself still holds no service-account token.
+            - { name: cluster-ca, mountPath: /etc/seaweedfs/cluster-ca, readOnly: true }
       volumes:
         - name: data
           persistentVolumeClaim: { claimName: seaweedfs-data }
@@ -94,3 +97,5 @@ spec:
           secret: { secretName: seaweedfs-admin, items: [{ key: s3config.json, path: s3config.json }] }
         - name: iam-config
           secret: { secretName: seaweedfs-iam, items: [{ key: iam.json, path: iam.json }] }
+        - name: cluster-ca
+          configMap: { name: kube-root-ca.crt, items: [{ key: ca.crt, path: ca.crt }] }

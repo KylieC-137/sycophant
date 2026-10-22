@@ -76,28 +76,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn evaluate_returns_503_when_not_subscribed() {
+    fn evaluate_healthz_only_returns_200_when_subscribed() {
         let (status, body) = evaluate("/healthz", false);
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body, "not subscribed");
-    }
 
-    #[test]
-    fn evaluate_returns_200_when_subscribed() {
         let (status, body) = evaluate("/healthz", true);
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, "ok");
     }
 
     #[test]
-    fn evaluate_returns_404_on_other_paths_when_subscribed() {
-        let (status, _) = evaluate("/random", true);
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    #[test]
-    fn evaluate_returns_404_on_other_paths_when_not_subscribed() {
-        let (status, _) = evaluate("/random", false);
-        assert_eq!(status, StatusCode::NOT_FOUND);
+    fn evaluate_returns_404_on_other_paths_regardless_of_subscription() {
+        for subscribed in [true, false] {
+            let (status, _) = evaluate("/random", subscribed);
+            assert_eq!(status, StatusCode::NOT_FOUND, "subscribed={subscribed}");
+        }
     }
 }

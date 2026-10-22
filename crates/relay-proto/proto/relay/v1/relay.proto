@@ -46,9 +46,10 @@ service RelayInternal {
   rpc Subscribe (sycophant.common.v1.SubscribeRequest) returns (stream sycophant.common.v1.UserMessage);
   rpc SendServerNotification (sycophant.common.v1.SendServerNotificationRequest) returns (sycophant.common.v1.SendServerNotificationResponse);
   rpc SendServerRequestAndAwait (sycophant.common.v1.SendServerRequestAndAwaitRequest) returns (sycophant.common.v1.SendServerRequestAndAwaitResponse);
-  // The harness pushes assistant reply + terminal turn-state in one
-  // ordered call.
-  rpc DeliverOutbound (DeliverOutboundRequest) returns (DeliverOutboundResponse);
+  // The harness pushes the assistant reply as a separate RPC from turn-state.
+  rpc DeliverReply (DeliverReplyRequest) returns (DeliverReplyResponse);
+  // The harness pushes a terminal turn-state event as a separate RPC.
+  rpc DeliverTurnState (DeliverTurnStateRequest) returns (DeliverTurnStateResponse);
   // Harness pushes one streamed activity frame produced during a turn.
   // Unary-per-frame; the gateway wraps the StreamItem verbatim into a
   // ChannelOutbound and relays it unchanged (no payload inspection).
@@ -58,12 +59,44 @@ service RelayInternal {
 message DeliverStreamItemRequest {
   string channel_id = 1;
   sycophant.common.v1.StreamItem item = 2;
+  // Workspace-scoped sequence number assigned by the harness.
+  uint64 workspace_seq = 3;
 }
 
 message DeliverStreamItemResponse {
   bool delivered = 1;
 }
 
+// The harness pushes the assistant reply (ChannelSend) as a separate
+// frame from the terminal turn-state.
+message DeliverReplyRequest {
+  string conversation_id = 1;
+  repeated sycophant.common.v1.ContentBlock content = 2;
+  // Workspace-scoped sequence number assigned by the harness.
+  uint64 workspace_seq = 3;
+}
+
+message DeliverReplyResponse {
+  bool delivered = 1;
+}
+
+// The harness pushes a turn-state event. Carries the subject directly
+// so the relay can record turn state without a per-channel lookup.
+message DeliverTurnStateRequest {
+  string channel_id = 1;
+  sycophant.common.v1.TurnStateEvent turn_state = 2;
+  // Workspace-scoped sequence number assigned by the harness.
+  uint64 workspace_seq = 3;
+  // The subject that owns this turn state. The relay uses this to
+  // record the turn state keyed by subject, not channel.
+  string subject = 4;
+}
+
+message DeliverTurnStateResponse {
+  bool delivered = 1;
+}
+
+// Kept for backward compatibility — no longer used by the harness.
 message DeliverOutboundRequest {
   string channel_id = 1;
   string conversation_id = 2;

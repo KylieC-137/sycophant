@@ -86,7 +86,7 @@ fn header_lines(head: &str, name: &str) -> Vec<String> {
 /// Breaks if the authorization header is attached unconditionally, which is
 /// what sends a bearer token with no token in it.
 #[tokio::test]
-async fn an_empty_api_key_sends_no_authorization_header() {
+async fn openai_only_sends_a_bearer_header_for_a_non_empty_key() {
     let head = request_head_for(openai, "").await;
     let found = header_lines(&head, "authorization");
     assert!(
@@ -98,12 +98,10 @@ async fn an_empty_api_key_sends_no_authorization_header() {
         head.starts_with("POST /v1/chat/completions "),
         "the completion request must still be issued, got head:\n{head}"
     );
-}
 
-/// Breaks if the header is dropped for every request rather than only for the
-/// keyless one, which silently unauthenticates every external provider.
-#[tokio::test]
-async fn a_present_api_key_still_sends_a_bearer_authorization_header() {
+    // A declared key is still presented, exactly once, as a bearer token.
+    // Breaks if the header is dropped for every request rather than only for
+    // the keyless one, which silently unauthenticates every external provider.
     let head = request_head_for(openai, "sk-live-key").await;
     let found = header_lines(&head, "authorization");
     assert_eq!(
@@ -123,7 +121,7 @@ async fn a_present_api_key_still_sends_a_bearer_authorization_header() {
 /// Breaks if `x-api-key` is attached unconditionally, which sends an empty
 /// credential rather than none.
 #[tokio::test]
-async fn an_empty_api_key_sends_no_x_api_key_header() {
+async fn claude_only_sends_x_api_key_for_a_non_empty_key() {
     let head = request_head_for(claude, "").await;
     let found = header_lines(&head, "x-api-key");
     assert!(
@@ -141,12 +139,10 @@ async fn an_empty_api_key_sends_no_x_api_key_header() {
         1,
         "dropping the credential must not drop the dialect's other headers"
     );
-}
 
-/// Breaks if the header is dropped for every request rather than only for the
-/// keyless one, which silently unauthenticates every external provider.
-#[tokio::test]
-async fn a_present_api_key_still_sends_an_x_api_key_header() {
+    // A declared key is still presented, exactly once, verbatim.
+    // Breaks if the header is dropped for every request rather than only for
+    // the keyless one, which silently unauthenticates every external provider.
     let head = request_head_for(claude, "sk-ant-live-key").await;
     let found = header_lines(&head, "x-api-key");
     assert_eq!(

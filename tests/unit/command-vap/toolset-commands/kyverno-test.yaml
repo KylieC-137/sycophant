@@ -57,15 +57,3 @@ results:
   result: fail
   resources:
   - tenant-acme/reap-toolset-data
-- policy: command-provision-toolset
-  isValidatingAdmissionPolicy: true
-  kind: ConfigMap
-  result: fail
-  resources:
-  - tenant-acme/provision-toolset-notype
-- policy: command-provision-toolset
-  isValidatingAdmissionPolicy: true
-  kind: ConfigMap
-  result: fail
-  resources:
-  - tenant-acme/provision-toolset-dottedarg

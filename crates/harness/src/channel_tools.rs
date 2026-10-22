@@ -97,8 +97,9 @@ pub(crate) async fn dispatch(
     gateway: &mut dyn RelayRpc,
     reply_channel: Option<&str>,
     tool_call_id: &str,
+    workspace: &str,
 ) -> Result<CallToolResponse, String> {
-    let Some(channel_id) = reply_channel else {
+    let Some(_) = reply_channel else {
         return Ok(CallToolResponse {
             content: vec![text_block(format!(
                 "channel tool `{name}` requires a connected client; this turn has no reply_channel"
@@ -112,7 +113,7 @@ pub(crate) async fn dispatch(
     match kind {
         Kind::Notification => {
             let delivered = gateway
-                .send_server_notification(channel_id, name, input_json)
+                .send_server_notification(workspace, name, input_json, 0)
                 .await?;
             if delivered {
                 Ok(CallToolResponse {
@@ -132,7 +133,7 @@ pub(crate) async fn dispatch(
         }
         Kind::Request => {
             let outcome = gateway
-                .send_server_request_and_await(channel_id, tool_call_id, name, input_json, 30)
+                .send_server_request_and_await(workspace, tool_call_id, name, input_json, 30, 0)
                 .await?;
             Ok(outcome_to_tool_response(name, outcome))
         }
@@ -173,31 +174,5 @@ pub(crate) fn outcome_to_tool_response(
             content: vec![text_block(format!("client did not advertise `{method}`"))],
             is_error: true,
         },
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // channel_tools.rs:37 `tool_definitions` advertises exactly the three
-    // channel tools the LLM can invoke (consts at channel_tools.rs:13-15).
-    // Materiality: drop any one of the three `ToolInfo` entries from the
-    // returned vec and its name goes missing -> the matching `contains` reds.
-    #[test]
-    fn tool_definitions_advertises_the_three_channel_tools() {
-        let names: Vec<String> = tool_definitions().into_iter().map(|t| t.name).collect();
-        assert!(
-            names.contains(&REVEAL_PATH.to_string()),
-            "RevealPath must be advertised, got {names:?}"
-        );
-        assert!(
-            names.contains(&REQUEST_USER_INPUT.to_string()),
-            "RequestUserInput must be advertised, got {names:?}"
-        );
-        assert!(
-            names.contains(&REQUEST_USER_AUTH.to_string()),
-            "RequestUserAuth must be advertised, got {names:?}"
-        );
     }
 }

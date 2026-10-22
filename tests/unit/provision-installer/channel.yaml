@@ -16,12 +16,3 @@ data:
   loginServer: http://headscale:8080
   hostname: relay
   authKeySecret: relay-tsnet-authkey
-  headscale.enabled: "true"
-  headscale.image: headscale/headscale
-  headscale.tag: "0.28.0"
-  headscale.pullPolicy: Always
-  headscale.serverUrl: http://localhost:8080
-  headscale.magicDns: "true"
-  headscale.baseDomain: ts.local
-  headscale.acme.enabled: "false"
-  headscale.acme.email: ops@example.com

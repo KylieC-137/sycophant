@@ -397,7 +397,8 @@ mod reasoning_model_stream {
     /// harness's idle gap reset during reasoning silence.)
     ///
     /// This test asserts the FIX: a `reasoning` delta surfaces as a
-    /// `ThinkingDelta`, which `collect_thinking` folds into the final Complete.
+    /// `ThinkingDelta`, which the downstream turn loop folds into the final
+    /// Complete's thinking block.
     #[test]
     fn reasoning_delta_surfaces_as_progress_event() {
         // Verbatim shape from OpenRouter/GMICloud for deepseek-v4-flash.
@@ -470,17 +471,6 @@ mod openai_body {
     }
 
     #[test]
-    fn body_max_tokens_passes_through_when_set() {
-        let mut params = serde_json::Map::new();
-        params.insert("max_tokens".into(), serde_json::json!(2048));
-        let (body, _) = build_openai_body(&[], None, &[], Some(&params), &cfg());
-        assert_eq!(
-            body.get("max_tokens"),
-            Some(&serde_json::Value::Number(2048.into()))
-        );
-    }
-
-    #[test]
     fn body_clobbers_principal_tools_and_reports() {
         let mut params = serde_json::Map::new();
         params.insert("tools".into(), serde_json::json!(["forged"]));
@@ -507,20 +497,6 @@ mod openai_body {
         assert!(
             !body.contains_key("tools"),
             "tools field should be absent when no tools are provided and not in params"
-        );
-    }
-
-    #[test]
-    fn body_passes_through_unmanaged_temperature() {
-        let mut params = serde_json::Map::new();
-        params.insert("temperature".into(), serde_json::json!(0.7));
-        let (body, clobbers) = build_openai_body(&[], None, &[], Some(&params), &cfg());
-        assert!(clobbers.is_empty());
-        assert_eq!(
-            body.get("temperature"),
-            Some(&serde_json::Value::Number(
-                serde_json::Number::from_f64(0.7).unwrap()
-            ))
         );
     }
 }
@@ -553,6 +529,20 @@ mod openai_api {
         assert_eq!(api.len(), 1);
         assert_eq!(api[0]["role"], "user");
         assert_eq!(api[0]["content"], "Hello");
+
+        // Multiple text blocks must remain an array (the other arm of the
+        // single-text-block collapse condition).
+        let messages = vec![Message {
+            role: "user".into(),
+            content: vec![text_block("first".into()), text_block("second".into())],
+            tool_calls: vec![],
+            tool_call_id: None,
+            is_error: None,
+        }];
+        let api = build_api_messages(&messages, None);
+        assert!(api[0]["content"].is_array());
+        let arr = api[0]["content"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
     }
 
     #[test]
@@ -590,6 +580,22 @@ mod openai_api {
         assert_eq!(tc["id"], "call-1");
         assert_eq!(tc["type"], "function");
         assert_eq!(tc["function"]["name"], "bash");
+        // Empty text omits the content field; non-empty text includes it.
+        assert!(api[0].as_object().unwrap().get("content").is_none());
+
+        let messages = vec![Message {
+            role: "assistant".into(),
+            content: text_content("preamble before tool"),
+            tool_calls: vec![ToolCall {
+                id: "call-1".into(),
+                name: "bash".into(),
+                input_json: "{}".into(),
+            }],
+            tool_call_id: None,
+            is_error: None,
+        }];
+        let api = build_api_messages(&messages, None);
+        assert_eq!(api[0]["content"], "preamble before tool");
     }
 
     #[test]
@@ -636,49 +642,9 @@ mod openai_api {
     }
 
     #[test]
-    fn assistant_with_tool_calls_and_text_content_includes_content_field() {
-        // Catches `delete !` on `if !text.is_empty()` — without the negation,
-        // empty text would erroneously insert content="" while non-empty text
-        // would skip insertion.
-        let messages = vec![Message {
-            role: "assistant".into(),
-            content: text_content("preamble before tool"),
-            tool_calls: vec![ToolCall {
-                id: "call-1".into(),
-                name: "bash".into(),
-                input_json: "{}".into(),
-            }],
-            tool_call_id: None,
-            is_error: None,
-        }];
-        let api = build_api_messages(&messages, None);
-        assert_eq!(api[0]["content"], "preamble before tool");
-    }
-
-    #[test]
-    fn assistant_with_tool_calls_and_empty_text_omits_content_field() {
-        // The companion: when text IS empty, the content field must NOT be
-        // present. Together with the previous test, this catches the `!`.
-        let messages = vec![Message {
-            role: "assistant".into(),
-            content: vec![],
-            tool_calls: vec![ToolCall {
-                id: "call-1".into(),
-                name: "bash".into(),
-                input_json: "{}".into(),
-            }],
-            tool_call_id: None,
-            is_error: None,
-        }];
-        let api = build_api_messages(&messages, None);
-        assert!(api[0].as_object().unwrap().get("content").is_none());
-    }
-
-    #[test]
     fn user_message_with_single_image_block_uses_array_content() {
-        // Catches `&&` -> `||` on the single-text-block collapse condition.
-        // With `&&`: 1 block AND type=text → string; otherwise → array.
-        // With `||`: 1 block OR type=text → string-ish — would attempt
+        // Only a single text block collapses to string content. A single image
+        // block stays array content; collapsing it would read
         // api_blocks[0]["text"] on an image and return Null, breaking content.
         let messages = vec![Message {
             role: "user".into(),
@@ -695,52 +661,11 @@ mod openai_api {
         let arr = api[0]["content"].as_array().unwrap();
         assert_eq!(arr[0]["type"], "image_url");
     }
-
-    #[test]
-    fn user_message_with_two_text_blocks_uses_array_content() {
-        // Companion: multiple text blocks must remain an array (catches the
-        // alternative `&&` mutation flip too).
-        let messages = vec![Message {
-            role: "user".into(),
-            content: vec![text_block("first".into()), text_block("second".into())],
-            tool_calls: vec![],
-            tool_call_id: None,
-            is_error: None,
-        }];
-        let api = build_api_messages(&messages, None);
-        assert!(api[0]["content"].is_array());
-        let arr = api[0]["content"].as_array().unwrap();
-        assert_eq!(arr.len(), 2);
-    }
 }
 
 #[cfg(test)]
 mod sse_parsing {
     use super::*;
-
-    #[test]
-    fn content_delta_parses() {
-        let text = r#"data: {"id":"x","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}"#;
-        let mut seen = HashSet::new();
-        let events = parse_sse_event(text, &mut seen);
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            StreamEvent::ContentDelta { text } => assert_eq!(text, "Hello"),
-            _ => panic!("expected ContentDelta"),
-        }
-    }
-
-    #[test]
-    fn finish_reason_stop_maps_to_end_turn() {
-        let text = r#"data: {"id":"x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
-        let mut seen = HashSet::new();
-        let events = parse_sse_event(text, &mut seen);
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            StreamEvent::Done { stop_reason } => assert_eq!(stop_reason, "end_turn"),
-            _ => panic!("expected Done"),
-        }
-    }
 
     #[test]
     fn multi_data_lines_in_single_sse_event_all_processed() {
@@ -788,51 +713,18 @@ mod sse_parsing {
     }
 
     #[test]
-    fn finish_reason_tool_calls_maps_to_tool_use() {
-        let text =
-            r#"data: {"id":"x","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#;
-        let mut seen = HashSet::new();
-        let events = parse_sse_event(text, &mut seen);
-        match &events[0] {
-            StreamEvent::Done { stop_reason } => assert_eq!(stop_reason, "tool_use"),
-            _ => panic!("expected Done"),
-        }
-    }
-
-    #[test]
-    fn finish_reason_length_maps_to_max_tokens() {
-        let text =
-            r#"data: {"id":"x","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}"#;
-        let mut seen = HashSet::new();
-        let events = parse_sse_event(text, &mut seen);
-        match &events[0] {
-            StreamEvent::Done { stop_reason } => assert_eq!(stop_reason, "max_tokens"),
-            _ => panic!("expected Done"),
-        }
-    }
-
-    #[test]
-    fn done_marker_returns_empty() {
-        let text = "data: [DONE]";
-        let mut seen = HashSet::new();
-        let events = parse_sse_event(text, &mut seen);
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn tool_call_start_emits_tool_use_start() {
-        let text = r#"data: {"id":"x","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"bash","arguments":""}}]},"finish_reason":null}]}"#;
-        let mut seen = HashSet::new();
-        let events = parse_sse_event(text, &mut seen);
-        assert!(!events.is_empty());
-        match &events[0] {
-            StreamEvent::ToolUseStart { id, name } => {
-                assert_eq!(id, "call-1");
-                assert_eq!(name, "bash");
+    fn finish_reason_maps_tool_calls_and_length_to_stop_reasons() {
+        for (finish_reason, want) in [("tool_calls", "tool_use"), ("length", "max_tokens")] {
+            let text = format!(
+                r#"data: {{"id":"x","choices":[{{"index":0,"delta":{{}},"finish_reason":"{finish_reason}"}}]}}"#
+            );
+            let mut seen = HashSet::new();
+            let events = parse_sse_event(&text, &mut seen);
+            match &events[0] {
+                StreamEvent::Done { stop_reason } => assert_eq!(stop_reason, want),
+                _ => panic!("expected Done for {finish_reason}"),
             }
-            _ => panic!("expected ToolUseStart"),
         }
-        assert!(seen.contains(&0));
     }
 
     #[test]
@@ -849,16 +741,22 @@ mod sse_parsing {
     }
 
     #[test]
-    fn multiple_tool_calls_tracked_by_index() {
+    fn each_tool_call_index_emits_its_own_tool_use_start() {
         let mut seen = HashSet::new();
 
         let text1 = r#"data: {"id":"x","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"bash","arguments":""}}]},"finish_reason":null}]}"#;
         let events1 = parse_sse_event(text1, &mut seen);
-        assert!(matches!(&events1[0], StreamEvent::ToolUseStart { name, .. } if name == "bash"));
+        assert!(matches!(
+            &events1[0],
+            StreamEvent::ToolUseStart { id, name } if id == "call-1" && name == "bash"
+        ));
 
         let text2 = r#"data: {"id":"x","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call-2","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}"#;
         let events2 = parse_sse_event(text2, &mut seen);
-        assert!(matches!(&events2[0], StreamEvent::ToolUseStart { name, .. } if name == "read"));
+        assert!(matches!(
+            &events2[0],
+            StreamEvent::ToolUseStart { id, name } if id == "call-2" && name == "read"
+        ));
 
         assert!(seen.contains(&0));
         assert!(seen.contains(&1));

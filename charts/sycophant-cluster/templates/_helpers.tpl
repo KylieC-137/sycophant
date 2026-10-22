@@ -120,7 +120,7 @@ command's uid, so a re-created command never collides with an earlier run's
 Job, even within its TTL.
 
 The tenant provision command lives in sycophant-system and installs the
-sycophant-tenant release from chart defaults. Every other provision command is
+sycophant-tenant release; headscale values come from CEL env vars via jq. Every other provision command is
 `provision-<kind>-<name>` in the tenant namespace it targets, so the tenant is
 the command's own namespace, and installs one release from the
 `sycophant-<kind>` chart, named by sycophant.releasePrefix: `ws-<name>`,
@@ -244,6 +244,22 @@ spec:
               value: (( object.metadata.name ))
             - name: COMMAND_UID
               value: (( object.metadata.uid ))
+            {{- if eq .name "provision-tenant" }}
+            - name: HS_ENABLED
+              value: '(( "headscale.enabled" in object.data ? object.data["headscale.enabled"] : "" ))'
+            - name: HS_SERVER_URL
+              value: '(( "headscale.serverUrl" in object.data ? object.data["headscale.serverUrl"] : "" ))'
+            - name: HS_MAGIC_DNS
+              value: '(( "headscale.magicDns" in object.data ? object.data["headscale.magicDns"] : "" ))'
+            - name: HS_BASE_DOMAIN
+              value: '(( "headscale.baseDomain" in object.data ? object.data["headscale.baseDomain"] : "" ))'
+            - name: HS_STORAGE_CLASS
+              value: '(( "headscale.storageClass" in object.data ? object.data["headscale.storageClass"] : "" ))'
+            - name: HS_ACME_ENABLED
+              value: '(( "headscale.acme.enabled" in object.data ? object.data["headscale.acme.enabled"] : "" ))'
+            - name: HS_ACME_EMAIL
+              value: '(( "headscale.acme.email" in object.data ? object.data["headscale.acme.email"] : "" ))'
+            {{- end }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
@@ -297,14 +313,40 @@ cat > /tmp/idp-ca.pem <<'IDPCA'
 {{ $ctx.Values.idp.certificateAuthority }}
 IDPCA
 {{- end }}
+# Build headscale values file from CEL-injected env vars. jq --arg escapes
+# all values; empty keys are omitted so the tenant chart's defaults hold.
+# Booleans are converted from the string "true"/"false" to JSON native booleans.
+jq -n \
+  --arg enabled    "$HS_ENABLED" \
+  --arg serverUrl  "$HS_SERVER_URL" \
+  --arg magicDns   "$HS_MAGIC_DNS" \
+  --arg baseDomain "$HS_BASE_DOMAIN" \
+  --arg storageClass "$HS_STORAGE_CLASS" \
+  --arg acmeEnabled "$HS_ACME_ENABLED" \
+  --arg acmeEmail   "$HS_ACME_EMAIL" \
+  '{headscale: (
+    (if $enabled    != "" then {enabled:   ($enabled   == "true")} else {} end) +
+    (if $serverUrl  != "" then {serverUrl: $serverUrl}             else {} end) +
+    (if $magicDns   != "" then {magicDns:  ($magicDns  == "true")} else {} end) +
+    (if $baseDomain != "" then {baseDomain: $baseDomain}           else {} end) +
+    (if $storageClass != "" then {storageClass: $storageClass}     else {} end) +
+    (if $acmeEnabled != "" or $acmeEmail != "" then
+      {acme: (
+        (if $acmeEnabled != "" then {enabled: ($acmeEnabled == "true")} else {} end) +
+        (if $acmeEmail   != "" then {email: $acmeEmail}                else {} end)
+      )}
+    else {} end)
+  )}' > /tmp/hs-values.yaml
 helm upgrade --install "$TENANT" {{ $ctx.Values.provisioner.chartsDir }}/sycophant-tenant \
   --namespace "$TENANT" \
+  --reset-then-reuse-values \
   --set namespace.create=false \
   --set-string idp.issuer={{ $ctx.Values.idp.issuer }} \
   --set-string idp.audience={{ $ctx.Values.idp.audience }} \
 {{- if $ctx.Values.idp.certificateAuthority }}
   --set-file idp.certificateAuthority=/tmp/idp-ca.pem \
 {{- end }}
+  -f /tmp/hs-values.yaml \
   --take-ownership \
   --timeout 10m
 kubectl delete configmap "$COMMAND" -n sycophant-system

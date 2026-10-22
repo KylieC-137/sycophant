@@ -20,6 +20,11 @@
         "pullPolicy": {
           "type": "string",
           "enum": ["Always", "IfNotPresent", "Never"]
+        },
+        "heartbeatIntervalSecs": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 15
         }
       }
     },
@@ -43,6 +48,32 @@
         "issuer": { "type": "string" },
         "audience": { "type": "string" },
         "certificateAuthority": { "type": "string" }
+      }
+    },
+    "headscale": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean", "default": false },
+        "image": { "type": "string", "default": "headscale/headscale" },
+        "tag": { "type": "string", "default": "0.28.0" },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"],
+          "default": "IfNotPresent"
+        },
+        "serverUrl": { "type": "string" },
+        "magicDns": { "type": "boolean", "default": true },
+        "baseDomain": { "type": "string", "default": "ts.local" },
+        "storageClass": { "type": "string" },
+        "acme": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "email": { "type": "string" }
+          }
+        }
       }
     }
   }

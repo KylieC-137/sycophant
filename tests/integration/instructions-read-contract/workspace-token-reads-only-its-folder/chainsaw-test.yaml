@@ -1,0 +1,97 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: workspace-token-reads-only-its-folder
+spec:
+  description: |
+    The store-agnostic read contract, over S3 and STS only. A workspace pod's
+    projected token (cluster issuer, audience sycophant-objectstore) exchanged
+    through STS AssumeRoleWithWebIdentity for the workspace read role yields
+    credentials that list and read every object in that workspace's folder
+    <bucket>/system:serviceaccount:<ns>:ws-<ws>/, and that are refused on a
+    prefix-sharing sibling's object, on any put or delete, and on a no-slash
+    listing.
+    The same pod's relay-audience token naming the read role is refused at
+    STS. One own-folder exchange is the positive control for every case.
+  bindings:
+    - name: tenant_ns
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
+    - name: target_namespace
+      value: ($tenant_ns)
+  steps:
+    - name: create-tenant-ns
+      use:
+        template: ../../step-templates/tenant.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+    - name: await-pod-admission-ready
+      use:
+        template: ../../step-templates/pod-admission-ready.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+    - name: workspace-service-accounts-and-probe-pod
+      try:
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: ws-foo
+                namespace: ($tenant_ns)
+              automountServiceAccountToken: false
+        - apply:
+            template: true
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: ws-foobar
+                namespace: ($tenant_ns)
+              automountServiceAccountToken: false
+        - apply:
+            file: ../../fixtures/instructions-read-probe-pod.yaml
+            template: true
+        - assert:
+            timeout: 90s
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: ws-foo-probe
+                namespace: ($tenant_ns)
+              status:
+                phase: Running
+      catch:
+        - events:
+            namespace: ($tenant_ns)
+    - name: seed-folders
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -euo pipefail
+              bash "$(git rev-parse --show-toplevel)/tests/integration/instructions-read-contract/workspace-token-reads-only-its-folder/contract.sh" seed
+      cleanup:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -euo pipefail
+              bash "$(git rev-parse --show-toplevel)/tests/integration/instructions-read-contract/workspace-token-reads-only-its-folder/contract.sh" clean
+    - name: read-contract
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -euo pipefail
+              bash "$(git rev-parse --show-toplevel)/tests/integration/instructions-read-contract/workspace-token-reads-only-its-folder/contract.sh" all

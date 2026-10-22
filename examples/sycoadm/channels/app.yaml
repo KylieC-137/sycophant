@@ -1,12 +1,12 @@
-# The app channel with in-cluster headscale on plain HTTP :8080. The operator
-# reaches headscale by port-forward at serverUrl; the app adapter joins it at
-# the Service DNS name. Mint the adapter's pre-auth key into
+# The app channel with an adapter that joins the tenant's headscale tailnet.
+# The operator reaches headscale by port-forward at serverUrl; the app adapter
+# joins it at the Service DNS name. Mint the adapter's pre-auth key into
 # `relay-tsnet-authkey` once headscale is Available.
+#
+# Headscale itself is installed by the tenant chart — see
+# examples/sycoadm/tenants/e2e-test.yaml for the headscale settings.
 channel:
   name: app
   tenant: e2e-test
   kind: app
   loginServer: http://headscale:8080
-  headscale:
-    enabled: true
-    serverUrl: http://localhost:8080

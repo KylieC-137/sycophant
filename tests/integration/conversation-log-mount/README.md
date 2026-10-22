@@ -13,7 +13,8 @@ wait is needed. Admission is spec-only, so the referenced PVC need not exist.
 | Test                         | Property under test                                            |
 |------------------------------|----------------------------------------------------------------|
 | rogue-pod-mount-denied/      | A label-less pod mounting a `ws-*-conversation` PVC is denied |
-| harness-mount-admitted/  | A harness pod mounting it is admitted (guard doesn't break the legit mount) |
+
+The harness's own mount is admitted in `harness-pod-shape/compliant-pod-admits`.
 
 Belongs here: the conversation-log mount restriction. Doesn't belong here: the
 harness pod-shape rules (see `harness-pod-shape/`).

@@ -99,30 +99,3 @@ metadata:
     app.kubernetes.io/part-of: sycophant
 data:
   image: ghcr.io/sycophant-md/git@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: provision-toolset-notype
-  namespace: tenant-acme
-  labels:
-    sycophant.md/command: 'true'
-    app.kubernetes.io/part-of: sycophant
-data:
-  image: ghcr.io/sycophant-md/git@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-  tool.git-clone.description: Clone a git repository.
-  tool.git-clone.arg.url.env: url
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: provision-toolset-dottedarg
-  namespace: tenant-acme
-  labels:
-    sycophant.md/command: 'true'
-    app.kubernetes.io/part-of: sycophant
-data:
-  image: ghcr.io/sycophant-md/git@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-  tool.git-clone.description: Clone a git repository.
-  tool.git-clone.arg.u.rl.type: string
-  tool.git-clone.arg.u.rl.env: url

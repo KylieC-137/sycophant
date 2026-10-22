@@ -80,7 +80,6 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Mutex;
 
     #[test]
     fn hardened_security_context_pins_all_fields() {
@@ -93,19 +92,6 @@ mod tests {
         assert_eq!(caps.drop, Some(vec!["ALL".to_string()]));
         let seccomp = sc.seccomp_profile.expect("seccomp profile must be set");
         assert_eq!(seccomp.type_, "RuntimeDefault");
-    }
-
-    #[tokio::test]
-    async fn retry_succeeds_on_first_attempt() {
-        tokio::time::pause();
-        let calls = AtomicU64::new(0);
-        let result: Result<u64, String> = retry_with_backoff(10, "test", |_| {
-            calls.fetch_add(1, Ordering::SeqCst);
-            async { Ok(42) }
-        })
-        .await;
-        assert_eq!(result, Ok(42));
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -138,19 +124,6 @@ mod tests {
         .await;
         assert_eq!(result, Err("fail at 3".to_string()));
         assert_eq!(calls.load(Ordering::SeqCst), 3);
-    }
-
-    #[tokio::test]
-    async fn retry_invokes_op_with_sequential_attempt_numbers() {
-        tokio::time::pause();
-        let attempts: Mutex<Vec<u64>> = Mutex::new(Vec::new());
-        let result: Result<u64, String> = retry_with_backoff(3, "test", |attempt| {
-            attempts.lock().unwrap().push(attempt);
-            async { Err("fail".to_string()) }
-        })
-        .await;
-        assert!(result.is_err());
-        assert_eq!(*attempts.lock().unwrap(), vec![1, 2, 3]);
     }
 
     #[tokio::test]

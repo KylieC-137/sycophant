@@ -42,7 +42,7 @@ impl ScrubSet {
             return empty;
         };
 
-        let mut replacements = Vec::new();
+        let mut secrets = Vec::new();
 
         for entry in &entries {
             let value = if let Some(ref env_name) = entry.env {
@@ -52,13 +52,28 @@ impl ScrubSet {
             } else {
                 continue;
             };
+            secrets.push((entry.name.as_str(), value));
+        }
 
+        let secrets: Vec<(&str, &str)> = secrets
+            .iter()
+            .map(|(name, value)| (*name, value.as_str()))
+            .collect();
+        Self::from_secrets(&secrets)
+    }
+
+    /// Build a `ScrubSet` from `(name, value)` pairs already in hand. Each
+    /// value is trimmed; an empty value is skipped.
+    pub fn from_secrets(secrets: &[(&str, &str)]) -> Self {
+        let mut replacements = Vec::new();
+
+        for (name, value) in secrets {
             let value = value.trim().to_string();
             if value.is_empty() {
                 continue;
             }
 
-            let tag = format!("[REDACTED:{}]", entry.name);
+            let tag = format!("[REDACTED:{name}]");
 
             replacements.push((value.clone(), tag.clone()));
 
@@ -120,10 +135,11 @@ mod tests {
 
     #[test]
     #[serial]
-    fn single_env_secret_redacted() {
+    fn an_env_secret_arms_the_scrub_set_and_redacts_its_value() {
         with_env("TEST_SECRET_1", "s3cret-value", || {
             with_scrub_env(r#"[{"name":"my-secret","env":"TEST_SECRET_1"}]"#, || {
                 let set = ScrubSet::from_env_var(ENV);
+                assert!(!set.is_empty());
                 assert_eq!(
                     set.apply("output contains s3cret-value here"),
                     "output contains [REDACTED:my-secret] here"
@@ -225,18 +241,6 @@ mod tests {
 
     #[test]
     #[serial]
-    fn replacement_tag_contains_name() {
-        with_env("TEST_TAG", "secret123", || {
-            with_scrub_env(r#"[{"name":"cred-name","env":"TEST_TAG"}]"#, || {
-                let set = ScrubSet::from_env_var(ENV);
-                let result = set.apply("secret123");
-                assert_eq!(result, "[REDACTED:cred-name]");
-            });
-        });
-    }
-
-    #[test]
-    #[serial]
     fn longest_match_first() {
         with_env("TEST_SHORT", "abc", || {
             with_env("TEST_LONG", "abcdef", || {
@@ -247,19 +251,6 @@ mod tests {
                         assert_eq!(set.apply("abcdef"), "[REDACTED:long]");
                     },
                 );
-            });
-        });
-    }
-
-    #[test]
-    #[serial]
-    fn non_empty_set_reports_not_empty() {
-        // Kills the `is_empty -> true` mutant: production must report
-        // false when at least one replacement is registered.
-        with_env("TEST_SECRET_NE", "value", || {
-            with_scrub_env(r#"[{"name":"ne","env":"TEST_SECRET_NE"}]"#, || {
-                let set = ScrubSet::from_env_var(ENV);
-                assert!(!set.is_empty());
             });
         });
     }

@@ -134,78 +134,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reject_blank_refuses_whitespace_only_input() {
+    fn reject_blank_only_refuses_empty_or_whitespace_input() {
         assert!(reject_blank("").is_err());
         assert!(reject_blank("\n").is_err());
         assert!(reject_blank("  \t\n ").is_err());
-    }
-
-    #[test]
-    fn reject_blank_accepts_a_key_carrying_a_trailing_newline() {
         assert!(reject_blank("sk-abc123\n").is_ok());
     }
 
     #[test]
-    fn build_secret_yaml_entry_key_matches_name() {
+    fn build_secret_yaml_keys_and_labels_the_secret_for_any_value() {
         let yaml = build_secret_yaml("my-api-key", "dev", "sk-abc123");
         assert!(yaml.contains("name: my-api-key"));
         assert!(yaml.contains("namespace: dev"));
         assert!(yaml.contains("my-api-key:"));
         assert!(yaml.contains("sk-abc123"));
-    }
 
-    #[test]
-    fn build_secret_yaml_multiline_value() {
         let pem =
             "-----BEGIN OPENSSH PRIVATE KEY-----\nbase64data\n-----END OPENSSH PRIVATE KEY-----\n";
         let yaml = build_secret_yaml("ssh-key", "dev", pem);
         assert!(yaml.contains("ssh-key:"));
         assert!(yaml.contains("BEGIN OPENSSH PRIVATE KEY"));
-    }
 
-    #[test]
-    fn build_secret_yaml_has_labels() {
         let yaml = build_secret_yaml("test", "ns", "val");
         assert!(yaml.contains("app.kubernetes.io/part-of: sycophant"));
         assert!(yaml.contains("sycophant.md/type: secret"));
-    }
 
-    #[test]
-    fn build_secret_yaml_special_characters() {
         let yaml = build_secret_yaml("test", "ns", "value with \"quotes\" and \\ backslash");
         assert!(yaml.contains("test:"));
         assert!(yaml.contains("quotes"));
     }
 
     #[test]
-    fn parse_secret_list_returns_empty_for_empty_input() {
-        assert_eq!(parse_secret_list(""), Vec::<SecretEntry>::new());
-        assert_eq!(parse_secret_list("\n\n  \n"), Vec::<SecretEntry>::new());
-    }
-
-    #[test]
-    fn parse_secret_list_keeps_each_line_as_entry() {
-        let input = "alpha\nbeta\ngamma\n";
-        let entries = parse_secret_list(input);
-        assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].name, "alpha");
-        assert_eq!(entries[1].name, "beta");
-        assert_eq!(entries[2].name, "gamma");
-    }
-
-    #[test]
-    fn parse_secret_list_strips_blanks_within() {
-        let input = "alpha\n\nbeta\n   \ngamma\n";
+    fn parse_secret_list_trims_lines_and_drops_blanks() {
+        let input = "  alpha  \n\n\tbeta\t\n   \ngamma\n";
         let entries = parse_secret_list(input);
         let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["alpha", "beta", "gamma"]);
-    }
-
-    #[test]
-    fn parse_secret_list_trims_whitespace_per_line() {
-        let input = "  alpha  \n\tbeta\t\n";
-        let entries = parse_secret_list(input);
-        assert_eq!(entries[0].name, "alpha");
-        assert_eq!(entries[1].name, "beta");
     }
 }

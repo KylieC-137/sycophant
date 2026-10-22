@@ -276,6 +276,22 @@ func TokenSubject(token string) (string, error) {
 	return claims.Sub, nil
 }
 
+// TokenEmail extracts the email claim from a JWT (no signature validation).
+// Returns empty string if absent.
+func TokenEmail(token string) string {
+	decoded, err := decodeJWTPayload(token)
+	if err != nil {
+		return ""
+	}
+	var claims struct {
+		Email string `json:"email"`
+	}
+	if err := json.Unmarshal(decoded, &claims); err != nil {
+		return ""
+	}
+	return claims.Email
+}
+
 // TokenExpiry extracts the exp claim from a JWT and returns it as a time.
 func TokenExpiry(token string) (time.Time, error) {
 	decoded, err := decodeJWTPayload(token)

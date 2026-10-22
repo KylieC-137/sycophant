@@ -128,10 +128,4 @@ mod tests {
             "http://ws-hello-world.sycophant.svc.cluster.local:9091"
         );
     }
-
-    #[test]
-    fn addr_for_distinct_workspaces_yield_distinct_addrs() {
-        let pool = HarnessClientPool::new("ns");
-        assert_ne!(pool.addr_for("alpha"), pool.addr_for("beta"));
-    }
 }

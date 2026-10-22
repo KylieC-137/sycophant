@@ -46,6 +46,8 @@ workspace:
   toolsets: [stdlib, ssh-credentials]
   models: [deepseek, local]
   storage: 5Gi
+  # Read by sycoadm only; never rendered into the command.
+  instructions: ../instructions/simple
   grants:
     ssh-credentials:
       demo-key:
@@ -68,14 +70,12 @@ channel:
   hostname: relay
   authKeySecret: relay-tsnet-authkey
   storageClass: local-path
-  headscale:
-    enabled: true
-    serverUrl: http://localhost:8080
-    image: headscale/headscale
-    tag: "0.28.0"
-    pullPolicy: Always
-    magicDns: true
-    baseDomain: ts.local
-    acme:
-      enabled: false
-      email: ops@example.com
+
+headscale:
+  enabled: true
+  serverUrl: http://localhost:8080
+  magicDns: true
+  baseDomain: ts.local
+  acme:
+    enabled: false
+    email: ops@example.com

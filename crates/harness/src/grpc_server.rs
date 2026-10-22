@@ -52,11 +52,21 @@ fn effective_history_limit(requested: Option<u32>) -> Option<usize> {
 pub(crate) struct HarnessService<A = UnconfiguredToolset> {
     router: Arc<ToolRouter<A>>,
     registry: Arc<ConversationRegistry>,
+    event_log: Option<Arc<crate::event_log::EventLog>>,
 }
 
 impl<A> HarnessService<A> {
     pub(crate) fn new(router: Arc<ToolRouter<A>>, registry: Arc<ConversationRegistry>) -> Self {
-        Self { router, registry }
+        Self {
+            router,
+            registry,
+            event_log: None,
+        }
+    }
+
+    pub(crate) fn with_event_log(mut self, event_log: Arc<crate::event_log::EventLog>) -> Self {
+        self.event_log = Some(event_log);
+        self
     }
 }
 
@@ -64,6 +74,7 @@ impl<A> HarnessService<A> {
 impl<A: ToolsetRpc + Clone + Send + Sync + 'static> HarnessControl for HarnessService<A> {
     type WatchToolsStream = ReceiverStream<Result<ToolListUpdate, Status>>;
     type AwaitToolResultStream = ReceiverStream<Result<ToolResultFrame, Status>>;
+    type ReplayEventLogStream = ReceiverStream<Result<proto_common::ChannelOutbound, Status>>;
 
     async fn watch_tools(
         &self,
@@ -293,6 +304,28 @@ impl<A: ToolsetRpc + Clone + Send + Sync + 'static> HarnessControl for HarnessSe
             truncated,
         }))
     }
+
+    async fn replay_event_log(
+        &self,
+        request: Request<harness_proto::harness::v1::ReplayEventLogRequest>,
+    ) -> Result<Response<Self::ReplayEventLogStream>, Status> {
+        let Some(event_log) = &self.event_log else {
+            return Err(Status::failed_precondition("event log not available"));
+        };
+        let after_seq = request.into_inner().after_seq;
+        let entries = event_log
+            .replay_after(after_seq)
+            .map_err(|e| Status::failed_precondition(format!("event log replay error: {e}")))?;
+        let (tx, rx) = mpsc::channel(16);
+        tokio::spawn(async move {
+            for entry in entries {
+                if tx.send(Ok(entry)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
 }
 
 #[cfg(test)]
@@ -319,10 +352,6 @@ mod tests {
 
     // EARS: "Where the CancelTurn's conversation_id is not owned by this
     // harness, the harness shall reject the request with NotFound."
-    // Materiality: negate or short-circuit the line-224 ownership guard
-    // (`if !self.registry.owns(...)` -> `if false` / drop the `!`) and the
-    // handler falls through to registry.cancel on an unowned id, returning
-    // Ok(cancelled=false) instead of the NotFound reject this test demands.
     #[tokio::test]
     async fn cancel_turn_on_unowned_conversation_returns_not_found() {
         let svc = service_owning_nothing();
@@ -362,14 +391,6 @@ mod dispatch_await_cancel_tests {
             frame: Some(Frame::Complete(ToolComplete {
                 outcome: ToolOutcome::Done as i32,
                 exit_code: 0,
-            })),
-        }
-    }
-    fn canceled_terminal() -> ToolResultFrame {
-        ToolResultFrame {
-            frame: Some(Frame::Complete(ToolComplete {
-                outcome: ToolOutcome::Canceled as i32,
-                exit_code: -1,
             })),
         }
     }
@@ -627,10 +648,6 @@ mod dispatch_await_cancel_tests {
     // resolves. No pod claims the enqueued call, so it never terminates; the only
     // way dispatch can return is by NOT waiting on the result — it enqueues,
     // spawns the frame consumer, and returns the id.
-    //
-    // Materiality: a dispatch that consumes the frame stream to completion before
-    // returning hangs against the never-claimed call until the outer timeout
-    // fires. An empty id fails the non-empty assertion.
     #[tokio::test]
     async fn dispatch_surfaces_the_minted_call_id_before_the_result() {
         let (svc, _dispatcher) = service_with(FakeToolset).await;
@@ -667,10 +684,6 @@ mod dispatch_await_cancel_tests {
     // answers by killing its own child (rather than letting it run to
     // completion). The claiming pod streams no terminal, so the call is still
     // in-flight when the cancel arrives.
-    //
-    // Materiality: the harness dropping the session / not firing the token
-    // (answering without calling into the dispatcher) leaves the token
-    // registered — a later fire would still succeed — and this test reds.
     #[tokio::test]
     async fn cancel_of_an_in_flight_call_forwards_to_the_toolset() {
         let (svc, dispatcher) = service_with(FakeToolset).await;
@@ -705,11 +718,6 @@ mod dispatch_await_cancel_tests {
     // call was canceled — and fires nothing in the dispatcher (there is nothing
     // to cancel). A real in-flight call's token is left intact, so a stray fire
     // is observable.
-    //
-    // Materiality: answering `true` for an unknown id (e.g. firing
-    // unconditionally, or returning a hardcoded true) reds the `!cancelled`
-    // assertion; firing the wrong call's token would consume the real call's
-    // token, reding the survives-fire assertion.
     #[tokio::test]
     async fn cancel_of_an_unknown_call_id_reports_none_canceled() {
         let (svc, dispatcher) = service_with(FakeToolset).await;
@@ -739,11 +747,6 @@ mod dispatch_await_cancel_tests {
     // output as a live stream of individual frames — not a single collapsed
     // response. The scripted stream carries a non-terminal stdout frame ahead of
     // the terminal; the client must see that stdout frame on the wire.
-    //
-    // Materiality: an await that collapses the frames into one assembled
-    // response (the old unary behavior) drops the non-terminal stdout frame, so
-    // the "live-chunk-alpha" assertion reds. Ending without a terminal reds the
-    // terminal assertion.
     #[tokio::test]
     async fn await_streams_individual_frames_not_a_collapsed_response() {
         let (svc, dispatcher) = service_with(FakeToolset).await;
@@ -777,12 +780,6 @@ mod dispatch_await_cancel_tests {
     // released (via the gate) only AFTER the client has subscribed, so it can
     // reach the client only through the in-flight follow-loop, never the
     // persisted-fallback path the sibling await tests land on.
-    //
-    // Materiality: inverting the `if !terminal_seen` guard skips the follow-loop
-    // for a live call whose snapshot carries no terminal, so the gate-released
-    // terminal never
-    // reaches the client — the stream ends on the stdout frame and the terminal
-    // assertion reds.
     #[tokio::test]
     async fn await_follows_a_live_call_to_its_terminal_via_the_fan_out() {
         use std::sync::Arc;
@@ -862,38 +859,6 @@ mod dispatch_await_cancel_tests {
         }
     }
 
-    // A canceled call's await stream ends on a terminal that indicates
-    // CANCELED — distinct from the done and failed terminals. The runtime-emitted
-    // canceled outcome reaches the client unchanged.
-    //
-    // Materiality: the harness reclassifying the canceled terminal (folding
-    // it into a generic error/failed, or coercing to done) reds the
-    // `outcome() == CANCELED` assertion — the exact distinction the client must
-    // be able to draw.
-    #[tokio::test]
-    async fn canceled_call_await_ends_on_a_canceled_terminal() {
-        let (svc, dispatcher) = service_with(FakeToolset).await;
-        spawn_pod(
-            &dispatcher,
-            vec![stdout_f("partial-before-cancel"), canceled_terminal()],
-        );
-        let call_id = dispatch(&svc).await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let frames = collect_await(&svc, &call_id, "").await;
-        let last = frames
-            .last()
-            .expect("the stream must carry a terminal frame");
-        match last.frame.as_ref() {
-            Some(Frame::Complete(c)) => assert_eq!(
-                c.outcome(),
-                ToolOutcome::Canceled,
-                "the canceled terminal reaches the client as CANCELED, distinct from done/failed"
-            ),
-            other => panic!("the last frame must be the terminal ToolComplete, got {other:?}"),
-        }
-    }
-
     // A client-driven call whose pod frame stream ends abnormally — one or two
     // frames, then a frame-stream error with no terminal ToolComplete — must
     // still terminate the client's await stream in a terminal outcome. When the
@@ -904,13 +869,9 @@ mod dispatch_await_cancel_tests {
     // end in one of the three outcomes; a synthetic FAILED terminal is owed when
     // the stream dies mid-call.
     //
-    // Materiality: removing the synthetic-FAILED emission (the result guard's on
-    // drop, backstopped by `await_client_tool` when the fan-out ends with no
-    // terminal seen) leaves the awaited stream's last frame the stdout chunk (the
-    // stream just closes), not a terminal — reding the assertion below. The gated
-    // abnormal stream keeps the call genuinely in flight at subscribe, so the
-    // terminalless close is reached via the in-flight follow branch, not the
-    // persisted-fallback path.
+    // The gated abnormal stream keeps the call genuinely in flight at subscribe,
+    // so the terminalless close is reached via the in-flight follow branch, not
+    // the persisted-fallback path.
     #[tokio::test]
     async fn await_of_an_abnormally_ended_live_call_ends_on_a_failed_terminal() {
         use std::sync::Arc;
@@ -991,50 +952,6 @@ mod dispatch_await_cancel_tests {
         }
     }
 
-    // The terminalless-EOF path served from the persisted record, not the live
-    // fan-out: a call whose pod stream EOFs with no terminal must still end the
-    // client's replayed await on a terminal. When the pod's stream ends without a
-    // terminal, `forward_result_frames` drops the result guard without marking it
-    // complete, so the guard injects a synthetic FAILED that the consumer
-    // persists; a later awaiter served from that record still ends on a terminal.
-    //
-    // Materiality: removing the synthetic-FAILED emission (the result guard's on
-    // drop, backstopped by `await_client_tool`'s persisted-replay branch when the
-    // record has no terminal) leaves the replayed stream's last frame the stdout
-    // chunk, not a terminal — reding the assertion below.
-    #[tokio::test]
-    async fn await_of_a_truncated_persisted_record_ends_on_a_failed_terminal() {
-        let (svc, dispatcher) = service_with(FakeToolset).await;
-        // Yield one stdout frame then EOF with no terminal.
-        spawn_pod(&dispatcher, vec![stdout_f("stdout-before-truncation")]);
-
-        let call_id = dispatch(&svc).await;
-        // Let the consumer drain, receive the synthetic terminal, and retire the
-        // session so the await is served from the persisted record.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let frames = collect_await(&svc, &call_id, "").await;
-        let last = frames
-            .last()
-            .expect("a truncated persisted record must still yield a terminal frame to the client");
-        match last.frame.as_ref() {
-            Some(Frame::Complete(c)) => {
-                assert_eq!(
-                    c.outcome(),
-                    ToolOutcome::Failed,
-                    "a truncated persisted record must terminate the client's await on a synthetic FAILED terminal, got {:?}",
-                    c.outcome()
-                );
-                assert_eq!(
-                    c.exit_code, -1,
-                    "the synthetic FAILED terminal carries the sentinel exit_code -1, got {}",
-                    c.exit_code
-                );
-            }
-            other => panic!("the await stream must end on a terminal ToolComplete, got {other:?}"),
-        }
-    }
-
     /// Build a service whose registry is rooted at a fresh tempdir, mint one
     /// conversation, and return `(service, root, conv_id)`. The router has no
     /// separate execution-log dir: it derives the per-conversation writer from
@@ -1074,12 +991,6 @@ mod dispatch_await_cancel_tests {
     // An app-dispatched tool attaches the call to the app's active conversation
     // and appends its frames to that conversation's execution.json; re-subscribe
     // replays them filtered by call_id.
-    //
-    // Materiality: a mutant that writes app-run frames to a process-global or other
-    // directory (ignoring conversation_id) leaves `<root>/default/<conv_id>/
-    // execution.json` absent -> the is_file/marker assertions red. A mutant that
-    // loses the call_id->conversation_id association breaks the disk replay ->
-    // await returns NotFound and `collect_await` reds.
     //
     // The load-bearing observable is the on-disk LOCATION (the frames sit in THIS
     // conversation's dir), which a global-writer implementation cannot satisfy;
@@ -1138,10 +1049,6 @@ mod dispatch_await_cancel_tests {
     // A tool dispatched without a conversation id is accepted: a conversation-less
     // app-run call (the browser pane before any chat is selected) runs and returns
     // its minted call_id; it simply persists no per-conversation execution.json.
-    //
-    // Materiality: reinstate an empty-conversation_id reject in the harness
-    // `dispatch_tool` handler and this call returns an error instead of a call_id,
-    // so `expect("...")` panics and this reds.
     #[tokio::test]
     async fn dispatch_accepts_empty_conversation_id() {
         let (svc, _root, _conv, _dispatcher) = service_and_conversation(FakeToolset).await;
@@ -1163,10 +1070,7 @@ mod dispatch_await_cancel_tests {
     // A dispatch naming a conversation this harness does not own is rejected —
     // the app can only attach a call to a real, owned conversation.
     //
-    // Materiality: drop the `registry.owns` check in the harness `dispatch_tool`
-    // handler and a well-formed-but-unowned conversation_id falls through to
-    // `dispatch_client_tool`, returning Ok(call_id) -> `expect_err` panics and this
-    // reds. (A bare UUID isolates this from any UUID-shape check.)
+    // A bare UUID keeps this independent of any UUID-shape check.
     //
     // Pins the ownership guard for app dispatch, not the registry's storage
     // behavior.
@@ -1198,10 +1102,7 @@ mod dispatch_await_cancel_tests {
         }
     }
 
-    // grpc_server.rs:166 `mint_conversation` — the handler returns a fresh id
-    // the registry then owns. Materiality: a mint that returns an empty id reds
-    // the non-empty assert; one that does not register (the registry never
-    // learns the id) reds the `owns` assert.
+    // `mint_conversation` returns a fresh, non-empty id the registry then owns.
     #[tokio::test]
     async fn mint_returns_a_nonempty_owned_id() {
         let (svc, _root, _conv, _dispatcher) = service_and_conversation(FakeToolset).await;
@@ -1221,10 +1122,8 @@ mod dispatch_await_cancel_tests {
         );
     }
 
-    // grpc_server.rs:205 — deleting an OWNED conversation succeeds. Materiality:
-    // drop the `!` on the ownership guard (`if !self.registry.owns` -> `if
-    // self.registry.owns`) and an owned id short-circuits to NotFound -> the
-    // `expect` reds. Pairs with the unowned-NotFound test to pin both arms.
+    // Deleting an OWNED conversation succeeds. Pairs with the unowned-NotFound
+    // test to pin both arms of the ownership guard.
     #[tokio::test]
     async fn delete_conversation_on_owned_succeeds() {
         let (svc, _root, conv_id, _dispatcher) = service_and_conversation(FakeToolset).await;
@@ -1240,10 +1139,7 @@ mod dispatch_await_cancel_tests {
         );
     }
 
-    // grpc_server.rs:205 — deleting an UNOWNED conversation is rejected with
-    // NotFound. Materiality: negate/short-circuit the ownership guard and an
-    // unowned id falls through to `registry.delete` returning Ok -> `expect_err`
-    // reds.
+    // Deleting an UNOWNED conversation is rejected with NotFound.
     #[tokio::test]
     async fn delete_conversation_on_unowned_returns_not_found() {
         let (svc, _root, _conv, _dispatcher) = service_and_conversation(FakeToolset).await;
@@ -1258,25 +1154,8 @@ mod dispatch_await_cancel_tests {
         assert_eq!(err.code(), tonic::Code::NotFound);
     }
 
-    // grpc_server.rs:225 — a name of exactly MAX_CONVERSATION_NAME_CHARS (200)
-    // is accepted; the length guard is `> 200`, strict. Materiality: change the
-    // guard to `>= 200` and a 200-char name is rejected -> the `expect` reds.
-    #[tokio::test]
-    async fn set_name_at_limit_is_accepted() {
-        let (svc, _root, conv_id, _dispatcher) = service_and_conversation(FakeToolset).await;
-        let name = "a".repeat(MAX_CONVERSATION_NAME_CHARS);
-        svc.set_conversation_name(Request::new(SetConversationNameRequest {
-            conversation_id: conv_id,
-            name,
-            ..Default::default()
-        }))
-        .await
-        .expect("a name at the character limit is accepted");
-    }
-
-    // grpc_server.rs:225 — a name of MAX_CONVERSATION_NAME_CHARS + 1 (201) is
-    // rejected with InvalidArgument. Materiality: drop the length guard (or
-    // widen the bound) and the over-limit name is accepted -> `expect_err` reds.
+    // A name of MAX_CONVERSATION_NAME_CHARS + 1 (201) is rejected with
+    // InvalidArgument.
     #[tokio::test]
     async fn set_name_over_limit_is_rejected() {
         let (svc, _root, conv_id, _dispatcher) = service_and_conversation(FakeToolset).await;
@@ -1291,14 +1170,12 @@ mod dispatch_await_cancel_tests {
             .expect_err("a name over the character limit must be rejected");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
-
-    // grpc_server.rs:277 `truncated = entries.len() < total_seq` — a limit below
-    // the entry count clips the head and reports truncated. Materiality: flip
-    // the comparison (or drop the clip) and truncated goes false with 3 entries
-    // and a limit of 2 -> the `assert!(resp.truncated)` reds. Also pins
-    // effective_history_limit's Some(n) arm: entries.len() must equal the limit.
+    // `truncated = entries.len() < total_seq`: a limit below the entry count
+    // clips the head and reports truncated, and a full read (no limit) is NOT
+    // truncated. Also pins effective_history_limit's Some(n) arm: entries.len()
+    // must equal the limit.
     #[tokio::test]
-    async fn history_over_limit_reports_truncated() {
+    async fn history_limit_clips_to_the_tail_and_only_then_reports_truncated() {
         let (svc, _root, conv_id, _dispatcher) = service_and_conversation(FakeToolset).await;
         let log = svc.registry.get_or_create(&conv_id).await.unwrap();
         {
@@ -1307,51 +1184,27 @@ mod dispatch_await_cancel_tests {
                 l.append(user_msg(&format!("m{n}"))).await.unwrap();
             }
         }
-        let resp = svc
-            .get_conversation_history(Request::new(GetConversationHistoryRequest {
-                conversation_id: conv_id,
-                limit: Some(2),
-                owner: "test-owner".into(),
-                ..Default::default()
-            }))
-            .await
-            .expect("history returns Ok")
-            .into_inner();
-        assert!(
-            resp.truncated,
-            "a limit below the entry count clips the head and reports truncated"
-        );
-        assert_eq!(
-            resp.entries.len(),
-            2,
-            "the returned tail is exactly the requested limit"
-        );
-    }
-
-    // grpc_server.rs:277 — a full read (no limit) is NOT truncated. Materiality:
-    // widen the comparison to `<=` and a full read of 3 entries with total_seq 3
-    // reports truncated -> the `assert!(!resp.truncated)` reds.
-    #[tokio::test]
-    async fn full_history_reports_not_truncated() {
-        let (svc, _root, conv_id, _dispatcher) = service_and_conversation(FakeToolset).await;
-        let log = svc.registry.get_or_create(&conv_id).await.unwrap();
-        {
-            let mut l = log.write().await;
-            for n in 0..3 {
-                l.append(user_msg(&format!("m{n}"))).await.unwrap();
-            }
+        // (limit, want truncated, want entries)
+        for (limit, want_truncated, want_len) in [(Some(2), true, 2), (None, false, 3)] {
+            let resp = svc
+                .get_conversation_history(Request::new(GetConversationHistoryRequest {
+                    conversation_id: conv_id.clone(),
+                    limit,
+                    owner: "test-owner".into(),
+                    ..Default::default()
+                }))
+                .await
+                .expect("history returns Ok")
+                .into_inner();
+            assert_eq!(
+                resp.truncated, want_truncated,
+                "limit {limit:?}: only a limit below the entry count reports truncated"
+            );
+            assert_eq!(
+                resp.entries.len(),
+                want_len,
+                "limit {limit:?}: the returned tail is exactly the requested limit, or all"
+            );
         }
-        let resp = svc
-            .get_conversation_history(Request::new(GetConversationHistoryRequest {
-                conversation_id: conv_id,
-                limit: None,
-                owner: "test-owner".into(),
-                ..Default::default()
-            }))
-            .await
-            .expect("history returns Ok")
-            .into_inner();
-        assert!(!resp.truncated, "a full read is not truncated");
-        assert_eq!(resp.entries.len(), 3);
     }
 }

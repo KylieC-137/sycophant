@@ -8,8 +8,8 @@ can and cannot reach.
 
 | Test                                                            | What it proves                                                                 |
 |-----------------------------------------------------------------|--------------------------------------------------------------------------------|
+| owner-admission-check/                                          | Only the identity recorded as the namespace's owner may write tenant-namespace commands; a non-owner with ConfigMap create RBAC is denied |
 | user-command-renders-reach-rolebindings-and-identity-configmap/ | An operator-written user command binds exactly the listed workspaces and handles; re-granting without one cuts it; a writer without namespace write RBAC is denied |
-| user-command-vap-rejects-unsafe-subject/                        | The user-command VAP admits a safe subject and refuses one carrying a quote, backslash, LF, CR, U+2028, or U+2029 |
 
 Belongs here: subject reach, handle binding, and the user command's admission
 contract. Doesn't belong here: tampering with the identity ConfigMap after it

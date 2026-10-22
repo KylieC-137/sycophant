@@ -876,9 +876,11 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "base64",
  "bytes",
  "chrono",
  "futures",
+ "harness-proto",
  "http-body-util",
  "hyper",
  "hyper-util",

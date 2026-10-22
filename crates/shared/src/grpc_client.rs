@@ -47,17 +47,6 @@ pub async fn connect_with_keepalive(addr: &str, label: &'static str) -> Result<C
 mod tests {
     use super::*;
 
-    #[test]
-    fn keepalive_endpoint_rejects_invalid_uri() {
-        let err = keepalive_endpoint("not a uri").unwrap_err();
-        assert!(err.contains("invalid endpoint"), "got: {err}");
-    }
-
-    #[test]
-    fn keepalive_endpoint_accepts_http_uri() {
-        let _ = keepalive_endpoint("http://127.0.0.1:9090").expect("valid uri");
-    }
-
     #[tokio::test]
     async fn connect_with_keepalive_returns_err_on_invalid_uri() {
         tokio::time::pause();

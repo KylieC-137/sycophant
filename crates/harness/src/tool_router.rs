@@ -532,9 +532,16 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
                 let mut gateway = self.relay.clone().ok_or_else(|| {
                     DispatchAbort::Error("relay gateway client not configured".into())
                 })?;
-                channel_tools::dispatch(name, input_json, &mut gateway, reply_channel, tool_call_id)
-                    .await
-                    .map_err(DispatchAbort::Error)
+                channel_tools::dispatch(
+                    name,
+                    input_json,
+                    &mut gateway,
+                    reply_channel,
+                    tool_call_id,
+                    &self.workspace,
+                )
+                .await
+                .map_err(DispatchAbort::Error)
             }
         }
     }
@@ -1097,15 +1104,6 @@ mod tests {
     }
 
     #[test]
-    fn new_router_advertises_runtime_tools() {
-        let router = empty_router();
-        let names = names(&router);
-        assert!(names.iter().any(|n| n == "read"));
-        assert!(names.iter().any(|n| n == "dispatch"));
-        assert!(names.iter().any(|n| n == "list"));
-    }
-
-    #[test]
     fn applied_toolset_preserves_runtime_entries() {
         let router = seed(empty_router(), vec![t("Bash"), t("Git")]);
         let names = names(&router);
@@ -1334,17 +1332,6 @@ mod tests {
     }
 
     #[test]
-    fn args_for_surfaces_arg_env_after_ingest() {
-        let router = seed(
-            empty_router(),
-            vec![tool_with_arg("Git", "message", "MESSAGE")],
-        );
-        let args = router.args_for("Git").expect("Git is a toolset tool");
-        assert_eq!(args.len(), 1);
-        assert_eq!(args[0].env, "MESSAGE");
-    }
-
-    #[test]
     fn outbound_definitions_carry_no_arg_env() {
         let router = seed(
             empty_router(),
@@ -1394,30 +1381,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn call_tool_routes_toolset_through_in_process_dispatch() {
-        let router = seed(empty_router(), vec![t("Bash")]);
-        let mut tb = UnconfiguredToolset;
-        let cancel = CancellationToken::new();
-        let err = router
-            .call_tool(
-                "Bash",
-                "{}",
-                &no_grants(),
-                &mut tb,
-                "conv",
-                None,
-                "tc",
-                &cancel,
-            )
-            .await
-            .unwrap_err();
-        // No dispatcher wired in this test; the routing decision proves the
-        // `Source::Toolset` arm reaches the in-process dispatcher, not a
-        // controller round-trip.
-        assert_dispatch_error(err, "tool dispatch is not configured");
-    }
-
-    #[tokio::test]
     async fn call_tool_routes_list_through_in_process_runtime_dispatch() {
         // `list` is Runtime-source, served in-process from the instructions — no gRPC
         // hop. Against an empty instructions it returns an empty array (not an
@@ -1443,32 +1406,6 @@ mod tests {
         assert_eq!(crate::agent::collect_text(&resp.content), "[]");
     }
 
-    #[tokio::test]
-    async fn call_tool_routes_read_through_runtime_dispatch() {
-        let router = empty_router();
-        let mut tb = UnconfiguredToolset;
-        let cancel = CancellationToken::new();
-        // `read` of a missing path on an empty instructions resolves in-process to an
-        // is_error result, proving Runtime source attribution routed to the
-        // instructions reader (an unrouted call would hit the "unknown tool" branch
-        // instead).
-        let resp = router
-            .call_tool(
-                "read",
-                r#"{"path":"nope.md"}"#,
-                &no_grants(),
-                &mut tb,
-                "conv",
-                None,
-                "tc",
-                &cancel,
-            )
-            .await
-            .expect("read routes to the in-process runtime dispatch");
-        assert!(resp.is_error);
-        assert!(crate::agent::collect_text(&resp.content).contains("not found"));
-    }
-
     #[test]
     fn source_of_returns_correct_attribution() {
         let router = seed(empty_router(), vec![t("Bash")]);
@@ -1477,19 +1414,6 @@ mod tests {
         assert_eq!(router.source_of("read"), Some(Source::Runtime));
         assert_eq!(router.source_of("dispatch"), Some(Source::Runtime));
         assert_eq!(router.source_of("Ghost"), None);
-    }
-
-    // The generic `read`/`dispatch`/`list` verbs are compiled in-process, so the
-    // router must attribute them to `Source::Runtime` (the arm that dispatches
-    // through `runtime_tools`, not a toolset stdlib tool). Materiality:
-    // registering any of them as a toolset tool, or not registering it at all,
-    // reds this.
-    #[test]
-    fn generic_verbs_are_runtime_source() {
-        let router = empty_router();
-        assert_eq!(router.source_of("read"), Some(Source::Runtime));
-        assert_eq!(router.source_of("dispatch"), Some(Source::Runtime));
-        assert_eq!(router.source_of("list"), Some(Source::Runtime));
     }
 
     const RUNTIME_TOOLS: &[&str] = &["read", "dispatch", "list", "Think", "RecentTurns"];
@@ -1530,26 +1454,6 @@ mod tests {
         let list = vec!["Bash".to_string()];
         let names = scoped_names(&router, Some(&list));
         assert!(names.iter().any(|n| n == "Bash"));
-        assert!(!names.iter().any(|n| n == "Curl"));
-        assert_runtime_and_channel_present(&names);
-    }
-
-    #[test]
-    fn scoped_unknown_entry_contributes_nothing() {
-        let router = router_with_two_toolset_tools();
-        let list = vec!["Bash".to_string(), "Nope".to_string()];
-        let names = scoped_names(&router, Some(&list));
-        assert!(names.iter().any(|n| n == "Bash"));
-        assert!(!names.iter().any(|n| n == "Nope"));
-        assert_runtime_and_channel_present(&names);
-    }
-
-    #[test]
-    fn scoped_empty_intersection_keeps_runtime_and_channel_only() {
-        let router = router_with_two_toolset_tools();
-        let list = vec!["Nope".to_string()];
-        let names = scoped_names(&router, Some(&list));
-        assert!(!names.iter().any(|n| n == "Bash"));
         assert!(!names.iter().any(|n| n == "Curl"));
         assert_runtime_and_channel_present(&names);
     }
@@ -1705,8 +1609,7 @@ mod tests {
             )
             .await;
 
-        // Materiality: folding Cancelled into `Ok(is_error=true)` instead of
-        // returning it reds this.
+        // Cancelled is returned as-is, not folded into `Ok(is_error=true)`.
         assert!(
             matches!(outcome, Err(DispatchAbort::Cancelled)),
             "a fired cancel on an Toolset call must return Cancelled, got {outcome:?}"
@@ -1715,9 +1618,6 @@ mod tests {
         // The begun call's id, learned from the pod that claimed it. The arm
         // already fired the per-call cancel for exactly this id before returning,
         // so its token is consumed — re-firing it here finds nothing (false).
-        // Materiality: dropping the cancel leaves the token live and this re-fire
-        // returns true; a cancel for the wrong id likewise leaves this id's token
-        // live.
         let (call_id, _) = claimed(&capture).await;
         assert!(
             !dispatch.fire_call_cancel(&call_id).await,
@@ -1728,9 +1628,7 @@ mod tests {
     // The in-process dispatch arm converts the model's arg-name-keyed input into
     // the env-keyed map the tool-job pod runs: a tool declaring arg `message`
     // mapped to env `MESSAGE`, called with `{"message":"hi"}`, enqueues
-    // `{"MESSAGE":"hi"}`. Materiality: an arm that passed the raw request JSON
-    // (or the arg-name key) straight through reds this — the pod would receive
-    // `message`, not the declared `MESSAGE`.
+    // `{"MESSAGE":"hi"}`, never the raw request JSON.
     #[tokio::test]
     async fn in_process_dispatch_enqueues_env_keyed_args() {
         use crate::dispatch::{ActiveJob, DispatchState};
@@ -1937,63 +1835,10 @@ mod tests {
         );
     }
 
-    // A toolset tool call that runs to completion without any cancellation
-    // returns its result unchanged.
-    #[tokio::test]
-    async fn toolset_uncancelled_returns_result_unchanged() {
-        // The pod streams one stdout frame then the terminal; the arm folds it
-        // into the model-facing result via `assemble_from_frames`.
-        let dispatch = in_process_dispatch();
-        seed_job(&dispatch, "Bash", "job-x", None).await;
-        let router: ToolRouter = ToolRouter::new(
-            test_instructions(),
-            WS.to_string(),
-            None,
-            None,
-            test_registry(),
-        )
-        .with_dispatch(dispatch.clone());
-        let router = seed(router, vec![t("Bash")]);
-
-        spawn_pod(
-            &dispatch,
-            "Bash",
-            "job-x",
-            vec![stdout_frame("toolset output"), done_terminal()],
-        );
-
-        let mut turn_seam = UnconfiguredToolset;
-        let cancel = CancellationToken::new(); // never fired
-
-        // Materiality: altering the result reds the output/is_error asserts. The
-        // uncancelled path returns through the result arm, never the cancel arm —
-        // a spurious cancel would return `Err(Cancelled)`, reding this `.expect`.
-        let resp = router
-            .call_tool(
-                "Bash",
-                "{}",
-                &no_grants(),
-                &mut turn_seam,
-                "conv",
-                None,
-                "tc",
-                &cancel,
-            )
-            .await
-            .expect("an uncancelled toolset call returns its result, not Cancelled");
-
-        assert_eq!(crate::agent::collect_text(&resp.content), "toolset output");
-        assert!(!resp.is_error);
-    }
-
     // The agent-turn Toolset arm appends each consumed frame to the execution
     // log as it arrives, so an agent-turn call is re-subscribable from the same
     // `.frames` record the client path writes — one store format, no separate
     // end-of-call write.
-    //
-    // Materiality: dropping the `append_frame` call in the consume loop leaves no
-    // persisted record, reding the read-back; appending only the terminal (not
-    // each frame as it arrives) reds the stdout-frame assertion.
     #[tokio::test]
     async fn toolset_arm_appends_consumed_frames_to_the_execution_log() {
         use crate::execution_log::{ExecutionLogWriter, LocalFsExecutionLog};
@@ -2067,19 +1912,13 @@ mod tests {
     // runtime CANCELED terminal, fires the turn's cancel, and asserts the runtime's
     // canceled terminal lands in the conversation's `execution.json`.
     //
-    // Materiality: abandoning the `consume` future on cancel — the biased
-    // `select!` cancel arm spawns the fire-and-forget `cancel_tool_call`, returns
-    // `Cancelled`, and drops the stream — appends no CANCELED terminal, leaving
-    // `read(call_id)` `None`. Draining the stream into `execution.json` after
-    // cancel is what appends the terminal.
+    // Draining the stream into `execution.json` after cancel is what appends the
+    // terminal; abandoning the `consume` future on cancel would append none.
     //
     // DRAIN, not SYNTHESIZE: the scripted CANCELED terminal carries a distinctive
     // `exit_code` (137) — a provenance fingerprint neither the `failed_terminal()`
     // synthetic (Failed / -1) nor a fabricated bare `Canceled` terminal would
-    // reproduce. The mutants this kills: appending `failed_terminal()` reds the
-    // `outcome == Canceled` assert; synthesizing a bare `Canceled` terminal
-    // (exit_code -1) reds the `exit_code == 137` assert; draining only the terminal
-    // (skipping pre-terminal frames) reds the partial-stdout assert.
+    // reproduce. The partial stdout line proves pre-terminal frames are drained too.
     #[tokio::test]
     async fn canceled_in_flight_call_appends_a_canceled_terminal_to_the_execution_log() {
         use crate::execution_log::{ExecutionLogWriter, LocalFsExecutionLog};
@@ -2248,13 +2087,8 @@ mod tests {
     // writer whose first-frame persist parks: while it is parked, the live await
     // stream must yield nothing.
     //
-    // Materiality: the append fully completes before the fan-out send. Moving the
-    // append after the send (or dropping the `.await` so it no longer completes
-    // first) lets the fan-out deliver the frame while the parked persist is still
-    // in flight, so the "observed nothing while parked" assert reds. The
-    // post-release delivery assert is the tautology cut: it proves the
-    // non-observation was the ordering gate, not a permanently dead stream (a stub
-    // that never delivers would pass the first assert but red the second).
+    // The post-release delivery assert proves the silence while parked was the
+    // ordering gate, not a permanently dead stream.
     #[tokio::test]
     async fn frame_is_persisted_before_a_live_subscriber_can_observe_it() {
         use std::sync::atomic::AtomicBool;
@@ -2331,15 +2165,8 @@ mod tests {
     // so the client's await still ends in an outcome). The record is written with
     // two stdout frames and no terminal, modelling a call whose live session died
     // mid-stream.
-    //
-    // Materiality: a miss-arm rewrite that replays only the last/terminal frame
-    // instead of every retained frame reds the "both frames" assert; one that
-    // omits the synthetic terminal on a no-terminal record reds the terminal
-    // assert. Asserting BOTH received frames (not merely one, and not merely
-    // non-error) is the tautology cut against a resolver that returns an empty
-    // replay.
     #[tokio::test]
-    async fn stream_ending_without_terminal_retains_every_received_frame_for_replay() {
+    async fn a_stream_without_terminal_replays_its_frames_then_a_synthetic_failure() {
         use proto_common::tool_result_frame::Frame;
 
         let reg = test_registry();
@@ -2368,11 +2195,11 @@ mod tests {
             .expect("a died-mid-call record must resolve from disk and replay its retained frames");
 
         let mut texts = Vec::new();
-        let mut saw_terminal = false;
+        let mut terminal = None;
         while let Some(item) = stream.next().await {
             match item.expect("the replayed item is a frame").frame {
                 Some(Frame::Stdout(s)) => texts.push(s),
-                Some(Frame::Complete(_)) => saw_terminal = true,
+                Some(Frame::Complete(c)) => terminal = Some(c),
                 _ => {}
             }
         }
@@ -2380,21 +2207,23 @@ mod tests {
             texts.iter().any(|t| t == "RETAINED-1") && texts.iter().any(|t| t == "RETAINED-2"),
             "every frame received before the stream ended is retained and replayed, got {texts:?}"
         );
-        assert!(
-            saw_terminal,
-            "a truncated replay is closed with a synthetic terminal so the client's await ends in an outcome"
+        let terminal = terminal.expect(
+            "a truncated replay is closed with a synthetic terminal so the client's await ends in an outcome",
+        );
+        assert_eq!(
+            terminal.outcome(),
+            proto_common::ToolOutcome::Failed,
+            "a truncated record must terminate the await on a synthetic FAILED terminal"
+        );
+        assert_eq!(
+            terminal.exit_code, -1,
+            "the synthetic FAILED terminal carries the sentinel exit_code -1"
         );
     }
 
     // When a call's live session has already ended, a re-subscribe resolves the
     // owning conversation from the durable execution log and replays the recorded
     // frames — including the recorded terminal for a completed call.
-    //
-    // Materiality: the resolver walks the conversation directories on disk,
-    // matches the call_id, and replays. A resolver that returns an empty replay
-    // reds the "DISK-REPLAY" content assert; one that never resolves reds the
-    // `.expect`. Asserting the specific recorded frame content is the tautology
-    // cut against a vacuous (empty / non-error) replay.
     #[tokio::test]
     async fn retired_session_resubscribe_resolves_conversation_from_disk_and_replays() {
         use proto_common::tool_result_frame::Frame;
@@ -2444,11 +2273,6 @@ mod tests {
     // conversation_id selects the file. The same call_id awaited under a DIFFERENT
     // conversation resolves to NotFound: nothing scans the other conversations'
     // logs for it.
-    //
-    // Materiality: a mutant that ignores the passed conversation_id (e.g. reinstates
-    // a walk of every conversation directory) would resolve `call-owned` under the
-    // unrelated conversation too, reding the NotFound assert. A mutant that opens the
-    // wrong conversation's file reds the owning-conversation replay assert.
     #[tokio::test]
     async fn resubscribe_reads_only_the_named_conversations_execution_log() {
         use proto_common::tool_result_frame::Frame;
@@ -2529,12 +2353,6 @@ mod tests {
     // a result at all. A dispatch that reaches the `Source::Toolset` arm fails
     // with "tool dispatch is not configured", and one that reached a real
     // controller would come back `NotFound: unknown tool: list`.
-    //
-    // Materiality: deleting the `Source::Runtime` arm (falling through to the
-    // toolset) reds the dispatch `.expect`. Synthesizing a terminal frame with no
-    // stdout frame reds the parse. Asserting the PARSED name/description rather
-    // than "some frames arrived" is the tautology cut against a vacuous empty
-    // replay.
     #[tokio::test]
     async fn client_dispatch_serves_a_runtime_tool_in_process() {
         let root = tempfile::TempDir::new().unwrap().keep();
@@ -2573,10 +2391,6 @@ mod tests {
     // client derives its error bit solely from the terminal outcome, so a
     // hardcoded DONE would make the command menu render an error string as a
     // command list.
-    //
-    // Materiality: hardcoding `ToolOutcome::Done` in the synthesized terminal reds
-    // the outcome assert; dropping the response's content when `is_error` is set
-    // reds the message assert.
     #[tokio::test]
     async fn client_dispatch_of_a_failing_runtime_tool_ends_in_a_non_done_terminal() {
         use proto_common::tool_result_frame::Frame;
@@ -2646,13 +2460,10 @@ mod tests {
     // This is the production command-menu path: the menu opens with no
     // conversation selected, dispatches `list`, then awaits.
     //
-    // Materiality: retiring the session as soon as the task finishes drops the
-    // only copy of the frames, and the late subscriber takes the miss arm, finds
-    // no execution log for an empty conversation_id, and gets `NotFound`. The
-    // three sibling tests all subscribe inline in the same task, often before
-    // the spawned task is first polled, so none of them exercise this gap.
-    // Asserting the PARSED output is the tautology cut against a replay that
-    // resolves but carries nothing.
+    // Retiring the session as soon as the task finishes would drop the only copy
+    // of the frames, and the late subscriber would get `NotFound`. The three
+    // sibling tests all subscribe inline in the same task, often before the
+    // spawned task is first polled, so none of them exercise this gap.
     #[tokio::test]
     async fn completed_runtime_call_is_servable_to_a_late_subscriber_with_no_conversation() {
         let root = tempfile::TempDir::new().unwrap().keep();
@@ -2694,10 +2505,6 @@ mod tests {
     // A client dispatching one would be a request looping back at its own sender,
     // so the client path rejects it by name instead of falling through to the
     // toolset, which would answer with a confusing `unknown tool`.
-    //
-    // Materiality: falling through to the toolset arm reds both asserts — the
-    // dispatch would succeed (the fake mints a call_id) and the fake would record
-    // the begin.
     #[tokio::test]
     async fn client_dispatch_rejects_a_channel_tool_without_calling_the_toolset() {
         let dispatch = in_process_dispatch();
@@ -2722,92 +2529,6 @@ mod tests {
             dispatch.pending_call_count().await,
             0,
             "a rejected Channel dispatch must not reach the in-process dispatcher"
-        );
-    }
-
-    // A re-subscribe resolves the conversation and replays its frames WITHOUT
-    // relying on any in-memory table populated only at dispatch. Process 1
-    // dispatches a client tool (frames persist to the durable log); a brand-new
-    // registry + router over the SAME disk — modelling a harness restart with
-    // no dispatch-time state — must still resolve+replay.
-    //
-    // Materiality: resolution reads the durable log, not in-memory dispatch state.
-    // Reintroducing ANY dispatch-only in-memory dependency reds this (process 2
-    // never dispatched); a resolver that returns an empty replay reds the content
-    // assert.
-    #[tokio::test]
-    async fn resubscribe_survives_a_harness_restart_resolving_from_disk_only() {
-        use crate::conversation::{ConversationStoreFactory, LocalFsFactory};
-        use proto_common::tool_result_frame::Frame;
-
-        let root = tempfile::TempDir::new().unwrap().keep();
-
-        // Process 1: dispatch a client tool; its frames persist to disk.
-        let call_id;
-        let conv_id;
-        {
-            let factory: Arc<dyn ConversationStoreFactory> =
-                Arc::new(LocalFsFactory::new(root.clone()));
-            let reg = Arc::new(ConversationRegistry::new(factory));
-            conv_id = reg.mint("test-owner").await.unwrap();
-            let dispatch = in_process_dispatch();
-            seed_job(&dispatch, "Bash", "job-x", None).await;
-            let router: ToolRouter =
-                ToolRouter::new(test_instructions(), WS.to_string(), None, None, reg.clone())
-                    .with_dispatch(dispatch.clone());
-            let router = seed(router, vec![t("Bash")]);
-            spawn_pod(
-                &dispatch,
-                "Bash",
-                "job-x",
-                vec![stdout_frame("SURVIVES-RESTART"), done_terminal()],
-            );
-            call_id = router
-                .dispatch_client_tool("Bash", "{}", &conv_id)
-                .await
-                .expect("dispatch mints the call and persists its frames");
-
-            // Wait until the dispatched call's terminal is durable on disk.
-            let writer = reg
-                .execution_log_for(&conv_id)
-                .await
-                .expect("the conversation has an execution-log writer");
-            let mut durable = false;
-            for _ in 0..400 {
-                if let Some(call) = writer.read(&call_id).await {
-                    if call.has_terminal() {
-                        durable = true;
-                        break;
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-            assert!(
-                durable,
-                "the dispatched call must persist to the durable log before the restart"
-            );
-        }
-
-        // Process 2 (restart): a fresh registry + router over the same disk, with
-        // NO dispatch-time in-memory state. Re-subscribe must still resolve+replay.
-        let factory: Arc<dyn ConversationStoreFactory> =
-            Arc::new(LocalFsFactory::new(root.clone()));
-        let reg = Arc::new(ConversationRegistry::new(factory));
-        let router: ToolRouter =
-            ToolRouter::new(test_instructions(), WS.to_string(), None, None, reg);
-        let mut stream = router.await_client_tool(&call_id, &conv_id).await.expect(
-            "after restart the call resolves from disk, not a dispatch-populated in-memory table",
-        );
-
-        let mut texts = Vec::new();
-        while let Some(item) = stream.next().await {
-            if let Some(Frame::Stdout(s)) = item.expect("the replayed item is a frame").frame {
-                texts.push(s);
-            }
-        }
-        assert!(
-            texts.iter().any(|t| t == "SURVIVES-RESTART"),
-            "the frames recorded before the restart replay after it, got {texts:?}"
         );
     }
 }

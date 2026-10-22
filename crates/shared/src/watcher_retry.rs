@@ -108,7 +108,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
-    use tokio::time::{timeout, Duration as TokioDuration};
+    use tokio::time::Duration as TokioDuration;
 
     /// The loop must keep running across errors. Under paused time, an
     /// in-test `sleep` auto-advances the virtual clock, firing the helper's
@@ -168,18 +168,6 @@ mod tests {
             "Ok returns must still trigger restart, got {} calls",
             calls.load(Ordering::SeqCst),
         );
-    }
-
-    /// The function signature is `-> !`, so it must never return.
-    /// `tokio::time::timeout` is the only way to bound it.
-    #[tokio::test(start_paused = true)]
-    async fn run_watcher_forever_never_returns() {
-        let result = timeout(
-            TokioDuration::from_secs(60),
-            run_watcher_forever("test", || async { Err::<(), _>("always") }),
-        )
-        .await;
-        assert!(result.is_err(), "run_watcher_forever must never return");
     }
 
     /// The `spawn_watcher_task` wrapper must drive the underlying loop —

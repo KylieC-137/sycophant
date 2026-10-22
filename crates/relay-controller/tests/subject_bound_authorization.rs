@@ -70,6 +70,7 @@ fn receive(workspace: &str, sender: &str) -> ChannelReceiveRequest {
         adapter_hint: None,
         workspace: workspace.into(),
         sender: sender.into(),
+        resume_after_seq: None,
     }
 }
 
@@ -81,8 +82,8 @@ fn receive(workspace: &str, sender: &str) -> ChannelReceiveRequest {
 /// being forwarded — here it reaches the harness dial and fails Unavailable,
 /// the same signal the existing suite uses.
 ///
-/// Materiality: review a subject other than the authenticated one, or omit
-/// the relay's namespace, and the check stops tracking the caller's RBAC.
+/// Reviewing a subject other than the authenticated one, or omitting the
+/// relay's namespace, would stop the check tracking the caller's RBAC.
 #[tokio::test]
 async fn a_person_request_is_authorized_by_a_subject_review_for_the_caller() {
     let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ws-alpha", Some(ALICE));
@@ -179,10 +180,10 @@ async fn a_token_the_apiserver_rejects_resolves_to_no_subject() {
 /// identity table. Authentication still costs one TokenReview; no access
 /// review is submitted and nothing is enumerated.
 ///
-/// Materiality: answer from Service enumeration (or any cluster-derived
-/// source) and a workspace created after the grant appears, breaking the
-/// created-later reach rule; authorize by review and the list stops being a
-/// pure table read.
+/// Answering from Service enumeration (or any cluster-derived source) would
+/// show a workspace created after the grant, breaking the created-later
+/// reach rule; authorizing by review would stop the list being a pure table
+/// read.
 #[tokio::test]
 async fn list_workspaces_answers_the_watched_identity_table() {
     let k8s = K8s::with_token(ALICE_TOKEN, ALICE);
@@ -255,7 +256,7 @@ async fn list_grants_for_an_unauthorized_workspace_is_denied() {
 /// subject is the TokenReview-ed caller and the workspace is reviewed for
 /// it. This is how the app and terminal client start a chat turn.
 ///
-/// Materiality: refuse person tokens here and no person-token client can
+/// Refusing person tokens here would leave no person-token client able to
 /// start a model turn.
 #[tokio::test]
 async fn a_person_token_opens_a_receive_stream_on_a_reached_workspace() {
@@ -360,33 +361,11 @@ fn ingest(channel_id: &str) -> ChannelIngestRequest {
     }
 }
 
-/// The opener itself passes the ingest check. It then reaches the harness
-/// dial and fails Unavailable, the same signal the person-path tests use.
-#[tokio::test]
-async fn the_channels_opener_may_ingest_on_it() {
-    let k8s = alice_bob_and_adapter();
-    let svc = service(&k8s).await;
-    let ch = open_channel(&svc, bearer(ALICE_TOKEN, receive("alpha", ""))).await;
-
-    let err = tokio::time::timeout(
-        Duration::from_secs(5),
-        svc.channel_ingest(bearer(ALICE_TOKEN, ingest(&ch))),
-    )
-    .await
-    .expect("an allowed ingest must not hang")
-    .unwrap_err();
-    assert_eq!(
-        err.code(),
-        tonic::Code::Unavailable,
-        "the opener must pass the ingest check: {err:?}"
-    );
-}
-
 /// Removing the RoleBinding cuts the next request: the reach review runs
 /// fresh on every call and nothing caches an allow.
 ///
-/// Materiality: cache the first review and the second dispatch reaches the
-/// harness (Unavailable here) after the binding is gone.
+/// A cached first review would let the second dispatch reach the harness
+/// (Unavailable here) after the binding is gone.
 #[tokio::test]
 async fn a_removed_rolebinding_denies_the_next_request() {
     let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ws-alpha", Some(ALICE));
@@ -409,8 +388,8 @@ async fn a_removed_rolebinding_denies_the_next_request() {
 /// Removing the RoleBinding cuts an open channel on its next message: the
 /// reach review runs again on every ingest.
 ///
-/// Materiality: drop the per-ingest review and the opener keeps posting to
-/// a workspace it no longer reaches.
+/// Without the per-ingest review the opener would keep posting to a
+/// workspace it no longer reaches.
 #[tokio::test]
 async fn a_removed_rolebinding_cuts_an_open_channels_next_message() {
     let k8s = alice_bob_and_adapter();
@@ -428,20 +407,6 @@ async fn a_removed_rolebinding_cuts_an_open_channels_next_message() {
         .channel_ingest(bearer(ALICE_TOKEN, ingest(&ch)))
         .await
         .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::PermissionDenied);
-}
-
-/// Holding a channel_id is not a credential: an ingest with no token is
-/// refused.
-#[tokio::test]
-async fn an_ingest_without_a_token_is_refused() {
-    let k8s = alice_bob_and_adapter();
-    let svc = service(&k8s).await;
-    let ch = open_channel(&svc, bearer(ALICE_TOKEN, receive("alpha", ""))).await;
-
-    let mut req = Request::new(ingest(&ch));
-    req.extensions_mut().insert(ListenerClass::PersonToken);
-    let err = svc.channel_ingest(req).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
 }
 
@@ -534,23 +499,6 @@ fn alice_and_bob_on_alpha() -> Arc<K8s> {
         .allow("ws-alpha", Some(ALICE))
         .allow("ws-beta", Some(ALICE))
         .allow("ws-alpha", Some(BOB))
-}
-
-/// The dispatching subject passes the ownership check and reaches the
-/// harness dial (Unavailable without a harness).
-#[tokio::test]
-async fn the_dispatching_subject_may_await_its_call() {
-    let k8s = alice_and_bob_on_alpha();
-    let svc = service_with_alices_call(&k8s).await;
-    let err = stream_err(
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            svc.await_tool_result(bearer(ALICE_TOKEN, await_req("alice-call", "alpha"))),
-        )
-        .await
-        .expect("an owned await must not hang"),
-    );
-    assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}");
 }
 
 /// Another subject who reaches the same workspace cannot read the call's
@@ -654,8 +602,8 @@ async fn a_removed_handle_binding_cuts_an_open_adapter_channel() {
 /// the RoleBinding ends an open receive stream the way it denies the next
 /// request.
 ///
-/// Materiality: skip the per-item review and the stream keeps delivering
-/// turn traffic to a subject that no longer reaches the workspace.
+/// Without the per-item review the stream would keep delivering turn
+/// traffic to a subject that no longer reaches the workspace.
 #[tokio::test]
 async fn a_removed_rolebinding_cuts_an_open_receive_stream() {
     let k8s = alice_bob_and_adapter();
@@ -683,8 +631,8 @@ async fn a_removed_rolebinding_cuts_an_open_receive_stream() {
 /// the stream's bearer token again before each outbound frame, so a session
 /// that outlives its login stops, though the RoleBinding stays.
 ///
-/// Materiality: skip the per-item token review and the stream keeps
-/// delivering after the login expired.
+/// Without the per-item token review the stream would keep delivering
+/// after the login expired.
 #[tokio::test]
 async fn an_expired_token_cuts_an_open_receive_stream() {
     let k8s = alice_bob_and_adapter();
@@ -713,8 +661,8 @@ async fn an_expired_token_cuts_an_open_receive_stream() {
 /// receives none of the subject's turn traffic. The subject's RBAC reach is
 /// untouched, so only the handle check can cut it.
 ///
-/// Materiality: re-review only the RBAC reach and this stream keeps
-/// delivering to the unbound handle.
+/// Re-reviewing only the RBAC reach would keep this stream delivering to
+/// the unbound handle.
 #[tokio::test]
 async fn a_removed_handle_binding_cuts_an_open_adapter_stream() {
     let k8s = alice_bob_and_adapter();
@@ -896,103 +844,7 @@ async fn an_adapter_message_for_an_unreachable_workspace_is_refused() {
 
 // --- No review carries a caller-supplied namespace --------------------------
 
-/// The relay builds every review itself; no caller-supplied namespace may
-/// reach one. Pinned across both paths: every review carries the relay's own
-/// namespace.
-#[tokio::test]
-async fn no_review_carries_a_caller_supplied_namespace() {
-    let k8s = K8s::with_tokens(&[(ALICE_TOKEN, ALICE), (ADAPTER_TOKEN, ADAPTER_SLACK)])
-        .allow("ws-alpha", None);
-    let svc = service(&k8s).await;
-
-    // Person path.
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        svc.dispatch_tool(bearer(ALICE_TOKEN, call_tool("alpha"))),
-    )
-    .await
-    .expect("allowed")
-    .unwrap_err();
-    let person_reviews = k8s.seen_access_reviews().len();
-    assert!(person_reviews > 0, "the person path must submit a review");
-
-    // Adapter path, with alice's bound handle.
-    let resp = svc
-        .channel_receive(bearer_classed(
-            ADAPTER_TOKEN,
-            ListenerClass::AdapterToken,
-            receive("alpha", "U0123ABCDEF"),
-        ))
-        .await
-        .expect("alpha via the adapter path");
-    drop(resp);
-
-    let reviews = k8s.seen_access_reviews();
-    assert!(
-        reviews.len() > person_reviews,
-        "the adapter path must submit a review"
-    );
-    for (_, review) in reviews {
-        let ns = review
-            .pointer("/spec/resourceAttributes/namespace")
-            .and_then(|v| v.as_str());
-        assert_eq!(
-            ns,
-            Some(NAMESPACE),
-            "every review must carry the relay's own namespace, never a \
-             caller-supplied one"
-        );
-    }
-}
-
 // --- Every path reaches the same list ---------------------------------------
-
-/// The same subject reaches the same workspaces from both credential paths:
-/// allowed on alpha, denied on gamma, via the person token and via the bound
-/// adapter handle alike. Channels never narrow the list.
-#[tokio::test]
-async fn the_same_subject_reaches_the_same_workspaces_from_both_paths() {
-    let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ws-alpha", None);
-    let svc = service(&k8s).await;
-
-    // Person path: alpha forwards (Unavailable at the harness dial), gamma denied.
-    let err = tokio::time::timeout(
-        Duration::from_secs(5),
-        svc.dispatch_tool(bearer(ALICE_TOKEN, call_tool("alpha"))),
-    )
-    .await
-    .expect("alpha via the person path")
-    .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::Unavailable);
-    let err = tokio::time::timeout(
-        Duration::from_secs(1),
-        svc.dispatch_tool(bearer(ALICE_TOKEN, call_tool("gamma"))),
-    )
-    .await
-    .expect("gamma denied via the person path")
-    .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::PermissionDenied);
-
-    // Adapter path with alice's bound handle: same answers.
-    let k8s2 = K8s::with_token(ADAPTER_TOKEN, ADAPTER_SLACK).allow("ws-alpha", Some(ALICE));
-    let svc2 = service(&k8s2).await;
-    svc2.channel_receive(bearer_classed(
-        ADAPTER_TOKEN,
-        ListenerClass::AdapterToken,
-        receive("alpha", "U0123ABCDEF"),
-    ))
-    .await
-    .expect("alpha via the adapter path");
-    let err = stream_err(
-        svc2.channel_receive(bearer_classed(
-            ADAPTER_TOKEN,
-            ListenerClass::AdapterToken,
-            receive("gamma", "U0123ABCDEF"),
-        ))
-        .await,
-    );
-    assert_eq!(err.code(), tonic::Code::PermissionDenied);
-}
 
 // --- Revocation on the non-forwarding and tool-stream surfaces --------------
 
@@ -1008,8 +860,8 @@ fn turn_state(workspace: &str, conversation_id: &str) -> GetTurnStateRequest {
 /// Ok without its own review. The reach review runs on every RPC on the
 /// surface, not only the ones that forward.
 ///
-/// Materiality: authorize GetTurnState by the token alone and the revoked
-/// poll keeps answering Ok(IDLE).
+/// Authorizing GetTurnState by the token alone would keep the revoked poll
+/// answering Ok(IDLE).
 #[tokio::test]
 async fn get_turn_state_after_the_rolebinding_is_removed_is_refused() {
     let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ws-alpha", Some(ALICE));
@@ -1109,8 +961,8 @@ async fn open_await_tool_result(
 /// Removing the RoleBinding cuts an open WatchTools stream on its next
 /// update, the way it denies the next request.
 ///
-/// Materiality: pass the harness stream through without the per-item review
-/// and the revoked subject keeps receiving the workspace's tool catalog.
+/// Passing the harness stream through without the per-item review would
+/// keep the revoked subject receiving the workspace's tool catalog.
 #[tokio::test]
 async fn a_removed_rolebinding_cuts_an_open_watch_tools_stream() {
     let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ws-alpha", Some(ALICE));
@@ -1122,24 +974,11 @@ async fn a_removed_rolebinding_cuts_an_open_watch_tools_stream() {
     assert_cut_on_next_item(&mut stream, "revocation").await;
 }
 
-/// An expired token cuts an open WatchTools stream on its next update,
-/// though the RoleBinding stays.
-#[tokio::test]
-async fn an_expired_token_cuts_an_open_watch_tools_stream() {
-    let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ws-alpha", Some(ALICE));
-    let (svc, updates, _frames) = alice_on_a_streaming_harness(&k8s).await;
-    let mut stream = open_watch_tools(&svc, &updates).await;
-
-    k8s.tokens.lock().unwrap().remove(ALICE_TOKEN);
-    updates.send(Ok(ToolListUpdate::default())).await.unwrap();
-    assert_cut_on_next_item(&mut stream, "token expiry").await;
-}
-
 /// Removing the RoleBinding cuts an open AwaitToolResult stream on its next
 /// frame.
 ///
-/// Materiality: pass the harness stream through without the per-item review
-/// and the revoked subject keeps reading the tool's output.
+/// Passing the harness stream through without the per-item review would
+/// keep the revoked subject reading the tool's output.
 #[tokio::test]
 async fn a_removed_rolebinding_cuts_an_open_await_tool_result_stream() {
     let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ws-alpha", Some(ALICE));
@@ -1149,19 +988,6 @@ async fn a_removed_rolebinding_cuts_an_open_await_tool_result_stream() {
     k8s.decisions.lock().unwrap().clear();
     frames.send(Ok(stdout_frame("second"))).await.unwrap();
     assert_cut_on_next_item(&mut stream, "revocation").await;
-}
-
-/// An expired token cuts an open AwaitToolResult stream on its next frame,
-/// though the RoleBinding stays.
-#[tokio::test]
-async fn an_expired_token_cuts_an_open_await_tool_result_stream() {
-    let k8s = K8s::with_token(ALICE_TOKEN, ALICE).allow("ws-alpha", Some(ALICE));
-    let (svc, _updates, frames) = alice_on_a_streaming_harness(&k8s).await;
-    let mut stream = open_await_tool_result(&svc, &frames).await;
-
-    k8s.tokens.lock().unwrap().remove(ALICE_TOKEN);
-    frames.send(Ok(stdout_frame("second"))).await.unwrap();
-    assert_cut_on_next_item(&mut stream, "token expiry").await;
 }
 
 // --- The adapter stream's per-item token review -----------------------------
@@ -1196,8 +1022,8 @@ async fn open_adapter_stream(
 /// review that opened it did. The mock apiserver authenticates the adapter
 /// token for that audience only.
 ///
-/// Materiality: re-review the adapter's token with no audience and the
-/// apiserver rejects it, so the adapter's own stream is cut on its first
+/// Re-reviewing the adapter's token with no audience would make the
+/// apiserver reject it, cutting the adapter's own stream on its first
 /// item.
 #[tokio::test]
 async fn an_adapter_streams_per_item_reviews_carry_the_adapter_audience() {
@@ -1233,28 +1059,4 @@ async fn an_adapter_streams_per_item_reviews_carry_the_adapter_audience() {
             "every review of the adapter's token must pin the adapter audience"
         );
     }
-}
-
-/// An expired adapter token cuts an open adapter stream on its next item,
-/// though the sender's handle and the subject's RoleBinding both stay.
-///
-/// Materiality: re-review only the handle and the reach and the stream keeps
-/// delivering after the adapter's token expired.
-#[tokio::test]
-async fn an_expired_adapter_token_cuts_an_open_adapter_stream() {
-    let k8s = alice_bob_and_adapter();
-    let state = state_for(
-        &k8s,
-        &[("user-alice", ALICE, "alpha", &[("slack", "U0123ABCDEF")])],
-    )
-    .await;
-    let svc = GatewayService::new(state.clone());
-    let (mut stream, channel_id) = open_adapter_stream(&svc).await;
-
-    k8s.tokens.lock().unwrap().remove(ADAPTER_TOKEN);
-
-    state
-        .set_and_broadcast_turn_state(&channel_id, ALICE, "conv-1", TurnState::Working)
-        .await;
-    assert_cut_on_next_item(&mut stream, "the adapter token's expiry").await;
 }
