@@ -61,13 +61,7 @@ async fn alice_channel(state: &GatewayState) -> String {
     // Keep the receiver alive so the channel stays deliverable.
     std::mem::forget(rx);
     state
-        .mint_channel(
-            ChannelOpener::Person,
-            ALICE.into(),
-            "alpha".into(),
-            tx,
-            false,
-        )
+        .mint_channel(ChannelOpener::Person, ALICE.into(), "alpha".into(), tx)
         .await
 }
 
@@ -169,6 +163,56 @@ async fn get_turn_state_does_not_leak_across_subjects() {
     assert_eq!(resp.state, TurnState::Idle as i32);
 }
 
+/// Authenticates every internal caller as the harness of a fixed workspace,
+/// so `DeliverTurnState` reaches its handler without a kube client.
+struct FixedVerifier(&'static str);
+
+#[async_trait::async_trait]
+impl shared::auth::TokenVerifier for FixedVerifier {
+    async fn verify_token(&self, _token: &str) -> Result<String, tonic::Status> {
+        Ok(self.0.to_string())
+    }
+}
+
+/// The harness's terminal turn state, delivered under alice's subject,
+/// replaces the WORKING the gateway recorded at ingest: alice's next poll of
+/// the conversation sees the terminal state, not WORKING.
+#[tokio::test]
+async fn get_turn_state_returns_the_terminal_state_delivered_under_the_callers_subject() {
+    use relay_controller::internal::InternalService;
+    use relay_proto::relay_internal_server::RelayInternal;
+
+    let (svc, state) = service().await;
+    let id = alice_channel(&state).await;
+    // As ChannelIngest does when it accepts a message.
+    state
+        .set_and_broadcast_turn_state(&id, ALICE, "conv-9", TurnState::Working)
+        .await;
+
+    let internal = InternalService::new(state.clone(), Some(Arc::new(FixedVerifier("alpha"))));
+    let mut delivery = tonic::Request::new(relay_proto::DeliverTurnStateRequest {
+        turn_state: Some(proto_common::TurnStateEvent {
+            state: TurnState::Cancelled as i32,
+            conversation_id: "conv-9".into(),
+            ..Default::default()
+        }),
+        subject: ALICE.into(),
+        ..Default::default()
+    });
+    delivery
+        .metadata_mut()
+        .insert("authorization", "Bearer harness-sa".parse().unwrap());
+    internal.deliver_turn_state(delivery).await.unwrap();
+
+    let resp = svc
+        .get_turn_state(bearer(ALICE_TOKEN, turn_state("conv-9")))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.state, TurnState::Cancelled as i32);
+    assert_eq!(resp.conversation_id, "conv-9");
+}
+
 // --- The listener class -------------------------------------------------------
 
 /// A request that bypassed the per-listener layer carries no class and is
@@ -268,7 +312,7 @@ async fn channel_ingest_advertised_methods_persist_across_empty_ingests() {
     svc.channel_ingest(bearer(ALICE_TOKEN, req)).await.unwrap();
     assert!(
         state
-            .send_server_notification("alpha", "RevealPath", "{}".into(), None)
+            .send_server_notification("alpha", "RevealPath", "{}".into())
             .await
             .is_ok(),
         "advertised method must be usable"
@@ -283,7 +327,7 @@ async fn channel_ingest_advertised_methods_persist_across_empty_ingests() {
     .unwrap();
     assert!(
         state
-            .send_server_notification("alpha", "RevealPath", "{}".into(), None)
+            .send_server_notification("alpha", "RevealPath", "{}".into())
             .await
             .is_ok(),
         "empty supported_methods must not clobber prior set"
@@ -302,7 +346,6 @@ async fn channel_receive_emits_ack_then_idle_replay() {
                 adapter_hint: Some("cli:test".into()),
                 workspace: "alpha".into(),
                 sender: String::new(),
-                resume_after_seq: None,
             },
         ))
         .await

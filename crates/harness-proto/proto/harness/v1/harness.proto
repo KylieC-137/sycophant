@@ -68,14 +68,4 @@ service HarnessControl {
   // token so the LLM stream is abandoned and a terminal turn_cancelled is
   // emitted. No cascade into running toolsets/subagents.
   rpc CancelTurn (sycophant.common.v1.CancelTurnRequest) returns (sycophant.common.v1.CancelTurnResponse);
-
-  // Replay the workspace event log from a given sequence. The relay calls
-  // this on behalf of a resuming client; the harness streams ChannelOutbound
-  // entries with seq > after_seq.
-  rpc ReplayEventLog (ReplayEventLogRequest) returns (stream sycophant.common.v1.ChannelOutbound);
-}
-
-message ReplayEventLogRequest {
-  // Replay events after this sequence. 0 = replay from the beginning.
-  uint64 after_seq = 1;
 }

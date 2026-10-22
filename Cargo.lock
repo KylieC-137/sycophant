@@ -876,7 +876,6 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
- "base64",
  "bytes",
  "chrono",
  "futures",
@@ -887,7 +886,6 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "model-provider",
- "prost",
  "proto-common",
  "relay-proto",
  "rustls",
@@ -912,7 +910,6 @@ dependencies = [
 name = "harness-proto"
 version = "0.1.0"
 dependencies = [
- "prost",
  "proto-common",
  "tonic",
  "tonic-build",
@@ -2925,7 +2922,6 @@ dependencies = [
 name = "toolset-proto"
 version = "0.1.0"
 dependencies = [
- "harness-proto",
  "prost",
  "proto-common",
  "tonic",

@@ -189,7 +189,7 @@ fn dex_values(email: &str, hash: &str, user_id: &str) -> serde_json::Value {
             "service": { "type": "NodePort", "ports": { "https": { "nodePort": DEX_NODEPORT } } },
             "config": {
                 "issuer": ISSUER,
-                "expiry": { "idTokens": "10m" },
+                "expiry": { "idTokens": "24h" },
                 "oauth2": { "grantTypes": ["password"], "passwordConnector": "local" },
                 "staticClients": [{ "id": AUDIENCE, "name": AUDIENCE, "public": true }],
                 "staticPasswords": [{

@@ -15,6 +15,7 @@ use toolset_proto::tool_job_server::ToolJob;
 use toolset_proto::RunToolCommand;
 
 use crate::{execute, parts, stdlib};
+use tracing::info;
 
 /// Bound on a served call's outbound frame channel, matching the harness's
 /// inbound bound.
@@ -78,6 +79,8 @@ impl ToolJob for ToolJobService {
             }
         };
 
+        info!(call_id = %assignment.call_id, "tool call received");
+
         // A cancel on the request half fires the local token, so the running
         // child is killed on the same held connection — no pod-initiated call.
         let cancel = CancellationToken::new();
@@ -104,6 +107,8 @@ impl ToolJob for ToolJobService {
             } else {
                 assignment.working_dir.as_str()
             };
+
+            info!(call_id = %assignment.call_id, "tool assignment processed");
 
             // Builtins complete to one CommandResult framed at once; image tools
             // stream live line-by-line. Both race the cancel token and apply the
@@ -133,6 +138,8 @@ impl ToolJob for ToolJobService {
             activity.completed.fetch_add(1, Ordering::SeqCst);
             activity.in_flight.fetch_sub(1, Ordering::SeqCst);
             activity.touch().await;
+
+            info!(call_id = %assignment.call_id, "tool result sent");
         });
 
         let stream = ReceiverStream::new(rx).map(Ok::<ToolResultFrame, Status>);

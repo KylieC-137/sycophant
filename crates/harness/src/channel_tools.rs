@@ -113,7 +113,7 @@ pub(crate) async fn dispatch(
     match kind {
         Kind::Notification => {
             let delivered = gateway
-                .send_server_notification(workspace, name, input_json, 0)
+                .send_server_notification(workspace, name, input_json)
                 .await?;
             if delivered {
                 Ok(CallToolResponse {
@@ -133,7 +133,7 @@ pub(crate) async fn dispatch(
         }
         Kind::Request => {
             let outcome = gateway
-                .send_server_request_and_await(workspace, tool_call_id, name, input_json, 30, 0)
+                .send_server_request_and_await(workspace, tool_call_id, name, input_json, 30)
                 .await?;
             Ok(outcome_to_tool_response(name, outcome))
         }

@@ -20,6 +20,10 @@ import (
 )
 
 // runTUI launches the interactive Bubble Tea TUI for multi-turn chat.
+// When the profile names a workspace, a conversation named by --continue or
+// --resume is opened first, so a refusal is returned before the program takes
+// over the screen. Otherwise it is opened after the workspace picker, and a
+// refusal quits the program.
 func runTUI(
 	cfgDir string,
 	p *config.Profile,
@@ -28,10 +32,51 @@ func runTUI(
 	resumeID string,
 	grants []*commonpb.GrantSelection,
 ) error {
-	m := newTUIModel(cfgDir, p, token, continueFlag, resumeID, grants)
+	m, err := openTUIModel(cfgDir, p, token, continueFlag, resumeID, grants)
+	if err != nil {
+		return err
+	}
 	prog := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseAllMotion())
-	_, err := prog.Run()
-	return err
+	final, err := prog.Run()
+	if err != nil {
+		return err
+	}
+	if fm, ok := final.(*tuiModel); ok && fm.openErr != nil {
+		return fm.openErr
+	}
+	return nil
+}
+
+// openTUIModel builds the TUI model for a profile and flags. When the
+// profile names a workspace and the flags name a conversation, it also
+// connects and opens that conversation: the stream is open before history
+// and turn state are read, so no live frame after that point is lost.
+func openTUIModel(
+	cfgDir string,
+	p *config.Profile,
+	token string,
+	continueFlag bool,
+	resumeID string,
+	grants []*commonpb.GrantSelection,
+) (tea.Model, error) {
+	m := newTUIModel(cfgDir, p, token, continueFlag, resumeID, grants)
+	if p.Workspace == "" {
+		return m, nil
+	}
+	id := m.namedConversation()
+	if id == "" {
+		return m, nil
+	}
+	msg, err := connectChannel(token, p.Server, p.Workspace, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := msg.openConversation(token, p.Workspace, id); err != nil {
+		msg.conn.Close()
+		return nil, err
+	}
+	m.applyConnected(msg)
+	return m, nil
 }
 
 // --- Phases ---
@@ -65,16 +110,30 @@ type frameMsg struct {
 
 type streamErrMsg struct {
 	err error
+	// ingest marks a failed ChannelIngest rather than a broken stream.
+	ingest bool
 }
 
+// connectedMsg carries an open channel and, when conversationID is set, the
+// conversation read through it.
 type connectedMsg struct {
 	conn      *grpc.ClientConn
 	client    relaypb.RelayGatewayClient
 	stream    grpc.ServerStreamingClient[commonpb.ChannelOutbound]
 	channelID string
+
+	conversationID string
+	history        []*commonpb.HistoryEntry
+	running        bool
 }
 
 type connErrMsg struct {
+	err error
+}
+
+// openFailedMsg reports that a named conversation could not be opened.
+// The program quits and the chat command returns the error.
+type openFailedMsg struct {
 	err error
 }
 
@@ -118,10 +177,12 @@ type tuiModel struct {
 
 	// Conversation state.
 	conversationID string
-	lastSeq        *uint64
 	toolCalls      map[string]string
 	textBuf        strings.Builder
-	waiting        bool
+	// running is the relay's latest turn state for the viewed conversation.
+	running bool
+	// sending covers an ingest in flight.
+	sending bool
 
 	// Display.
 	committed strings.Builder
@@ -148,6 +209,8 @@ type tuiModel struct {
 	// Quitting.
 	quitting bool
 	err      error
+	// openErr is a named conversation's open failure, returned by runTUI.
+	openErr error
 }
 
 func newTUIModel(
@@ -161,8 +224,6 @@ func newTUIModel(
 	ti := textinput.New()
 	ti.Placeholder = "Type a message…"
 	ti.CharLimit = 0
-
-	seq := uint64(0)
 
 	sub, _ := config.TokenSubject(token)
 	email := config.TokenEmail(token)
@@ -187,7 +248,6 @@ func newTUIModel(
 		continueFlag:  continueFlag,
 		resumeID:      resumeID,
 		grants:        grants,
-		lastSeq:       &seq,
 		toolCalls:     make(map[string]string),
 		input:         ti,
 		subject:       identity,
@@ -196,8 +256,24 @@ func newTUIModel(
 	}
 }
 
+// namedConversation is the conversation the flags name for the profile's
+// workspace, or "" for a new conversation.
+func (m *tuiModel) namedConversation() string {
+	if m.continueFlag {
+		entry, err := config.HistoryLastForWorkspace(m.cfgDir, m.profile.Workspace)
+		if err == nil {
+			return entry.ConversationID
+		}
+		return ""
+	}
+	return m.resumeID
+}
+
 func (m *tuiModel) Init() tea.Cmd {
 	if m.phase == phaseChat {
+		if m.connected {
+			return tea.Batch(textinput.Blink, m.recvCmd())
+		}
 		return tea.Batch(textinput.Blink, m.connectCmd())
 	}
 	// Picker phase: list workspaces first.
@@ -228,51 +304,66 @@ func (m *tuiModel) listWorkspacesCmd() tea.Cmd {
 	}
 }
 
-func (m *tuiModel) connectCmd() tea.Cmd {
-	return func() tea.Msg {
-		ctx := grpcclient.WithToken(context.Background(), m.token)
-
-		seq := loadCursor(m.cfgDir, m.profile.Workspace)
-		m.lastSeq = seq
-
-		// Reuse existing connection from picker if available.
-		conn := m.conn
+// connectChannel dials the relay (or reuses conn), opens ChannelReceive for
+// the workspace and reads the ack.
+func connectChannel(token, server, workspace string, conn *grpc.ClientConn) (connectedMsg, error) {
+	ctx := grpcclient.WithToken(context.Background(), token)
+	if conn == nil {
 		var err error
-		if conn == nil {
-			conn, err = grpcclient.Dial(ctx, m.profile.Server)
-			if err != nil {
-				return connErrMsg{err: fmt.Errorf("connecting to relay: %w", err)}
+		conn, err = grpcclient.Dial(ctx, server)
+		if err != nil {
+			return connectedMsg{}, fmt.Errorf("connecting to relay: %w", err)
+		}
+	}
+	client := relaypb.NewRelayGatewayClient(conn)
+	stream, err := client.ChannelReceive(ctx, &commonpb.ChannelReceiveRequest{Workspace: workspace})
+	if err != nil {
+		conn.Close()
+		return connectedMsg{}, fmt.Errorf("channel receive: %w", err)
+	}
+	channelID, err := readAck(stream)
+	if err != nil {
+		conn.Close()
+		return connectedMsg{}, fmt.Errorf("reading channel ack: %w", err)
+	}
+	return connectedMsg{conn: conn, client: client, stream: stream, channelID: channelID}, nil
+}
+
+// openConversation reads a conversation's whole history and then its turn
+// state through the open channel.
+func (c *connectedMsg) openConversation(token, workspace, conversationID string) error {
+	ctx := grpcclient.WithToken(context.Background(), token)
+	history, err := loadHistory(ctx, c.client, conversationID, workspace)
+	if err != nil {
+		return err
+	}
+	ts, err := getTurnState(ctx, c.client, conversationID, workspace)
+	if err != nil {
+		return err
+	}
+	c.conversationID = conversationID
+	c.history = history
+	c.running = ts.GetState() == commonpb.TurnState_TURN_STATE_WORKING
+	return nil
+}
+
+func (m *tuiModel) connectCmd() tea.Cmd {
+	token, server, workspace := m.token, m.profile.Server, m.profile.Workspace
+	// Reuse existing connection from picker if available.
+	conn := m.conn
+	id := m.namedConversation()
+	return func() tea.Msg {
+		msg, err := connectChannel(token, server, workspace, conn)
+		if err != nil {
+			return connErrMsg{err: err}
+		}
+		if id != "" {
+			if err := msg.openConversation(token, workspace, id); err != nil {
+				msg.conn.Close()
+				return openFailedMsg{err: err}
 			}
 		}
-
-		client := relaypb.NewRelayGatewayClient(conn)
-		stream, err := openStream(ctx, client, m.profile.Workspace, seq)
-		if err != nil {
-			conn.Close()
-			return connErrMsg{err: fmt.Errorf("channel receive: %w", err)}
-		}
-
-		channelID, err := readAck(stream)
-		if err != nil {
-			conn.Close()
-			return connErrMsg{err: fmt.Errorf("reading channel ack: %w", err)}
-		}
-
-		if m.continueFlag {
-			entry, err := config.HistoryLastForWorkspace(m.cfgDir, m.profile.Workspace)
-			if err == nil {
-				m.conversationID = entry.ConversationID
-			}
-		} else if m.resumeID != "" {
-			m.conversationID = m.resumeID
-		}
-
-		return connectedMsg{
-			conn:      conn,
-			client:    client,
-			stream:    stream,
-			channelID: channelID,
-		}
+		return msg
 	}
 }
 
@@ -288,11 +379,12 @@ func (m *tuiModel) recvCmd() tea.Cmd {
 }
 
 func (m *tuiModel) ingestCmd(message string) tea.Cmd {
+	client, channelID, conversationID, grants, token := m.client, m.channelID, m.conversationID, m.grants, m.token
 	return func() tea.Msg {
-		ctx := grpcclient.WithToken(context.Background(), m.token)
-		resp, err := m.client.ChannelIngest(ctx, &commonpb.ChannelIngestRequest{
-			ChannelId:      m.channelID,
-			ConversationId: m.conversationID,
+		ctx := grpcclient.WithToken(context.Background(), token)
+		resp, err := client.ChannelIngest(ctx, &commonpb.ChannelIngestRequest{
+			ChannelId:      channelID,
+			ConversationId: conversationID,
 			UserMessage: &commonpb.UserMessage{
 				Content: []*commonpb.ContentBlock{
 					{
@@ -301,11 +393,11 @@ func (m *tuiModel) ingestCmd(message string) tea.Cmd {
 						},
 					},
 				},
-				Grants: m.grants,
+				Grants: grants,
 			},
 		})
 		if err != nil {
-			return streamErrMsg{err: fmt.Errorf("channel ingest: %w", err)}
+			return streamErrMsg{err: fmt.Errorf("channel ingest: %w", err), ingest: true}
 		}
 		return ingestAckMsg{conversationID: resp.ConversationId}
 	}
@@ -318,33 +410,44 @@ func (m *tuiModel) reconnectCmd(backoff time.Duration) tea.Cmd {
 }
 
 func (m *tuiModel) doReconnect() tea.Cmd {
+	old := m.conn
+	token, server, workspace, id := m.token, m.profile.Server, m.profile.Workspace, m.conversationID
 	return func() tea.Msg {
-		if m.conn != nil {
-			m.conn.Close()
+		if old != nil {
+			old.Close()
 		}
-		ctx := grpcclient.WithToken(context.Background(), m.token)
-		conn, err := grpcclient.Dial(ctx, m.profile.Server)
+		msg, err := connectChannel(token, server, workspace, nil)
 		if err != nil {
-			return connErrMsg{err: fmt.Errorf("reconnecting to relay: %w", err)}
+			return connErrMsg{err: fmt.Errorf("reconnecting: %w", err)}
 		}
-		client := relaypb.NewRelayGatewayClient(conn)
-		stream, err := openStream(ctx, client, m.profile.Workspace, m.lastSeq)
-		if err != nil {
-			conn.Close()
-			return connErrMsg{err: fmt.Errorf("channel receive on reconnect: %w", err)}
+		if id != "" {
+			if err := msg.openConversation(token, workspace, id); err != nil {
+				msg.conn.Close()
+				return connErrMsg{err: fmt.Errorf("reconnecting: %w", err)}
+			}
 		}
-		channelID, err := readAck(stream)
-		if err != nil {
-			conn.Close()
-			return connErrMsg{err: fmt.Errorf("reading ack on reconnect: %w", err)}
-		}
-		return connectedMsg{
-			conn:      conn,
-			client:    client,
-			stream:    stream,
-			channelID: channelID,
-		}
+		return msg
 	}
+}
+
+// applyConnected adopts an open channel. An opened conversation replaces
+// the transcript with its history and sets the running state.
+func (m *tuiModel) applyConnected(msg connectedMsg) {
+	m.conn = msg.conn
+	m.client = msg.client
+	m.stream = msg.stream
+	m.channelID = msg.channelID
+	m.connected = true
+	if msg.conversationID != "" {
+		m.conversationID = msg.conversationID
+		m.committed.Reset()
+		m.textBuf.Reset()
+		m.liveBuf.Reset()
+		m.renderHistory(msg.history)
+		m.running = msg.running
+	}
+	m.commitLine(statusStyle.Render("Connected to " + m.profile.Workspace))
+	m.commitLine("")
 }
 
 // --- Update ---
@@ -415,6 +518,11 @@ func (m *tuiModel) selectWorkspace(workspace string) (tea.Model, tea.Cmd) {
 
 // --- Chat Update ---
 
+// acceptsInput reports whether the user may type and send.
+func (m *tuiModel) acceptsInput() bool {
+	return m.connected && !m.running && !m.sending
+}
+
 func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
@@ -423,14 +531,13 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Type {
 		case tea.KeyEsc, tea.KeyCtrlC:
 			m.quitting = true
-			saveCursor(m.cfgDir, m.profile.Workspace, m.lastSeq)
 			if m.conn != nil {
 				m.conn.Close()
 			}
 			return m, tea.Quit
 
 		case tea.KeyEnter:
-			if m.waiting || !m.connected {
+			if !m.acceptsInput() {
 				break
 			}
 			text := strings.TrimSpace(m.input.Value())
@@ -438,7 +545,7 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			m.input.SetValue("")
-			m.waiting = true
+			m.sending = true
 
 			m.commitLine(userStyle.Render("you") + "  " + text)
 			m.commitLine("")
@@ -465,13 +572,7 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input.Width = msg.Width - lipgloss.Width(m.input.Prompt) - 1
 
 	case connectedMsg:
-		m.conn = msg.conn
-		m.client = msg.client
-		m.stream = msg.stream
-		m.channelID = msg.channelID
-		m.connected = true
-		m.commitLine(statusStyle.Render("Connected to " + m.profile.Workspace))
-		m.commitLine("")
+		m.applyConnected(msg)
 		m.syncViewport()
 		cmds = append(cmds, m.recvCmd())
 
@@ -480,8 +581,22 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.commitLine(errorStyle.Render("⚠ " + msg.err.Error()))
 		m.syncViewport()
 
+	case openFailedMsg:
+		m.openErr = msg.err
+		m.quitting = true
+		return m, tea.Quit
+
 	case ingestAckMsg:
+		m.sending = false
 		m.conversationID = msg.conversationID
+		if msg.conversationID != "" {
+			// The relay records WORKING for the conversation before it acks.
+			m.running = true
+			if err := config.AppendHistory(m.cfgDir, msg.conversationID, m.profile.Workspace); err != nil {
+				m.commitLine(errorStyle.Render("⚠ saving conversation history: " + err.Error()))
+				m.syncViewport()
+			}
+		}
 
 	case frameMsg:
 		m.userAtBottom = m.viewport.AtBottom()
@@ -490,6 +605,9 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.recvCmd())
 
 	case streamErrMsg:
+		if msg.ingest {
+			m.sending = false
+		}
 		m.commitLine(errorStyle.Render("⚠ Stream disconnected, reconnecting…"))
 		m.syncViewport()
 		cmds = append(cmds, m.reconnectCmd(2*time.Second))
@@ -498,7 +616,7 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.doReconnect())
 	}
 
-	if !m.waiting && m.connected {
+	if m.acceptsInput() {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		cmds = append(cmds, cmd)
@@ -515,50 +633,34 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *tuiModel) handleFrameMsg(frame *commonpb.ChannelOutbound) {
 	switch c := frame.Command.(type) {
-	case *commonpb.ChannelOutbound_Heartbeat:
-		return
-	case *commonpb.ChannelOutbound_CatchUpComplete:
-		return
-	case *commonpb.ChannelOutbound_ReplayImpossible:
-		m.commitLine(errorStyle.Render("⚠ Replay impossible; history may be incomplete."))
-		return
 	case *commonpb.ChannelOutbound_TurnState:
-		if m.dedupFrame(frame) {
+		ts := c.TurnState
+		if ts.ConversationId == "" || ts.ConversationId != m.conversationID {
 			return
 		}
-		if c.TurnState.ConversationId != m.conversationID {
-			return
-		}
-		switch c.TurnState.State {
+		m.running = ts.State == commonpb.TurnState_TURN_STATE_WORKING
+		switch ts.State {
 		case commonpb.TurnState_TURN_STATE_IDLE:
 			m.flushStreamingToCommitted()
-			m.commitLine(sepStyle.Render("───────────────────────────────"))
-			m.commitLine("")
-			m.waiting = false
+			m.commitSeparator()
 			m.input.Focus()
-			config.AppendHistory(m.cfgDir, m.conversationID, m.profile.Workspace)
 		case commonpb.TurnState_TURN_STATE_FAILED:
 			m.flushStreamingToCommitted()
-			m.commitLine(errorStyle.Render("⚠ Turn failed: " + c.TurnState.Reason))
+			m.commitLine(errorStyle.Render("⚠ Turn failed: " + ts.Reason))
 			m.commitLine("")
-			m.waiting = false
+			m.input.Focus()
+		case commonpb.TurnState_TURN_STATE_CANCELLED:
+			m.flushStreamingToCommitted()
+			m.commitLine(errorStyle.Render("⚠ Turn cancelled"))
+			m.commitLine("")
 			m.input.Focus()
 		}
 	case *commonpb.ChannelOutbound_StreamItem:
-		if m.dedupFrame(frame) {
-			return
-		}
 		item := c.StreamItem
 		if item.ConversationId != m.conversationID {
 			return
 		}
 		m.handleStreamItem(item)
-	case *commonpb.ChannelOutbound_SendMessage:
-		m.dedupFrame(frame)
-	case *commonpb.ChannelOutbound_ServerRequest:
-		m.dedupFrame(frame)
-	case *commonpb.ChannelOutbound_Ack:
-		// Extra ack; ignore.
 	}
 }
 
@@ -590,19 +692,62 @@ func (m *tuiModel) commitLine(s string) {
 	m.committed.WriteString("\n")
 }
 
-func (m *tuiModel) flushStreamingToCommitted() {
-	if m.textBuf.Len() == 0 {
-		return
-	}
-	raw := m.textBuf.String()
+func (m *tuiModel) commitSeparator() {
+	m.commitLine(sepStyle.Render("───────────────────────────────"))
+	m.commitLine("")
+}
+
+// commitAssistant commits assistant text under its label, rendered as
+// markdown.
+func (m *tuiModel) commitAssistant(raw string) {
 	rendered, err := glamour.Render(raw, "dark")
 	if err != nil {
 		rendered = raw
 	}
 	m.committed.WriteString(assistantStyle.Render("assistant") + "\n")
 	m.committed.WriteString(rendered)
+}
+
+func (m *tuiModel) flushStreamingToCommitted() {
+	if m.textBuf.Len() == 0 {
+		return
+	}
+	m.commitAssistant(m.textBuf.String())
 	m.textBuf.Reset()
 	m.liveBuf.Reset()
+}
+
+// renderHistory commits a conversation's history: user and assistant text
+// and the assistant's tool calls. Tool results, tagged sub-agent entries
+// and non-text blocks are not shown.
+func (m *tuiModel) renderHistory(entries []*commonpb.HistoryEntry) {
+	pendingSep := false
+	for _, e := range entries {
+		msg := e.GetMessage()
+		if e.Tag != nil || msg == nil {
+			continue
+		}
+		switch msg.GetRole() {
+		case "user":
+			if pendingSep {
+				m.commitSeparator()
+				pendingSep = false
+			}
+			m.commitLine(userStyle.Render("you") + "  " + entryText(msg))
+			m.commitLine("")
+		case "assistant":
+			if text := entryText(msg); text != "" {
+				m.commitAssistant(text)
+			}
+			for _, tc := range msg.GetToolCalls() {
+				m.commitLine(toolStyle.Render("⚙ " + tc.GetName()))
+			}
+			pendingSep = true
+		}
+	}
+	if pendingSep {
+		m.commitSeparator()
+	}
 }
 
 func (m *tuiModel) syncViewport() {
@@ -619,19 +764,6 @@ func (m *tuiModel) syncViewport() {
 	if m.userAtBottom {
 		m.viewport.GotoBottom()
 	}
-}
-
-func (m *tuiModel) dedupFrame(frame *commonpb.ChannelOutbound) bool {
-	if frame.WorkspaceSeq == nil {
-		return false
-	}
-	seq := frame.GetWorkspaceSeq()
-	if seq <= *m.lastSeq {
-		return true
-	}
-	*m.lastSeq = seq
-	saveCursor(m.cfgDir, m.profile.Workspace, m.lastSeq)
-	return false
 }
 
 // --- View ---
@@ -707,7 +839,7 @@ func (m *tuiModel) viewChat() string {
 	}
 	ctx := statusStyle.Render(fmt.Sprintf("  %s · %s · %s", identity, m.profile.Server, m.profile.Workspace))
 	var indicator string
-	if m.waiting {
+	if m.running {
 		indicator = statusStyle.Render(" thinking…")
 	} else if !m.connected {
 		indicator = errorStyle.Render(" disconnected")

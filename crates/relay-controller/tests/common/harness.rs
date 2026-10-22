@@ -4,15 +4,13 @@
 use std::sync::{Arc, Mutex};
 
 use harness_proto::harness_control_server::{HarnessControl, HarnessControlServer};
-use harness_proto::ReplayEventLogRequest;
 use proto_common::{
     AwaitToolResultRequest, CallToolRequest, CancelToolRequest, CancelToolResponse,
-    CancelTurnRequest, CancelTurnResponse, ChannelOutbound, ConversationSummary,
-    DeleteConversationRequest, DeleteConversationResponse, DispatchToolResponse,
-    GetConversationHistoryRequest, GetConversationHistoryResponse, ListConversationsRequest,
-    ListConversationsResponse, MintConversationRequest, MintConversationResponse,
-    SetConversationNameRequest, SetConversationNameResponse, ToolListUpdate, ToolResultFrame,
-    WatchToolsRequest,
+    CancelTurnRequest, CancelTurnResponse, ConversationSummary, DeleteConversationRequest,
+    DeleteConversationResponse, DispatchToolResponse, GetConversationHistoryRequest,
+    GetConversationHistoryResponse, ListConversationsRequest, ListConversationsResponse,
+    MintConversationRequest, MintConversationResponse, SetConversationNameRequest,
+    SetConversationNameResponse, ToolListUpdate, ToolResultFrame, WatchToolsRequest,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -51,7 +49,6 @@ fn armed<T>(slot: &Mutex<Option<mpsc::Receiver<T>>>) -> Result<ReceiverStream<T>
 impl HarnessControl for MockHarness {
     type WatchToolsStream = ReceiverStream<Result<ToolListUpdate, Status>>;
     type AwaitToolResultStream = ReceiverStream<Result<ToolResultFrame, Status>>;
-    type ReplayEventLogStream = ReceiverStream<Result<ChannelOutbound, Status>>;
 
     async fn list_conversations(
         &self,
@@ -135,15 +132,6 @@ impl HarnessControl for MockHarness {
         _request: Request<CancelTurnRequest>,
     ) -> Result<Response<CancelTurnResponse>, Status> {
         Err(Status::unimplemented("mock harness"))
-    }
-
-    async fn replay_event_log(
-        &self,
-        _request: Request<ReplayEventLogRequest>,
-    ) -> Result<Response<Self::ReplayEventLogStream>, Status> {
-        // Return an empty stream by default.
-        let (_tx, rx) = mpsc::channel(1);
-        Ok(Response::new(ReceiverStream::new(rx)))
     }
 }
 

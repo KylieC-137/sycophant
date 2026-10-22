@@ -650,7 +650,16 @@ impl DispatchState {
                     &state.spawn.namespace
                 )
             );
-            let completed = dial_and_run(endpoint, assignment, sender, cancel, READY_TIMEOUT).await;
+            let completed = dial_and_run(
+                endpoint,
+                assignment,
+                sender,
+                cancel,
+                READY_TIMEOUT,
+                call_id.clone(),
+                tool_name.clone(),
+            )
+            .await;
             state.finish_call(&call_id).await;
             if completed {
                 state.bump_last_activity(&tool, &job_name).await;
@@ -740,16 +749,20 @@ async fn dial_and_run(
     result_tx: mpsc::Sender<ToolResultFrame>,
     cancel: CancellationToken,
     ready_window: Duration,
+    call_id: String,
+    tool_name: String,
 ) -> bool {
     // Owns this call's terminal guarantee from here: any early return below
     // drops it, firing the synthetic FAILED so the drain never awaits forever.
     let mut guard = ToolResultGuard::new(result_tx);
 
     let deadline = Instant::now() + ready_window;
+    let mut attempt: u32 = 0;
     let mut client = loop {
         if cancel.is_cancelled() {
             return false;
         }
+        attempt += 1;
         match tokio::time::timeout(
             DIAL_ATTEMPT_TIMEOUT,
             ToolJobClient::connect(endpoint.clone()),
@@ -757,7 +770,28 @@ async fn dial_and_run(
         .await
         {
             Ok(Ok(client)) => break client,
-            _ => {
+            Ok(Err(err)) => {
+                warn!(
+                    call_id = %call_id,
+                    tool = %tool_name,
+                    endpoint = %endpoint,
+                    attempt,
+                    error = %err,
+                    "tool pod dial failed, retrying"
+                );
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                tokio::time::sleep(DIAL_BACKOFF).await;
+            }
+            Err(_) => {
+                warn!(
+                    call_id = %call_id,
+                    tool = %tool_name,
+                    endpoint = %endpoint,
+                    attempt,
+                    "tool pod dial timed out, retrying"
+                );
                 if Instant::now() >= deadline {
                     return false;
                 }
@@ -765,6 +799,13 @@ async fn dial_and_run(
             }
         }
     };
+
+    info!(
+        call_id = %call_id,
+        tool = %tool_name,
+        endpoint = %endpoint,
+        "tool pod connected"
+    );
 
     // The outbound half: the assignment first, then a cancel if the call is
     // cancelled while it runs. Held on its own task so the inbound frame drain
@@ -791,7 +832,14 @@ async fn dial_and_run(
 
     let response = match client.run(ReceiverStream::new(out_rx)).await {
         Ok(response) => response,
-        Err(_) => {
+        Err(err) => {
+            warn!(
+                call_id = %call_id,
+                tool = %tool_name,
+                endpoint = %endpoint,
+                error = %err,
+                "tool pod stream failed"
+            );
             out_task.abort();
             return false;
         }
@@ -1542,7 +1590,7 @@ mod tests {
 /// dial-hold-retry rewrite introduces:
 ///   - `pod_dial_name(call_id, service, namespace) -> String` — a pure builder,
 ///     no apiserver call;
-///   - `dial_and_run(endpoint, assignment, result_tx, cancel, ready_window)` —
+///   - `dial_and_run(endpoint, assignment, result_tx, cancel, ready_window, call_id, tool_name)` —
 ///     the per-call client task.
 #[cfg(test)]
 mod dial_client_tests {
@@ -1682,6 +1730,8 @@ mod dial_client_tests {
             tx,
             CancellationToken::new(),
             Duration::from_secs(5),
+            "call-abc".to_string(),
+            "test-tool".to_string(),
         )
         .await;
 
@@ -1724,6 +1774,8 @@ mod dial_client_tests {
             tx,
             cancel.clone(),
             Duration::from_secs(5),
+            "c".to_string(),
+            "test-tool".to_string(),
         ));
 
         // The assignment lands first, then the fired cancel rides the same stream.
@@ -1775,6 +1827,8 @@ mod dial_client_tests {
             tx,
             CancellationToken::new(),
             window,
+            "c".to_string(),
+            "test-tool".to_string(),
         )
         .await;
 
@@ -1810,6 +1864,8 @@ mod dial_client_tests {
             tx,
             CancellationToken::new(),
             Duration::from_secs(5),
+            "c".to_string(),
+            "test-tool".to_string(),
         )
         .await;
 

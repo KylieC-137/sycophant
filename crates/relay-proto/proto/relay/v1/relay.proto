@@ -59,8 +59,8 @@ service RelayInternal {
 message DeliverStreamItemRequest {
   string channel_id = 1;
   sycophant.common.v1.StreamItem item = 2;
-  // Workspace-scoped sequence number assigned by the harness.
-  uint64 workspace_seq = 3;
+  reserved 3;
+  reserved "workspace_seq";
 }
 
 message DeliverStreamItemResponse {
@@ -72,8 +72,8 @@ message DeliverStreamItemResponse {
 message DeliverReplyRequest {
   string conversation_id = 1;
   repeated sycophant.common.v1.ContentBlock content = 2;
-  // Workspace-scoped sequence number assigned by the harness.
-  uint64 workspace_seq = 3;
+  reserved 3;
+  reserved "workspace_seq";
 }
 
 message DeliverReplyResponse {
@@ -85,8 +85,8 @@ message DeliverReplyResponse {
 message DeliverTurnStateRequest {
   string channel_id = 1;
   sycophant.common.v1.TurnStateEvent turn_state = 2;
-  // Workspace-scoped sequence number assigned by the harness.
-  uint64 workspace_seq = 3;
+  reserved 3;
+  reserved "workspace_seq";
   // The subject that owns this turn state. The relay uses this to
   // record the turn state keyed by subject, not channel.
   string subject = 4;

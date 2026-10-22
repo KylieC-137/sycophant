@@ -6,6 +6,7 @@ pub(crate) mod connect;
 pub(crate) mod destroy;
 pub(crate) mod down;
 pub(crate) mod operator;
+pub(crate) mod registry;
 pub(crate) mod remove;
 pub(crate) mod secret;
 pub(crate) mod setup;

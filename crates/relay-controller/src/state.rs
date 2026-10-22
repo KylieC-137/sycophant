@@ -15,7 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use proto_common::{
     channel_outbound, ChannelOutbound, ClientResponseError, Heartbeat, ServerRequest, TurnState,
@@ -56,22 +56,6 @@ pub enum ChannelOpener {
     Adapter { channel: String, sender: String },
 }
 
-/// Catch-up state for a channel that is replaying history. Channels
-/// minted with `resume_after_seq` start in catch-up mode; live frames
-/// arriving during catch-up are buffered and drained on transition.
-pub struct CatchUpState {
-    pub catching_up: bool,
-    pub buffer: Vec<ChannelOutbound>,
-}
-
-/// Per-workspace high-water sequence and last-send timestamp. Updated
-/// on every fan-out delivery so the heartbeat task can read the current
-/// high-water seq without a per-frame lock.
-pub struct WorkspaceSeqState {
-    pub high_water_seq: u64,
-    pub last_send: Instant,
-}
-
 /// Server-side state for one registered channel. Created via
 /// `mint_channel`; lifetime tied to the originating ChannelReceive
 /// response stream.
@@ -95,11 +79,8 @@ pub struct ChannelEntry {
     /// refuses to dispatch a `ServerRequest` whose method is not in
     /// this set.
     pub supported_methods: Mutex<HashSet<String>>,
-    /// Catch-up state: channels with `resume_after_seq` start catching
-    /// up; live frames are buffered until the transition to live.
-    pub catchup: Mutex<CatchUpState>,
-    /// Abort handle for the per-channel heartbeat task. `None` until the
-    /// channel transitions to live (no heartbeats during catch-up).
+    /// Abort handle for the per-channel heartbeat task. `None` until
+    /// `spawn_heartbeat` runs for the channel.
     pub heartbeat_handle: Mutex<Option<AbortHandle>>,
 }
 
@@ -196,12 +177,8 @@ pub struct GatewayState {
     /// workspace channel resolves the awaiter.
     pending_server_requests:
         RwLock<HashMap<(String, String), oneshot::Sender<ServerRequestOutcome>>>,
-    /// Per-workspace high-water seq and last-send timestamp. Updated on every
-    /// sequenced fan-out so the heartbeat task reads the current high-water
-    /// seq without a per-frame lock.
-    workspace_seq: RwLock<HashMap<String, WorkspaceSeqState>>,
-    /// Heartbeat interval. Channels that are idle longer than this receive a
-    /// `Heartbeat { workspace_seq }` frame. `Duration::ZERO` disables heartbeats.
+    /// Heartbeat interval. Each channel receives an empty `Heartbeat` frame
+    /// at this interval. `Duration::ZERO` disables heartbeats.
     heartbeat_interval: Duration,
 }
 
@@ -223,7 +200,6 @@ impl GatewayState {
             idp_audience: String::new(),
             idp_certificate_authority: String::new(),
             pending_server_requests: RwLock::new(HashMap::new()),
-            workspace_seq: RwLock::new(HashMap::new()),
             heartbeat_interval: Duration::from_secs(15),
         }
     }
@@ -231,11 +207,6 @@ impl GatewayState {
     /// Set the heartbeat interval. `Duration::ZERO` disables heartbeats.
     pub fn set_heartbeat_interval(&mut self, interval: Duration) {
         self.heartbeat_interval = interval;
-    }
-
-    /// The configured heartbeat interval.
-    pub fn heartbeat_interval(&self) -> Duration {
-        self.heartbeat_interval
     }
 
     /// Construct a `GatewayState` with IdP configuration.
@@ -346,8 +317,6 @@ impl GatewayState {
 
     /// Mint a fresh channel_id (UUID), bind it to the minting subject
     /// and that subject's workspace, and store the tx for outbound routing.
-    /// `catching_up` controls whether the channel starts in catch-up mode
-    /// (buffering live frames until `transition_to_live` is called).
     /// Returns the channel_id; the caller is responsible for echoing it
     /// back to the adapter as the first frame of the outbound stream
     /// (ChannelAck).
@@ -357,7 +326,6 @@ impl GatewayState {
         subject: String,
         workspace: String,
         tx: mpsc::Sender<ChannelOutbound>,
-        catching_up: bool,
     ) -> String {
         let id = uuid::Uuid::new_v4().to_string();
         self.channels.write().await.insert(
@@ -369,10 +337,6 @@ impl GatewayState {
                 tx,
                 current_state: Mutex::new(TurnState::Idle),
                 supported_methods: Mutex::new(HashSet::new()),
-                catchup: Mutex::new(CatchUpState {
-                    catching_up,
-                    buffer: Vec::new(),
-                }),
                 heartbeat_handle: Mutex::new(None),
             },
         );
@@ -388,78 +352,26 @@ impl GatewayState {
         }
     }
 
-    /// Fan out a frame to all channels in `workspace`. Catching-up
-    /// channels buffer the frame; live channels send directly. Returns
-    /// the number of channels the frame was delivered to (live sends
-    /// that succeeded).
+    /// Fan out a frame to all channels in `workspace`. Returns the number
+    /// of channels the frame was delivered to (sends that succeeded).
     pub async fn send_to_workspace(&self, workspace: &str, msg: ChannelOutbound) -> usize {
         let channels = self.channels.read().await;
         let mut delivered = 0;
-        for entry in channels.values().filter(|e| e.workspace == workspace) {
-            let mut catchup = entry.catchup.lock().await;
-            if catchup.catching_up {
-                catchup.buffer.push(msg.clone());
-            } else {
-                if entry.tx.send(msg.clone()).await.is_ok() {
-                    delivered += 1;
-                }
+        for (channel_id, entry) in channels.iter().filter(|(_, e)| e.workspace == workspace) {
+            tracing::info!(workspace = %workspace, channel_id = %channel_id, "send_to_workspace: channel");
+            if entry.tx.send(msg.clone()).await.is_ok() {
+                delivered += 1;
             }
-        }
-        // Update workspace seq tracking if the frame carries a seq.
-        if let Some(seq) = msg.workspace_seq {
-            self.update_workspace_seq(workspace, seq).await;
         }
         delivered
     }
 
-    /// Transition a channel from catching-up to live: drain the buffer,
-    /// then clear the flag. Returns false if the channel does not exist.
-    pub async fn transition_to_live(&self, channel_id: &str) -> bool {
-        let channels = self.channels.read().await;
-        let Some(entry) = channels.get(channel_id) else {
-            return false;
-        };
-        let mut catchup = entry.catchup.lock().await;
-        let buffer = std::mem::take(&mut catchup.buffer);
-        catchup.catching_up = false;
-        // Send all buffered frames now that we're live.
-        for frame in buffer {
-            let _ = entry.tx.send(frame).await;
-        }
-        true
-    }
-
-    /// Update the workspace high-water sequence and last-send timestamp.
-    pub async fn update_workspace_seq(&self, workspace: &str, seq: u64) {
-        let mut map = self.workspace_seq.write().await;
-        let entry = map
-            .entry(workspace.to_string())
-            .or_insert_with(|| WorkspaceSeqState {
-                high_water_seq: 0,
-                last_send: Instant::now(),
-            });
-        if seq > entry.high_water_seq {
-            entry.high_water_seq = seq;
-        }
-        entry.last_send = Instant::now();
-    }
-
-    /// Read the current high-water seq for a workspace. Returns 0 if
-    /// no sequenced frame has been delivered yet.
-    pub async fn workspace_high_water_seq(&self, workspace: &str) -> u64 {
-        self.workspace_seq
-            .read()
-            .await
-            .get(workspace)
-            .map(|s| s.high_water_seq)
-            .unwrap_or(0)
-    }
-
-    /// Spawn a per-channel heartbeat task. The task sends a `Heartbeat`
-    /// frame when the channel has been idle for `interval`. Stores the
+    /// Spawn a per-channel heartbeat task. The task sends an empty
+    /// `Heartbeat` frame every configured heartbeat interval. Stores the
     /// abort handle on the channel entry so `unregister_channel` cancels
-    /// it. No-op when `interval` is zero.
-    pub async fn spawn_heartbeat(self: &Arc<Self>, channel_id: &str, interval: Duration) {
+    /// it. No-op when the interval is zero.
+    pub async fn spawn_heartbeat(&self, channel_id: &str) {
+        let interval = self.heartbeat_interval;
         if interval.is_zero() {
             return;
         }
@@ -467,31 +379,14 @@ impl GatewayState {
         let Some(entry) = channels.get(channel_id) else {
             return;
         };
-        let workspace = entry.workspace.clone();
         let tx = entry.tx.clone();
-        let state = self.clone();
-        let channel_id_owned = channel_id.to_string();
         let task = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             ticker.tick().await; // First tick is immediate, skip it.
             loop {
                 ticker.tick().await;
-                // Check if the channel is still catching up — no heartbeats during catch-up.
-                {
-                    let channels = state.channels.read().await;
-                    let Some(e) = channels.get(&channel_id_owned) else {
-                        break;
-                    };
-                    if e.catchup.lock().await.catching_up {
-                        continue;
-                    }
-                }
-                let seq = state.workspace_high_water_seq(&workspace).await;
                 let msg = ChannelOutbound {
-                    command: Some(channel_outbound::Command::Heartbeat(Heartbeat {
-                        workspace_seq: seq,
-                    })),
-                    workspace_seq: None,
+                    command: Some(channel_outbound::Command::Heartbeat(Heartbeat {})),
                 };
                 if tx.send(msg).await.is_err() {
                     break;
@@ -568,7 +463,6 @@ impl GatewayState {
                 conversation_id: conversation_id.to_string(),
                 ..Default::default()
             })),
-            workspace_seq: None,
         };
         entry.tx.send(msg).await.is_ok()
     }
@@ -626,7 +520,6 @@ impl GatewayState {
                 state: *guard as i32,
                 ..Default::default()
             })),
-            workspace_seq: None,
         };
         entry.tx.send(msg).await.is_ok()
     }
@@ -672,7 +565,6 @@ impl GatewayState {
         workspace: &str,
         method: &str,
         params_json: String,
-        workspace_seq: Option<u64>,
     ) -> Result<(), ServerRequestError> {
         let channels = self.channels.read().await;
         let workspace_channels: Vec<_> = channels
@@ -693,22 +585,13 @@ impl GatewayState {
                     method: method.to_string(),
                     params_json: params_json.clone(),
                 })),
-                workspace_seq,
             };
-            let mut catchup = entry.catchup.lock().await;
-            if catchup.catching_up {
-                catchup.buffer.push(msg);
-                any_sent = true;
-            } else if entry.tx.send(msg).await.is_ok() {
+            if entry.tx.send(msg).await.is_ok() {
                 any_sent = true;
             }
         }
         if !any_sent {
             return Err(ServerRequestError::UnsupportedMethod);
-        }
-        if let Some(seq) = workspace_seq {
-            drop(channels);
-            self.update_workspace_seq(workspace, seq).await;
         }
         Ok(())
     }
@@ -766,19 +649,11 @@ impl GatewayState {
                     method: method.to_string(),
                     params_json,
                 })),
-                workspace_seq: None,
             };
             let mut any_sent = false;
             for entry in &workspace_channels {
-                let mut catchup = entry.catchup.lock().await;
-                if catchup.catching_up {
-                    catchup.buffer.push(msg.clone());
+                if entry.tx.send(msg.clone()).await.is_ok() {
                     any_sent = true;
-                } else {
-                    drop(catchup);
-                    if entry.tx.send(msg.clone()).await.is_ok() {
-                        any_sent = true;
-                    }
                 }
             }
             if !any_sent {
@@ -822,13 +697,7 @@ pub(crate) mod test_support {
         tx: mpsc::Sender<ChannelOutbound>,
     ) -> String {
         state
-            .mint_channel(
-                ChannelOpener::Person,
-                subject.into(),
-                workspace.into(),
-                tx,
-                false,
-            )
+            .mint_channel(ChannelOpener::Person, subject.into(), workspace.into(), tx)
             .await
     }
 }
@@ -868,7 +737,6 @@ mod tests {
                     command: Some(channel_outbound::Command::Ack(proto_common::ChannelAck {
                         channel_id: a.clone(),
                     })),
-                    workspace_seq: None,
                 },
             )
             .await;
@@ -988,7 +856,7 @@ mod tests {
         let _id = mint_person(&state, "subject-ws", "ws", tx).await;
         // No supported_methods advertised → unsupported.
         let err = state
-            .send_server_notification("ws", "RevealPath", "{}".into(), None)
+            .send_server_notification("ws", "RevealPath", "{}".into())
             .await
             .unwrap_err();
         assert!(matches!(err, ServerRequestError::UnsupportedMethod));
@@ -1018,7 +886,7 @@ mod tests {
             .update_supported_methods(&id_b, vec!["RevealPath".into()])
             .await;
         state
-            .send_server_notification("ws", "RevealPath", "{\"p\":1}".into(), None)
+            .send_server_notification("ws", "RevealPath", "{\"p\":1}".into())
             .await
             .unwrap();
         assert!(
@@ -1139,60 +1007,10 @@ mod tests {
             command: Some(channel_outbound::Command::Ack(proto_common::ChannelAck {
                 channel_id: "test".into(),
             })),
-            workspace_seq: Some(5),
         };
         let delivered = state.send_to_workspace("ws", msg).await;
         assert_eq!(delivered, 2);
         assert!(rx_a.recv().await.is_some());
         assert!(rx_b.recv().await.is_some());
-    }
-
-    #[tokio::test]
-    async fn send_to_workspace_buffers_for_catching_up_channels() {
-        let state = make_state();
-        let (tx, mut rx) = mpsc::channel(4);
-        // Mint a catching-up channel.
-        let id = state
-            .mint_channel(ChannelOpener::Person, "s".into(), "ws".into(), tx, true)
-            .await;
-        let msg = ChannelOutbound {
-            command: Some(channel_outbound::Command::Ack(proto_common::ChannelAck {
-                channel_id: "test".into(),
-            })),
-            workspace_seq: Some(1),
-        };
-        let delivered = state.send_to_workspace("ws", msg).await;
-        assert_eq!(
-            delivered, 0,
-            "catching-up channel should not count as delivered"
-        );
-        assert!(
-            rx.try_recv().is_err(),
-            "catching-up channel should not receive"
-        );
-
-        // Transition to live drains the buffer.
-        assert!(state.transition_to_live(&id).await);
-        let got = rx.recv().await.unwrap();
-        assert!(matches!(
-            got.command,
-            Some(channel_outbound::Command::Ack(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn workspace_high_water_seq_tracks_max() {
-        let state = make_state();
-        assert_eq!(state.workspace_high_water_seq("ws").await, 0);
-        state.update_workspace_seq("ws", 5).await;
-        assert_eq!(state.workspace_high_water_seq("ws").await, 5);
-        state.update_workspace_seq("ws", 3).await;
-        assert_eq!(
-            state.workspace_high_water_seq("ws").await,
-            5,
-            "should not decrease"
-        );
-        state.update_workspace_seq("ws", 10).await;
-        assert_eq!(state.workspace_high_water_seq("ws").await, 10);
     }
 }

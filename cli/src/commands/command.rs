@@ -151,7 +151,33 @@ fn wait_job(job: &str, verb: &str) -> Result<(), String> {
 /// `syco <kind> up -f <values.yaml>`: render the kind's provision command from
 /// the values, write it, and wait for its installer.
 pub(crate) fn up(kind: &str, values: &Values) -> Result<(), String> {
-    let args = values.helm_args();
+    let mut args = values.helm_args();
+
+    // Local images referenced in the values are pushed to the in-cluster
+    // registry and rewritten to in-cluster references — the
+    // distribution-agnostic path that works on any cluster with a registry,
+    // not just k3d image import.
+    let mut extra_files: Vec<(String, operator::TempFile)> = Vec::new();
+    let overrides = match kind {
+        "inference" => push_inference_images(values)?,
+        "toolset" => {
+            let (ov, f) = push_toolset_image(values)?;
+            if let Some(f) = f {
+                extra_files.push((f.path(), f));
+            }
+            ov
+        }
+        _ => Vec::new(),
+    };
+    for (key, val) in overrides {
+        args.push("--set-string".to_string());
+        args.push(format!("{key}={val}"));
+    }
+    for (path, _tmp) in &extra_files {
+        args.push("-f".to_string());
+        args.push(path.clone());
+    }
+
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let manifest = render(&format!("{kind}-provision"), &args)?;
     let op = Operator::login(&Scope::global()?.oidc_dir())?;
@@ -165,6 +191,133 @@ pub(crate) fn up(kind: &str, values: &Values) -> Result<(), String> {
     }
 
     apply(&op, kind, &manifest)
+}
+
+/// Read the values files, find `inference.server.image` and
+/// `inference.server.weights`, push each to the in-cluster registry, and return
+/// the `--set-string` overrides that rewrite them to the in-cluster references.
+/// A remote model has no `server` block and nothing to push.
+fn push_inference_images(values: &Values) -> Result<Vec<(String, String)>, String> {
+    let merged = merge_values(values)?;
+
+    let Some(server) = merged
+        .get("inference")
+        .and_then(|v| v.get("server"))
+        .and_then(|v| v.as_mapping())
+    else {
+        return Ok(Vec::new());
+    };
+
+    let mut overrides = Vec::new();
+    for field in ["image", "weights"] {
+        let local = server
+            .get(field)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("inference.server.{field} not found in values"))?;
+        // Only push local images (no registry prefix or digest).
+        if local.contains('/') || local.contains('@') {
+            continue; // already a registry reference
+        }
+        let pinned = crate::commands::registry::push_local_image(local)?;
+        overrides.push((format!("inference.server.{field}"), pinned));
+    }
+    Ok(overrides)
+}
+
+/// `--set-string` overrides plus an optional extra values file for helm.
+type HelmOverrides = (Vec<(String, String)>, Option<operator::TempFile>);
+
+/// Read the values files, find `toolset.image`, push it to the in-cluster
+/// registry, and return the `--set-string` override for the in-cluster
+/// reference plus a temp values file carrying the image's
+/// `md.sycophant.tools` label as `toolset.tools` (a YAML map, since the
+/// values contain spaces/commas that break `--set-string`).
+fn push_toolset_image(values: &Values) -> Result<HelmOverrides, String> {
+    let merged = merge_values(values)?;
+
+    let toolset = merged
+        .get("toolset")
+        .and_then(|v| v.as_mapping())
+        .ok_or("toolset block not found in values")?;
+
+    let local = toolset
+        .get("image")
+        .and_then(|v| v.as_str())
+        .ok_or("toolset.image not found in values")?;
+
+    // Already a registry reference — nothing to push.
+    if local.contains('/') || local.contains('@') {
+        return Ok((Vec::new(), None));
+    }
+
+    let pinned = crate::commands::registry::push_local_image(local)?;
+
+    // Read the image's md.sycophant.tools label (one-line JSON) and write it
+    // as a temp YAML values file under toolset.tools, since the helm template
+    // ranges over .tools as a map and the values contain characters that
+    // break --set-string.
+    let tools_json = crate::runner::run_output(
+        "docker",
+        &[
+            "inspect",
+            "--format",
+            "{{ index .Config.Labels \"md.sycophant.tools\" }}",
+            local,
+        ],
+    )
+    .unwrap_or_default();
+
+    let overrides = vec![("toolset.image".to_string(), pinned)];
+    if tools_json.is_empty() {
+        return Ok((overrides, None));
+    }
+
+    let tools: std::collections::BTreeMap<String, String> = serde_json::from_str(&tools_json)
+        .map_err(|e| format!("parse md.sycophant.tools label: {e}"))?;
+
+    let mut doc = serde_yaml::Mapping::new();
+    let mut toolset_map = serde_yaml::Mapping::new();
+    let mut tools_map = serde_yaml::Mapping::new();
+    for (k, v) in tools {
+        tools_map.insert(serde_yaml::Value::String(k), serde_yaml::Value::String(v));
+    }
+    toolset_map.insert(
+        serde_yaml::Value::String("tools".to_string()),
+        serde_yaml::Value::Mapping(tools_map),
+    );
+    doc.insert(
+        serde_yaml::Value::String("toolset".to_string()),
+        serde_yaml::Value::Mapping(toolset_map),
+    );
+    let yaml = serde_yaml::to_string(&serde_yaml::Value::Mapping(doc))
+        .map_err(|e| format!("serialize tools values: {e}"))?;
+
+    let tmp = operator::TempFile::new("yaml", &yaml)?;
+    Ok((overrides, Some(tmp)))
+}
+
+/// Merge all values files (later files override earlier, matching helm) into a
+/// single top-level mapping.
+fn merge_values(
+    values: &Values,
+) -> Result<std::collections::BTreeMap<String, serde_yaml::Value>, String> {
+    use std::collections::BTreeMap;
+    use std::fs;
+
+    let mut merged: BTreeMap<String, serde_yaml::Value> = BTreeMap::new();
+    for file in &values.files {
+        let text = fs::read_to_string(file).map_err(|e| format!("cannot read {file}: {e}"))?;
+        let doc: serde_yaml::Value =
+            serde_yaml::from_str(&text).map_err(|e| format!("{file} is not YAML: {e}"))?;
+        if let Some(map) = doc.as_mapping() {
+            for (k, v) in map {
+                if let Some(key) = k.as_str() {
+                    merged.insert(key.to_string(), v.clone());
+                }
+            }
+        }
+    }
+    Ok(merged)
 }
 
 /// `syco <kind> down <name> --tenant <t>`: write the reap command and wait for

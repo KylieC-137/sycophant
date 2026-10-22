@@ -30,15 +30,14 @@ use std::sync::Arc;
 use futures::StreamExt;
 use proto_common::{
     channel_outbound, AwaitToolResultRequest, CallToolRequest, CancelToolRequest,
-    CancelToolResponse, CancelTurnRequest, CancelTurnResponse, CatchUpComplete, ChannelAck,
-    ChannelIngestAck, ChannelIngestRequest, ChannelOutbound, ChannelReceiveRequest,
-    DeleteConversationRequest, DeleteConversationResponse, DispatchToolResponse,
-    GetConversationHistoryRequest, GetConversationHistoryResponse, GetTurnStateRequest,
-    ListConversationsRequest, ListConversationsResponse, ListGrantsRequest, ListGrantsResponse,
-    ListWorkspacesRequest, ListWorkspacesResponse, MintConversationRequest,
-    MintConversationResponse, ReplayImpossible, SetConversationNameRequest,
-    SetConversationNameResponse, ToolListUpdate, ToolResultFrame, ToolsetGrants, TurnState,
-    TurnStateEvent, UserMessage, WatchToolsRequest,
+    CancelToolResponse, CancelTurnRequest, CancelTurnResponse, ChannelAck, ChannelIngestAck,
+    ChannelIngestRequest, ChannelOutbound, ChannelReceiveRequest, DeleteConversationRequest,
+    DeleteConversationResponse, DispatchToolResponse, GetConversationHistoryRequest,
+    GetConversationHistoryResponse, GetTurnStateRequest, ListConversationsRequest,
+    ListConversationsResponse, ListGrantsRequest, ListGrantsResponse, ListWorkspacesRequest,
+    ListWorkspacesResponse, MintConversationRequest, MintConversationResponse,
+    SetConversationNameRequest, SetConversationNameResponse, ToolListUpdate, ToolResultFrame,
+    ToolsetGrants, TurnState, TurnStateEvent, UserMessage, WatchToolsRequest,
 };
 use relay_proto::relay_gateway_server::RelayGateway;
 use relay_proto::{DiscoverRequest, DiscoverResponse};
@@ -925,28 +924,18 @@ impl RelayGateway for GatewayService {
         };
 
         let (tx, rx) = mpsc::channel(16);
-        let resume_after_seq = req.resume_after_seq;
-        // Determine if this channel starts in catch-up mode.
-        let catching_up = resume_after_seq.is_some();
         // Mint the server-side channel_id and bind it to the resolved
         // subject and the authorized workspace. The adapter_hint is logged
         // only.
         let channel_id = self
             .state
-            .mint_channel(
-                opener,
-                subject.clone(),
-                req.workspace.clone(),
-                tx.clone(),
-                catching_up,
-            )
+            .mint_channel(opener, subject.clone(), req.workspace.clone(), tx.clone())
             .await;
         tracing::info!(
             channel_id = %channel_id,
             subject = %subject,
             workspace = %req.workspace,
             adapter_hint = ?req.adapter_hint,
-            resume_after_seq = ?resume_after_seq,
             "channel_receive: minted channel_id"
         );
 
@@ -958,93 +947,15 @@ impl RelayGateway for GatewayService {
                 command: Some(channel_outbound::Command::Ack(ChannelAck {
                     channel_id: channel_id.clone(),
                 })),
-                workspace_seq: None,
             })
             .await
         {
             tracing::warn!(?e, "channel_receive: failed to send initial ChannelAck");
         }
 
-        if let Some(after_seq) = resume_after_seq {
-            // Resume mode: spawn a task to replay from the harness event log,
-            // then transition to live. Return the stream immediately to avoid
-            // mpsc(16) deadlock.
-            let state = self.state.clone();
-            let workspace = req.workspace.clone();
-            let channel_id_for_replay = channel_id.clone();
-            let tx_for_replay = tx.clone();
-            tokio::spawn(async move {
-                let replay_result = async {
-                    let mut harness = state
-                        .harness_clients()
-                        .get(&workspace)
-                        .await
-                        .map_err(|e| format!("harness unavailable: {e}"))?;
-                    let resp = harness
-                        .as_mut()
-                        .replay_event_log(harness_proto::ReplayEventLogRequest { after_seq })
-                        .await
-                        .map_err(|e| format!("replay_event_log failed: {e}"))?;
-                    let mut stream = resp.into_inner();
-                    while let Some(frame) = futures::StreamExt::next(&mut stream).await {
-                        match frame {
-                            Ok(outbound) => {
-                                if tx_for_replay.send(outbound).await.is_err() {
-                                    return Err("client disconnected during replay".to_string());
-                                }
-                            }
-                            Err(e) => {
-                                return Err(format!("replay stream error: {e}"));
-                            }
-                        }
-                    }
-                    Ok(())
-                }
-                .await;
-
-                match replay_result {
-                    Ok(()) => {
-                        // Send CatchUpComplete before transitioning to live.
-                        let _ = tx_for_replay
-                            .send(ChannelOutbound {
-                                command: Some(channel_outbound::Command::CatchUpComplete(
-                                    CatchUpComplete {},
-                                )),
-                                workspace_seq: None,
-                            })
-                            .await;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            channel_id = %channel_id_for_replay,
-                            error = %e,
-                            "channel_receive: replay failed, sending ReplayImpossible"
-                        );
-                        let _ = tx_for_replay
-                            .send(ChannelOutbound {
-                                command: Some(channel_outbound::Command::ReplayImpossible(
-                                    ReplayImpossible {},
-                                )),
-                                workspace_seq: None,
-                            })
-                            .await;
-                    }
-                }
-
-                // Transition to live: drain buffered frames, then start heartbeat.
-                state.transition_to_live(&channel_id_for_replay).await;
-                let interval = state.heartbeat_interval();
-                state
-                    .spawn_heartbeat(&channel_id_for_replay, interval)
-                    .await;
-            });
-        } else {
-            // No resume: start live immediately, replay turn state as today.
-            self.state.replay_turn_state(&channel_id).await;
-            // Spawn heartbeat immediately for live channels.
-            let interval = self.state.heartbeat_interval();
-            self.state.spawn_heartbeat(&channel_id, interval).await;
-        }
+        // Replay the channel's turn phase, then start the heartbeat.
+        self.state.replay_turn_state(&channel_id).await;
+        self.state.spawn_heartbeat(&channel_id).await;
 
         // Tie unregister to the outbound stream's lifetime, not a
         // wall-clock timer. The guard travels with the response stream;

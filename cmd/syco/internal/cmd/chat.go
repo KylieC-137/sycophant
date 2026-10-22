@@ -2,12 +2,11 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +15,8 @@ import (
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/sycophant-md/sycophant/cmd/syco/internal/config"
 	"github.com/sycophant-md/sycophant/cmd/syco/internal/grpcclient"
@@ -98,22 +99,23 @@ func newChatCmd() *cobra.Command {
 
 			ctx := grpcclient.WithToken(context.Background(), token)
 
-			// Load the cursor for this workspace.
-			lastSeq := loadCursor(cfgDir, p.Workspace)
-
-			// Persist on clean exit.
-			defer saveCursor(cfgDir, p.Workspace, lastSeq)
-
 			conn, err := grpcclient.Dial(ctx, p.Server)
 			if err != nil {
 				return fmt.Errorf("connecting to relay: %w", err)
 			}
-			defer conn.Close()
+			defer func() { conn.Close() }()
 
 			client := relaypb.NewRelayGatewayClient(conn)
 
-			// Open the initial ChannelReceive stream with resume_after_seq.
-			stream, err := openStream(ctx, client, p.Workspace, lastSeq)
+			// A named conversation must exist for this user before anything
+			// is sent to it.
+			if conversationID != "" {
+				if _, err := loadHistory(ctx, client, conversationID, p.Workspace); err != nil {
+					return err
+				}
+			}
+
+			stream, err := client.ChannelReceive(ctx, &commonpb.ChannelReceiveRequest{Workspace: p.Workspace})
 			if err != nil {
 				return fmt.Errorf("channel receive: %w", err)
 			}
@@ -143,15 +145,20 @@ func newChatCmd() *cobra.Command {
 				return fmt.Errorf("channel ingest: %w", err)
 			}
 			conversationID = ingestResp.ConversationId
+			if conversationID != "" {
+				if err := config.AppendHistory(cfgDir, conversationID, p.Workspace); err != nil {
+					log.Printf("warning: saving conversation history: %v", err)
+				}
+			}
 
 			// Stream the reply with reconnect support.
-			isTTY := isatty.IsTerminal(os.Stdout.Fd())
+			out := cmd.OutOrStdout()
 			rs := &recvState{
-				cfgDir:         cfgDir,
 				workspace:      p.Workspace,
 				conversationID: conversationID,
-				lastSeq:        lastSeq,
-				isTTY:          isTTY,
+				out:            out,
+				errOut:         cmd.ErrOrStderr(),
+				isTTY:          isTerminal(out),
 				toolStyle:      lipgloss.NewStyle().Foreground(lipgloss.Color("6")),
 				toolCalls:      make(map[string]string),
 			}
@@ -161,8 +168,6 @@ func newChatCmd() *cobra.Command {
 				result, err := rs.recvLoop(ctx, client, stream)
 				switch result {
 				case loopDone:
-					// Turn completed normally.
-					*lastSeq = *rs.lastSeq
 					return nil
 				case loopReconnect:
 					// Fall through to reconnect.
@@ -188,13 +193,31 @@ func newChatCmd() *cobra.Command {
 				}
 				client = relaypb.NewRelayGatewayClient(conn)
 
-				stream, err = openStream(ctx, client, p.Workspace, rs.lastSeq)
+				stream, err = client.ChannelReceive(ctx, &commonpb.ChannelReceiveRequest{Workspace: p.Workspace})
 				if err != nil {
 					return fmt.Errorf("channel receive on reconnect: %w", err)
 				}
 				// Read and discard the new ChannelAck.
 				if _, err := readAck(stream); err != nil {
 					return fmt.Errorf("reading channel ack on reconnect: %w", err)
+				}
+
+				// Frames sent during the drop are gone. The reply now comes
+				// from history once the turn is over, never from streamed text.
+				rs.reconnected = true
+				ts, err := getTurnState(ctx, client, conversationID, p.Workspace)
+				if err != nil {
+					return err
+				}
+				switch ts.GetState() {
+				case commonpb.TurnState_TURN_STATE_WORKING:
+					// Keep listening until the turn ends.
+				case commonpb.TurnState_TURN_STATE_FAILED:
+					return fmt.Errorf("turn failed: %s", ts.GetReason())
+				case commonpb.TurnState_TURN_STATE_CANCELLED:
+					return errTurnCancelled
+				default:
+					return rs.printReplyFromHistory(ctx, client)
 				}
 			}
 		},
@@ -206,55 +229,76 @@ func newChatCmd() *cobra.Command {
 	return cmd
 }
 
-// --- Cursor persistence ---
+var errTurnCancelled = errors.New("turn cancelled")
 
-// cursorPath returns the file path for a workspace's cursor.
-func cursorPath(cfgDir, workspace string) string {
-	return filepath.Join(cfgDir, "cursors", workspace+".seq")
+// isTerminal reports whether w is the process's stdout attached to a
+// terminal. Only then is output styled.
+func isTerminal(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	return ok && f == os.Stdout && isatty.IsTerminal(f.Fd())
 }
 
-// loadCursor reads the last-seen workspace_seq from disk. Returns a pointer to
-// 0 if no cursor file exists (request full replay).
-func loadCursor(cfgDir, workspace string) *uint64 {
-	data, err := os.ReadFile(cursorPath(cfgDir, workspace))
+// --- Conversation reads ---
+
+// loadHistory reads a conversation's whole history. An ID the server does
+// not know for this user is reported by ID alone.
+func loadHistory(ctx context.Context, client relaypb.RelayGatewayClient, conversationID, workspace string) ([]*commonpb.HistoryEntry, error) {
+	resp, err := client.GetConversationHistory(ctx, &commonpb.GetConversationHistoryRequest{
+		ConversationId: conversationID,
+		Workspace:      workspace,
+	})
 	if err != nil {
-		v := uint64(0)
-		return &v
+		if status.Code(err) == codes.NotFound {
+			return nil, fmt.Errorf("conversation %s not found", conversationID)
+		}
+		return nil, fmt.Errorf("loading conversation %s: %w", conversationID, err)
 	}
-	seq, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
-	if err != nil {
-		v := uint64(0)
-		return &v
-	}
-	return &seq
+	return resp.GetEntries(), nil
 }
 
-// saveCursor writes lastSeq to disk atomically.
-func saveCursor(cfgDir, workspace string, lastSeq *uint64) {
-	if lastSeq == nil || *lastSeq == 0 {
-		return
+// getTurnState asks the relay for a conversation's current turn state.
+func getTurnState(ctx context.Context, client relaypb.RelayGatewayClient, conversationID, workspace string) (*commonpb.TurnStateEvent, error) {
+	ts, err := client.GetTurnState(ctx, &commonpb.GetTurnStateRequest{
+		ConversationId: conversationID,
+		Workspace:      workspace,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("getting turn state for conversation %s: %w", conversationID, err)
 	}
-	p := cursorPath(cfgDir, workspace)
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		log.Printf("warning: failed to create cursor dir: %v", err)
-		return
+	return ts, nil
+}
+
+// entryText concatenates a history entry's text blocks.
+func entryText(msg *commonpb.Message) string {
+	var b strings.Builder
+	for _, block := range msg.GetContent() {
+		if tb := block.GetText(); tb != nil {
+			b.WriteString(tb.Text)
+		}
 	}
-	data := []byte(strconv.FormatUint(*lastSeq, 10) + "\n")
-	if err := os.WriteFile(p, data, 0o644); err != nil {
-		log.Printf("warning: failed to save cursor: %v", err)
+	return b.String()
+}
+
+// replyFromHistory is the text of the latest turn: every untagged assistant
+// entry after the last untagged user entry.
+func replyFromHistory(entries []*commonpb.HistoryEntry) string {
+	last := -1
+	for i, e := range entries {
+		if e.Tag == nil && e.GetMessage().GetRole() == "user" {
+			last = i
+		}
 	}
+	var b strings.Builder
+	for _, e := range entries[last+1:] {
+		if e.Tag != nil || e.GetMessage().GetRole() != "assistant" {
+			continue
+		}
+		b.WriteString(entryText(e.GetMessage()))
+	}
+	return b.String()
 }
 
 // --- Stream helpers ---
-
-// openStream starts a ChannelReceive stream with resume_after_seq set.
-func openStream(ctx context.Context, client relaypb.RelayGatewayClient, workspace string, lastSeq *uint64) (grpc.ServerStreamingClient[commonpb.ChannelOutbound], error) {
-	req := &commonpb.ChannelReceiveRequest{
-		Workspace:      workspace,
-		ResumeAfterSeq: lastSeq,
-	}
-	return client.ChannelReceive(ctx, req)
-}
 
 // readAck reads the first frame and expects a ChannelAck.
 func readAck(stream grpc.ServerStreamingClient[commonpb.ChannelOutbound]) (string, error) {
@@ -280,14 +324,17 @@ const (
 
 // recvState holds mutable state across the receive loop and reconnects.
 type recvState struct {
-	cfgDir         string
 	workspace      string
 	conversationID string
-	lastSeq        *uint64
+	out            io.Writer
+	errOut         io.Writer
 	isTTY          bool
 	toolStyle      lipgloss.Style
 	textBuf        strings.Builder
 	toolCalls      map[string]string // item_id -> tool name
+	// reconnected is set once a stream has dropped: streamed text is then
+	// discarded and the reply is read from history.
+	reconnected bool
 }
 
 // recvLoop reads frames until the turn completes, the stream breaks, or the
@@ -352,80 +399,50 @@ func (rs *recvState) handleFrame(
 	frame *commonpb.ChannelOutbound,
 ) (loopResult, error) {
 	switch c := frame.Command.(type) {
-	case *commonpb.ChannelOutbound_Heartbeat:
-		// Heartbeat: timer already reset above. Do NOT advance lastSeq.
-		return loopContinue, nil
-
-	case *commonpb.ChannelOutbound_CatchUpComplete:
-		log.Printf("catch-up complete")
-		return loopContinue, nil
-
-	case *commonpb.ChannelOutbound_ReplayImpossible:
-		log.Printf("replay impossible, fetching conversation history")
-		rs.fetchAndRenderHistory(ctx, client)
-		// Stay on current stream; don't reconnect or reset lastSeq.
-		return loopContinue, nil
-
 	case *commonpb.ChannelOutbound_TurnState:
-		// Dedup: skip if workspace_seq <= lastSeq.
-		if rs.dedup(frame) {
-			return loopContinue, nil
-		}
 		if c.TurnState.ConversationId != rs.conversationID {
 			return loopContinue, nil
 		}
 		switch c.TurnState.State {
 		case commonpb.TurnState_TURN_STATE_IDLE:
-			flushText(&rs.textBuf, rs.isTTY)
-			fmt.Fprintf(os.Stderr, "conversation: %s\n", rs.conversationID)
-			cfgDir := rs.cfgDir
-			config.AppendHistory(cfgDir, rs.conversationID, rs.workspace)
+			if rs.reconnected {
+				if err := rs.printReplyFromHistory(ctx, client); err != nil {
+					return loopFatal, err
+				}
+				return loopDone, nil
+			}
+			flushText(rs.out, &rs.textBuf, rs.isTTY)
+			fmt.Fprintf(rs.errOut, "conversation: %s\n", rs.conversationID)
 			return loopDone, nil
 		case commonpb.TurnState_TURN_STATE_FAILED:
 			return loopFatal, fmt.Errorf("turn failed: %s", c.TurnState.Reason)
+		case commonpb.TurnState_TURN_STATE_CANCELLED:
+			return loopFatal, errTurnCancelled
 		}
 
 	case *commonpb.ChannelOutbound_StreamItem:
-		if rs.dedup(frame) {
-			return loopContinue, nil
-		}
 		item := c.StreamItem
 		if item.ConversationId != rs.conversationID {
 			return loopContinue, nil
 		}
 		rs.renderStreamItem(item)
-
-	case *commonpb.ChannelOutbound_SendMessage:
-		if rs.dedup(frame) {
-			return loopContinue, nil
-		}
-
-	case *commonpb.ChannelOutbound_ServerRequest:
-		if rs.dedup(frame) {
-			return loopContinue, nil
-		}
-
-	case *commonpb.ChannelOutbound_Ack:
-		// Unexpected extra ack; ignore.
 	}
 
 	return loopContinue, nil
 }
 
-// dedup checks whether a frame's workspace_seq has already been processed.
-// If not, it advances lastSeq and flushes the cursor. Returns true if the
-// frame should be skipped.
-func (rs *recvState) dedup(frame *commonpb.ChannelOutbound) bool {
-	if frame.WorkspaceSeq == nil {
-		return false
+// printReplyFromHistory prints the finished turn's reply as read from the
+// conversation history, then the conversation line.
+func (rs *recvState) printReplyFromHistory(ctx context.Context, client relaypb.RelayGatewayClient) error {
+	entries, err := loadHistory(ctx, client, rs.conversationID, rs.workspace)
+	if err != nil {
+		return err
 	}
-	seq := frame.GetWorkspaceSeq()
-	if seq <= *rs.lastSeq {
-		return true
-	}
-	*rs.lastSeq = seq
-	saveCursor(rs.cfgDir, rs.workspace, rs.lastSeq)
-	return false
+	rs.textBuf.Reset()
+	rs.textBuf.WriteString(replyFromHistory(entries))
+	flushText(rs.out, &rs.textBuf, rs.isTTY)
+	fmt.Fprintf(rs.errOut, "conversation: %s\n", rs.conversationID)
+	return nil
 }
 
 // renderStreamItem displays a single stream item.
@@ -434,74 +451,27 @@ func (rs *recvState) renderStreamItem(item *commonpb.StreamItem) {
 	case *commonpb.StreamItem_Start:
 		if tu := phase.Start.GetToolUse(); tu != nil {
 			rs.toolCalls[item.ItemId] = tu.Name
-			line := fmt.Sprintf("⚙ %s (started)", tu.Name)
-			if rs.isTTY {
-				fmt.Fprintln(os.Stdout, rs.toolStyle.Render(line))
-			} else {
-				fmt.Fprintln(os.Stdout, line)
-			}
+			rs.printToolLine(fmt.Sprintf("⚙ %s (started)", tu.Name))
 		}
 	case *commonpb.StreamItem_Delta:
-		if delta := phase.Delta.GetTextDelta(); delta != "" {
+		if delta := phase.Delta.GetTextDelta(); delta != "" && !rs.reconnected {
 			rs.textBuf.WriteString(delta)
 		}
 	case *commonpb.StreamItem_Stop:
 		if name, ok := rs.toolCalls[item.ItemId]; ok {
-			line := fmt.Sprintf("⚙ %s (finished)", name)
-			if rs.isTTY {
-				fmt.Fprintln(os.Stdout, rs.toolStyle.Render(line))
-			} else {
-				fmt.Fprintln(os.Stdout, line)
-			}
+			rs.printToolLine(fmt.Sprintf("⚙ %s (finished)", name))
 		}
 	}
 }
 
-// fetchAndRenderHistory calls GetConversationHistory and renders the returned
-// entries as completed turns.
-func (rs *recvState) fetchAndRenderHistory(ctx context.Context, client relaypb.RelayGatewayClient) {
-	resp, err := client.GetConversationHistory(ctx, &commonpb.GetConversationHistoryRequest{
-		ConversationId: rs.conversationID,
-		Workspace:      rs.workspace,
-	})
-	if err != nil {
-		log.Printf("warning: GetConversationHistory failed: %v", err)
-		return
+func (rs *recvState) printToolLine(line string) {
+	if rs.isTTY {
+		line = rs.toolStyle.Render(line)
 	}
-	for _, entry := range resp.GetEntries() {
-		msg := entry.GetMessage()
-		if msg == nil {
-			continue
-		}
-		var text strings.Builder
-		for _, block := range msg.Content {
-			if tb := block.GetText(); tb != nil {
-				text.WriteString(tb.Text)
-			}
-		}
-		if text.Len() == 0 {
-			continue
-		}
-		prefix := msg.Role
-		if prefix == "" {
-			prefix = "unknown"
-		}
-		fmt.Fprintf(os.Stderr, "[%s] ", prefix)
-		if rs.isTTY {
-			rendered, err := glamour.Render(text.String(), "dark")
-			if err == nil {
-				fmt.Fprint(os.Stdout, rendered)
-			} else {
-				fmt.Fprint(os.Stdout, text.String())
-			}
-		} else {
-			fmt.Fprint(os.Stdout, text.String())
-		}
-		fmt.Fprintln(os.Stdout)
-	}
+	fmt.Fprintln(rs.out, line)
 }
 
-func flushText(buf *strings.Builder, isTTY bool) {
+func flushText(w io.Writer, buf *strings.Builder, isTTY bool) {
 	text := buf.String()
 	if text == "" {
 		return
@@ -509,12 +479,12 @@ func flushText(buf *strings.Builder, isTTY bool) {
 	if isTTY {
 		rendered, err := glamour.Render(text, "dark")
 		if err == nil {
-			fmt.Fprint(os.Stdout, rendered)
+			fmt.Fprint(w, rendered)
 		} else {
-			fmt.Fprint(os.Stdout, text)
+			fmt.Fprint(w, text)
 		}
 	} else {
-		fmt.Fprint(os.Stdout, text)
+		fmt.Fprint(w, text)
 	}
 	buf.Reset()
 }

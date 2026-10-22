@@ -8,7 +8,6 @@ use proto_common::{ContentBlock, StopReason, ToolCall};
 use toolset_proto::{turn_event, TurnComplete, TurnEvent};
 
 use crate::clients::{RelayRpc, TurnSource};
-use crate::event_log::EventLog;
 
 /// Sink for streamed activity frames produced during a turn. The orchestrator
 /// path backs it with a gateway RPC; the sub-agent path backs it with a no-op.
@@ -27,43 +26,25 @@ impl StreamSink for NullSink {
 }
 
 /// Streamed-activity sink backed by the gateway's `DeliverStreamItem` RPC.
-/// Persists each frame to the event log before delivery so a resuming client
-/// can replay it. A delivery failure is best-effort (logged, then dropped) —
-/// a dropped delta must never fail the turn.
+/// Delivery is best-effort (a failure is logged, then dropped) — a dropped
+/// delta must never fail the turn.
 pub(crate) struct GatewaySink<'a> {
     pub(crate) rpc: &'a mut dyn RelayRpc,
     pub(crate) channel_id: String,
-    pub(crate) event_log: std::sync::Arc<EventLog>,
 }
 
 #[async_trait::async_trait]
 impl StreamSink for GatewaySink<'_> {
     async fn emit(&mut self, item: StreamItem) {
-        let seq = item.workspace_seq;
-        let outbound = proto_common::ChannelOutbound {
-            command: Some(proto_common::channel_outbound::Command::StreamItem(
-                item.clone(),
-            )),
-            workspace_seq: Some(seq),
-        };
-        if let Err(e) = self.event_log.append(seq, &outbound).await {
-            tracing::warn!(error = %e, "failed to persist streamed item; dropping frame");
-            return;
-        }
-        if let Err(e) = self
-            .rpc
-            .deliver_stream_item(&self.channel_id, item, seq)
-            .await
-        {
+        if let Err(e) = self.rpc.deliver_stream_item(&self.channel_id, item).await {
             tracing::warn!(error = %e, "failed to deliver streamed item");
         }
     }
 }
 
-/// Per-turn emit bookkeeping: the monotonic `workspace_seq` and which item
-/// runs are currently open. Threaded across every `consume_turn_stream` call
-/// within one `llm_loop` so the sequence stays monotonic and item ids stay
-/// stable across continuation turns.
+/// Per-turn emit bookkeeping: which item runs are currently open. Threaded
+/// across every `consume_turn_stream` call within one `llm_loop` so item ids
+/// stay stable across continuation turns.
 pub(crate) struct EmitState {
     pub conversation_id: String,
     /// Parent conversation id when this turn is a dispatched sub-agent;
@@ -73,9 +54,6 @@ pub(crate) struct EmitState {
     /// Operator-authored sub-agent name; stamped on every frame so the client
     /// labels the tile with it. Empty on top-level turns.
     agent_name: String,
-    /// Workspace-scoped event log backing the monotonic sequence counter.
-    /// Shared across the workspace so sub-agent turns use the same counter.
-    event_log: std::sync::Arc<EventLog>,
     /// Item id of the currently-open text run, if any.
     text_item: Option<String>,
     /// Item id of the currently-open tool-use run (the upstream tool id).
@@ -85,12 +63,11 @@ pub(crate) struct EmitState {
 }
 
 impl EmitState {
-    pub(crate) fn new(conversation_id: String, event_log: std::sync::Arc<EventLog>) -> Self {
+    pub(crate) fn new(conversation_id: String) -> Self {
         Self {
             conversation_id,
             parent_conversation_id: String::new(),
             agent_name: String::new(),
-            event_log,
             text_item: None,
             tool_item: None,
             text_runs: 0,
@@ -106,18 +83,15 @@ impl EmitState {
         conversation_id: String,
         parent_conversation_id: String,
         agent_name: String,
-        event_log: std::sync::Arc<EventLog>,
     ) -> Self {
-        let mut s = Self::new(conversation_id, event_log);
+        let mut s = Self::new(conversation_id);
         s.parent_conversation_id = parent_conversation_id;
         s.agent_name = agent_name;
         s
     }
 
     fn next_frame(&mut self, item_id: String, phase: stream_item::Phase) -> StreamItem {
-        let seq = self.event_log.next_seq();
         StreamItem {
-            workspace_seq: seq,
             event_id: uuid::Uuid::new_v4().to_string(),
             item_id,
             conversation_id: self.conversation_id.clone(),
@@ -129,7 +103,7 @@ impl EmitState {
 }
 
 /// Map one toolset turn-event to the streamed-item frames it produces. Pure
-/// aside from the `state` bookkeeping it advances (seq, open-run ids).
+/// aside from the `state` bookkeeping it advances (open-run ids).
 /// Terminal `Complete`/`Error` and other events produce no frames — the
 /// terminal reply is delivered separately.
 pub(crate) fn stream_items_for(event: &TurnEvent, state: &mut EmitState) -> Vec<StreamItem> {
@@ -314,13 +288,7 @@ fn process_turn_event(event: TurnEvent) -> Result<Option<TurnResult>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use toolset_proto::{ContentDelta, ToolUseInput, ToolUseStart, TurnError, TurnEvent};
-
-    fn test_event_log() -> Arc<EventLog> {
-        let dir = tempfile::tempdir().unwrap().keep();
-        Arc::new(EventLog::new(&dir))
-    }
 
     fn content_delta(text: &str) -> TurnEvent {
         TurnEvent {
@@ -385,21 +353,20 @@ mod tests {
 
     #[test]
     fn content_delta_opens_text_item_then_delta() {
-        let mut state = EmitState::new("conv".into(), test_event_log());
+        let mut state = EmitState::new("conv".into());
         let frames = stream_items_for(&content_delta("hello"), &mut state);
         assert_eq!(frames.len(), 2, "first delta emits Start then Delta");
         assert!(is_text_start(&frames[0]));
         assert_eq!(text_delta_of(&frames[1]), Some("hello"));
         // The start and delta share one item id.
         assert_eq!(frames[0].item_id, frames[1].item_id);
-        // Envelope: conversation carried through, seq strictly increasing.
+        // Envelope: conversation carried through.
         assert_eq!(frames[0].conversation_id, "conv");
-        assert!(frames[1].workspace_seq > frames[0].workspace_seq);
     }
 
     #[test]
     fn subsequent_text_deltas_reuse_open_item_without_restart() {
-        let mut state = EmitState::new("c".into(), test_event_log());
+        let mut state = EmitState::new("c".into());
         let first = stream_items_for(&content_delta("a"), &mut state);
         let second = stream_items_for(&content_delta("b"), &mut state);
         // Second delta emits only a Delta (no new Start) on the same item.
@@ -410,7 +377,7 @@ mod tests {
 
     #[test]
     fn tool_start_carries_name_and_upstream_id() {
-        let mut state = EmitState::new("c".into(), test_event_log());
+        let mut state = EmitState::new("c".into());
         let frames = stream_items_for(&tool_start("tc-1", "Bash"), &mut state);
         assert_eq!(frames.len(), 1);
         assert_eq!(tool_name_of(&frames[0]), Some("Bash"));
@@ -419,7 +386,7 @@ mod tests {
 
     #[test]
     fn tool_input_delta_shares_tool_item_id() {
-        let mut state = EmitState::new("c".into(), test_event_log());
+        let mut state = EmitState::new("c".into());
         let start = stream_items_for(&tool_start("tc-1", "Bash"), &mut state);
         let delta = stream_items_for(&tool_input(r#"{"cmd""#), &mut state);
         assert_eq!(delta.len(), 1);
@@ -429,7 +396,7 @@ mod tests {
 
     #[test]
     fn tool_start_closes_open_text_run() {
-        let mut state = EmitState::new("c".into(), test_event_log());
+        let mut state = EmitState::new("c".into());
         stream_items_for(&content_delta("thinking"), &mut state);
         let frames = stream_items_for(&tool_start("tc-1", "Bash"), &mut state);
         // First frame stops the text item, second opens the tool item.
@@ -439,28 +406,10 @@ mod tests {
     }
 
     #[test]
-    fn workspace_seq_strictly_increases_across_events() {
-        let mut state = EmitState::new("c".into(), test_event_log());
-        let mut seqs = Vec::new();
-        for ev in [
-            content_delta("a"),
-            content_delta("b"),
-            tool_start("t", "T"),
-            tool_input("{}"),
-        ] {
-            for f in stream_items_for(&ev, &mut state) {
-                seqs.push(f.workspace_seq);
-            }
-        }
-        assert!(seqs.windows(2).all(|w| w[1] > w[0]), "seqs: {seqs:?}");
-        assert_eq!(seqs[0], 1, "workspace_seq is 1-indexed");
-    }
-
-    #[test]
     fn separate_text_runs_number_item_ids_sequentially() {
         // Two distinct text runs (text → tool → text) must open items
         // text-1 then text-2, so their ids do not collide.
-        let mut state = EmitState::new("c".into(), test_event_log());
+        let mut state = EmitState::new("c".into());
         let first = stream_items_for(&content_delta("a"), &mut state);
         // Tool start ends the open text run so the next delta opens a NEW run.
         stream_items_for(&tool_start("t", "Bash"), &mut state);
@@ -481,7 +430,7 @@ mod tests {
         let scrub = shared::scrub::ScrubSet::from_secrets(&[("tok", "s3cr3t")]);
         assert!(!scrub.is_empty());
 
-        let mut state = EmitState::new("c".into(), test_event_log());
+        let mut state = EmitState::new("c".into());
         stream_items_for(&tool_start("t", "Bash"), &mut state);
         let mut delta = stream_items_for(&tool_input(r#"{"token":"s3cr3t"}"#), &mut state)
             .pop()
@@ -489,7 +438,7 @@ mod tests {
         scrub_frame(&scrub, &mut delta);
         assert_eq!(tool_input_of(&delta), Some(r#"{"token":"[REDACTED:tok]"}"#));
 
-        let mut state = EmitState::new("c".into(), test_event_log());
+        let mut state = EmitState::new("c".into());
         let mut start = stream_items_for(&tool_start("t", "s3cr3t"), &mut state)
             .pop()
             .unwrap();
@@ -536,7 +485,7 @@ mod tests {
             },
         ]));
         let mut sink = Capturing(vec![]);
-        let mut emit = EmitState::new("c".into(), test_event_log());
+        let mut emit = EmitState::new("c".into());
         let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_TURN_SCRUB__");
         let token = tokio_util::sync::CancellationToken::new();
         let result = consume_turn_stream_cancellable(
@@ -588,7 +537,7 @@ mod tests {
         }
         let mut src = Stalling;
         let mut sink = NullSink;
-        let mut emit = EmitState::new("c".into(), test_event_log());
+        let mut emit = EmitState::new("c".into());
         let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_TURN_SCRUB__");
         let token = tokio_util::sync::CancellationToken::new();
         let res = consume_turn_stream_cancellable(
@@ -620,7 +569,7 @@ mod tests {
         }
         let mut src = Closed;
         let mut sink = NullSink;
-        let mut emit = EmitState::new("c".into(), test_event_log());
+        let mut emit = EmitState::new("c".into());
         let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_TURN_SCRUB__");
         let token = tokio_util::sync::CancellationToken::new();
         let res = consume_turn_stream_cancellable(
@@ -670,7 +619,7 @@ mod tests {
             polled: polled.clone(),
         };
         let mut sink = NullSink;
-        let mut emit = EmitState::new("c".into(), test_event_log());
+        let mut emit = EmitState::new("c".into());
         let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_TURN_SCRUB__");
 
         let outcome = consume_turn_stream_cancellable(

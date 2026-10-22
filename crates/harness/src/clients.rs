@@ -54,7 +54,6 @@ pub(crate) trait RelayRpc: Send {
         workspace: &str,
         method: &str,
         params_json: &str,
-        workspace_seq: u64,
     ) -> Result<bool, String>;
     /// Push a `ServerRequest` and block on the matching `ClientResponse`.
     /// `timeout_seconds = 0` lets the gateway pick a default.
@@ -65,7 +64,6 @@ pub(crate) trait RelayRpc: Send {
         method: &str,
         params_json: &str,
         timeout_seconds: u32,
-        workspace_seq: u64,
     ) -> Result<ServerRequestOutcome, String>;
     /// Push one streamed activity frame produced during a turn. The gateway
     /// relays the `StreamItem` to the client unchanged. Returns the gateway's
@@ -74,21 +72,18 @@ pub(crate) trait RelayRpc: Send {
         &mut self,
         channel_id: &str,
         item: StreamItem,
-        workspace_seq: u64,
     ) -> Result<bool, String>;
     /// Push the assistant reply (ChannelSend) to all workspace channels.
     async fn deliver_reply(
         &mut self,
         conversation_id: &str,
         content: Vec<ContentBlock>,
-        workspace_seq: u64,
     ) -> Result<bool, String>;
     /// Push a turn-state event. The relay records the state keyed by
     /// the subject carried in the request.
     async fn deliver_turn_state(
         &mut self,
         turn_state: TurnStateEvent,
-        workspace_seq: u64,
         subject: &str,
     ) -> Result<bool, String>;
 }
@@ -128,7 +123,6 @@ impl RelayRpc for RelayClient {
         workspace: &str,
         method: &str,
         params_json: &str,
-        workspace_seq: u64,
     ) -> Result<bool, String> {
         let resp = self
             .inner
@@ -136,7 +130,6 @@ impl RelayRpc for RelayClient {
                 method: method.to_string(),
                 params_json: params_json.to_string(),
                 workspace: workspace.to_string(),
-                workspace_seq,
             })
             .await
             .map_err(|e| format!("send_server_notification RPC failed: {e}"))?
@@ -151,7 +144,6 @@ impl RelayRpc for RelayClient {
         method: &str,
         params_json: &str,
         timeout_seconds: u32,
-        workspace_seq: u64,
     ) -> Result<ServerRequestOutcome, String> {
         let resp = self
             .inner
@@ -161,7 +153,6 @@ impl RelayRpc for RelayClient {
                 params_json: params_json.to_string(),
                 timeout_seconds,
                 workspace: workspace.to_string(),
-                workspace_seq,
             })
             .await
             .map_err(|e| format!("send_server_request_and_await RPC failed: {e}"))?
@@ -186,14 +177,12 @@ impl RelayRpc for RelayClient {
         &mut self,
         channel_id: &str,
         item: StreamItem,
-        workspace_seq: u64,
     ) -> Result<bool, String> {
         let resp = self
             .inner
             .deliver_stream_item(DeliverStreamItemRequest {
                 channel_id: channel_id.to_string(),
                 item: Some(item),
-                workspace_seq,
             })
             .await
             .map_err(|e| format!("deliver_stream_item RPC failed: {e}"))?
@@ -205,14 +194,12 @@ impl RelayRpc for RelayClient {
         &mut self,
         conversation_id: &str,
         content: Vec<ContentBlock>,
-        workspace_seq: u64,
     ) -> Result<bool, String> {
         let resp = self
             .inner
             .deliver_reply(DeliverReplyRequest {
                 conversation_id: conversation_id.to_string(),
                 content,
-                workspace_seq,
             })
             .await
             .map_err(|e| format!("deliver_reply RPC failed: {e}"))?
@@ -223,7 +210,6 @@ impl RelayRpc for RelayClient {
     async fn deliver_turn_state(
         &mut self,
         turn_state: TurnStateEvent,
-        workspace_seq: u64,
         subject: &str,
     ) -> Result<bool, String> {
         let resp = self
@@ -231,7 +217,6 @@ impl RelayRpc for RelayClient {
             .deliver_turn_state(DeliverTurnStateRequest {
                 channel_id: String::new(),
                 turn_state: Some(turn_state),
-                workspace_seq,
                 subject: subject.to_string(),
             })
             .await

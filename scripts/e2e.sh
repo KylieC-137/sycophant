@@ -701,65 +701,150 @@ step_5b_syco_cli_chat() {
     || { warn "syco chat did not print a conversation ID to stderr"; return 1; }
   ok "syco chat completed with test-cmd tool call (${E2E_CHAT_CONV})"
 
-  # ── resumable streaming ──
-  local cursor="$SYCO_TMP/cursors/hello-world.seq"
-
-  # Helper: run syco chat, assert catch-up complete, assert cursor advances.
-  # Usage: assert_resume_chat <label> <message> <seq_before>
-  # Prints the new seq to stdout.
-  assert_resume_chat() {
-    local label="$1" msg="$2" seq_before="$3"
-    local err
-    err="$(mktemp)"
-    SYCO_CONFIG_DIR="$SYCO_TMP" \
-      "$REPO_ROOT/target/syco" chat "$msg" >/dev/null 2>"$err" \
-      || { warn "${label}: chat exited non-zero: $(cat "$err")"; rm -f "$err"; return 1; }
-    grep -q "catch-up complete" "$err" \
-      || { warn "${label}: no 'catch-up complete': $(cat "$err")"; rm -f "$err"; return 1; }
-    rm -f "$err"
-    local seq_now
-    seq_now="$(cat "$cursor")"
-    [ "$seq_now" -gt "$seq_before" ] \
-      || { warn "${label}: cursor did not advance (${seq_now} <= ${seq_before})"; return 1; }
-    ok "${label} (cursor ${seq_before} → ${seq_now})" >&2
-    printf '%s' "$seq_now"
+  # ── conversation-ID resume ──
+  # Every leg runs from its own config dir under SYCO_TMP holding copies of
+  # this profile's config and credentials, so the RETURN trap cleans them all.
+  local short_prompt="Reply with one short sentence. Do not use any tools."
+  # leg_config_dir <name>: prints the path of a fresh leg config dir.
+  leg_config_dir() {
+    local d="$SYCO_TMP/$1"
+    mkdir -p "$d"
+    cp "$SYCO_TMP/config.toml" "$SYCO_TMP/credentials.toml" "$d/"
+    printf '%s' "$d"
   }
 
-  # Test 1: first chat created cursor
-  [ -f "$cursor" ] \
-    || { warn "cursor file not created after first chat"; return 1; }
-  local seq1
-  seq1="$(cat "$cursor")"
-  [ "$seq1" -gt 0 ] \
-    || { warn "cursor is 0 after first chat"; return 1; }
-  ok "cursor persisted after first chat (seq=${seq1})"
+  # leftover_config_dir <name> <conversation-id>: a leg config dir left over
+  # from an earlier cluster: a saved message number of 727 and a newest
+  # history line for hello-world naming <conversation-id>.
+  leftover_config_dir() {
+    local d
+    d="$(leg_config_dir "$1")"
+    mkdir -p "$d/cursors"
+    printf '727\n' > "$d/cursors/hello-world.seq"
+    printf '%s\thello-world\t%s\n' "$2" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$d/history"
+    printf '%s' "$d"
+  }
 
-  # Test 2: second chat resumes from cursor
-  local seq2
-  seq2="$(assert_resume_chat "resume" "Say exactly: resumed" "$seq1")" \
-    || return 1
+  # bounded_chat <config-dir> <bound-seconds> <stdout-file> <stderr-file> <chat args...>
+  # Runs a one-shot in the background and SIGKILLs it once the bound passes.
+  # Returns the one-shot's exit status, or 124 when it was killed at the bound.
+  bounded_chat() {
+    local dir="$1" bound="$2" out="$3" err="$4"; shift 4
+    SYCO_CONFIG_DIR="$dir" "$REPO_ROOT/target/syco" chat "$@" >"$out" 2>"$err" &
+    local pid=$! rc=0
+    if ! wait_for "one-shot to exit" "$bound" "! kill -0 $pid 2>/dev/null"; then
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    wait "$pid" || rc=$?
+    return "$rc"
+  }
 
-  # Test 3: kill mid-stream, cursor survives
-  local seq_before="$seq2"
-  local kill_err
-  kill_err="$(mktemp)"
-  SYCO_CONFIG_DIR="$SYCO_TMP" \
-    "$REPO_ROOT/target/syco" chat "Write a very long and detailed essay." \
-    2>"$kill_err" &
-  local kill_pid=$!
-  sleep 5
-  kill "$kill_pid" 2>/dev/null || true
-  wait "$kill_pid" 2>/dev/null || true
-  rm -f "$kill_err"
-  local seq_after
-  seq_after="$(cat "$cursor" 2>/dev/null || echo "0")"
-  [ "$seq_after" -gt "$seq_before" ] \
-    || { warn "cursor not advanced after kill (${seq_after} <= ${seq_before})"; return 1; }
-  ok "mid-stream kill preserved cursor (${seq_before} → ${seq_after})"
+  local leg_rc
 
-  # Test 4: reconnect after kill catches up
-  assert_resume_chat "post-kill reconnect" "Say exactly: recovered" "$seq_after" >/dev/null \
-    || return 1
+  # Leftover config, no --continue/--resume: a new conversation still answers.
+  local lo_new_dir
+  lo_new_dir="$(leftover_config_dir leftover-new "$(python3 -c 'import uuid; print(uuid.uuid4())')")"
+  leg_rc=0
+  bounded_chat "$lo_new_dir" 300 "$lo_new_dir/out" "$lo_new_dir/err" \
+    "$short_prompt" || leg_rc=$?
+  if [ "$leg_rc" -ne 0 ]; then
+    warn "one-shot from a leftover config did not exit 0 within 300s (rc=${leg_rc}): $(cat "$lo_new_dir/err")"
+    return 1
+  fi
+  if [ ! -s "$lo_new_dir/out" ]; then
+    warn "one-shot from a leftover config exited 0 with empty stdout: $(cat "$lo_new_dir/err")"
+    return 1
+  fi
+  ok "One-shot from a leftover config exited 0 with non-empty stdout within 300s"
+
+  # Leftover config with --continue: refused, naming the unknown ID.
+  local lo_cont_dir lo_unknown_id
+  lo_unknown_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+  lo_cont_dir="$(leftover_config_dir leftover-continue "$lo_unknown_id")"
+  leg_rc=0
+  bounded_chat "$lo_cont_dir" 300 "$lo_cont_dir/out" "$lo_cont_dir/err" \
+    --continue "$short_prompt" || leg_rc=$?
+  if [ "$leg_rc" -eq 0 ] || [ "$leg_rc" -eq 124 ]; then
+    warn "one-shot --continue to an unknown ID did not exit non-zero within 300s (rc=${leg_rc}): $(cat "$lo_cont_dir/err")"
+    return 1
+  fi
+  if ! grep -qF "$lo_unknown_id" "$lo_cont_dir/err"; then
+    warn "one-shot --continue to an unknown ID exited non-zero without naming ${lo_unknown_id} on stderr: $(cat "$lo_cont_dir/err")"
+    return 1
+  fi
+  ok "One-shot --continue from a leftover config exited non-zero with the unknown conversation ID on stderr"
+
+  # Scenario K: kill a running one-shot as soon as its conversation ID is saved.
+  local k_dir k_pid k_id k_msg
+  k_msg="Write a 400-word essay on the history of lighthouses. Do not use any tools."
+  k_dir="$(leg_config_dir scenario-k)"
+  k_saved() {
+    [ -f "$k_dir/history" ] && awk -F'\t' '$2 == "hello-world" { found = 1 } END { exit !found }' "$k_dir/history"
+  }
+  k_saved_or_exited() { k_saved || ! kill -0 "$k_pid" 2>/dev/null; }
+  SYCO_CONFIG_DIR="$k_dir" "$REPO_ROOT/target/syco" chat "$k_msg" \
+    >"$k_dir/out" 2>"$k_dir/err" &
+  k_pid=$!
+  if ! wait_for "a hello-world history line from the running one-shot" 300 k_saved_or_exited; then
+    kill -9 "$k_pid" 2>/dev/null || true
+    wait "$k_pid" 2>/dev/null || true
+    return 1
+  fi
+  kill -9 "$k_pid" 2>/dev/null || true
+  wait "$k_pid" 2>/dev/null || true
+  if ! k_saved; then
+    warn "one-shot exited without saving a hello-world history line: $(cat "$k_dir/err")"
+    return 1
+  fi
+  if grep -q '^conversation: ' "$k_dir/err"; then
+    warn "one-shot finished its turn before its conversation ID was saved; scenario K needs the turn still running"
+    return 1
+  fi
+  k_id="$(awk -F'\t' '$2 == "hello-world" { print $1; exit }' "$k_dir/history")"
+  ok "One-shot saved its conversation ID (${k_id}) while its turn was still running, then was killed"
+
+  # k_history: GetConversationHistory for K's ID, as grpcurl JSON.
+  k_history() {
+    jq -nc --arg c "$k_id" '{conversationId: $c, workspace: "hello-world"}' \
+      | relay_call "$raw_token" GetConversationHistory 2>/dev/null
+  }
+  # k_entries: the history as [{r: role, t: concatenated text}].
+  local k_entries='[.entries[] | {r: .message.role, t: ([.message.content[]?.text.text // empty] | join(""))}]'
+  k_user_present() {
+    k_history | jq -e --arg m "$k_msg" "${k_entries} | any(.r == \"user\" and .t == \$m)" >/dev/null
+  }
+  k_reply_present() {
+    k_history | jq -e --arg m "$k_msg" "${k_entries} as \$e
+      | ([range(0; \$e | length) | select(\$e[.].r == \"user\" and \$e[.].t == \$m)] | first) as \$u
+      | if \$u == null then false
+        else any(\$e[\$u + 1:][]; .r == \"assistant\" and (.t | length) > 0) end" >/dev/null
+  }
+  if ! wait_for "the killed one-shot's user entry in server history" 30 k_user_present; then
+    warn "GetConversationHistory for ${k_id} holds no user entry with the killed one-shot's message: $(k_history)"
+    return 1
+  fi
+  ok "Server history for the killed one-shot's conversation holds its user message"
+  if ! wait_for "an assistant reply after the killed one-shot's message" 300 k_reply_present; then
+    warn "GetConversationHistory for ${k_id}: $(k_history)"
+    return 1
+  fi
+  ok "Server history for the killed one-shot's conversation gained a non-empty assistant entry after its message"
+
+  # --continue from K's config dir resumes the killed conversation.
+  leg_rc=0
+  bounded_chat "$k_dir" 300 "$k_dir/continue.out" "$k_dir/continue.err" \
+    --continue "$short_prompt" || leg_rc=$?
+  if [ "$leg_rc" -ne 0 ]; then
+    warn "one-shot --continue after the killed one-shot did not exit 0 (rc=${leg_rc}): $(cat "$k_dir/continue.err")"
+    return 1
+  fi
+  if [ ! -s "$k_dir/continue.out" ]; then
+    warn "one-shot --continue after the killed one-shot exited 0 with empty stdout: $(cat "$k_dir/continue.err")"
+    return 1
+  fi
+  ok "One-shot --continue into the killed one-shot's conversation exited 0 with non-empty stdout"
 }
 
 # Re-register the operator's Mac against THIS run's headscale. Every Step 0
@@ -997,6 +1082,18 @@ step_6_security() {
   local dirs chat_dir
   dirs="$(discover_conversation_dirs "$tb_pod" "$scrub_c" "$conv_root")"
   read -r chat_dir <<< "$dirs"
+
+  local event_logs
+  if ! event_logs="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
+      find "$conv_root" -name event_log.jsonl)"; then
+    warn "could not scan the conversation volume for event_log.jsonl"
+    return 1
+  fi
+  if [ -n "$event_logs" ]; then
+    warn "the conversation volume holds event_log.jsonl files: ${event_logs}"
+    return 1
+  fi
+  ok "The conversation volume holds no event_log.jsonl file"
 
   assert_scrubbing "$tb_pod" "$scrub_c" "$conv_root" "$chat_dir"
   assert_egress_containment "$task_pod"

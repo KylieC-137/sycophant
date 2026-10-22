@@ -6,7 +6,6 @@ pub(crate) use proto_common::text_block;
 
 use crate::clients::ToolsetRpc;
 use crate::conversation::{AssistantAttribution, ConversationLog, HistoryScope};
-use crate::event_log::EventLog;
 use crate::runtime_tools::DispatchAbort;
 use crate::tool_router::ToolDispatcher;
 use crate::turn;
@@ -28,9 +27,6 @@ pub(crate) struct LoopMode {
     /// Threaded into every toolset tool dispatch this turn; empty for turns
     /// with no selection (sub-agent turns included).
     pub grants: std::collections::HashMap<String, String>,
-    /// Workspace-scoped event log for the monotonic sequence counter and
-    /// event persistence. Shared across sub-agent turns.
-    pub event_log: std::sync::Arc<EventLog>,
 }
 
 /// Why the loop stopped without natural completion.
@@ -157,12 +153,10 @@ pub(crate) async fn llm_loop(
     let idle_gap = mode.idle_gap;
     let cancel = mode.cancel;
     let grants = mode.grants;
-    let event_log = mode.event_log;
     // Streamed-item bookkeeping spans every continuation turn in this loop so
-    // `workspace_seq` stays monotonic and item ids stay stable. A delegate
-    // sub-turn stamps every frame with the parent link and the sub-agent name
-    // from its scope so the client nests it under its parent; a primary turn
-    // keeps empty framing.
+    // item ids stay stable. A delegate sub-turn stamps every frame with the
+    // parent link and the sub-agent name from its scope so the client nests
+    // it under its parent; a primary turn keeps empty framing.
     let mut emit = match scope {
         HistoryScope::Delegate {
             parent_conversation_id,
@@ -172,11 +166,8 @@ pub(crate) async fn llm_loop(
             initial_request.conversation_id.clone(),
             parent_conversation_id.to_string(),
             agent_name.to_string(),
-            event_log,
         ),
-        HistoryScope::Orchestrator => {
-            turn::EmitState::new(initial_request.conversation_id.clone(), event_log)
-        }
+        HistoryScope::Orchestrator => turn::EmitState::new(initial_request.conversation_id.clone()),
     };
     let ctx = ContinuationCtx {
         system: initial_request.system.clone(),
@@ -192,10 +183,13 @@ pub(crate) async fn llm_loop(
     // request) AND to the persistent log (for restart continuity).
     let mut messages = initial_request.messages.clone();
 
-    let mut stream = toolset
-        .turn(initial_request)
-        .await
-        .map_err(LoopError::ToolsetRpc)?;
+    let mut stream = {
+        tracing::info!(conversation_id = %initial_request.conversation_id, "calling model");
+        toolset
+            .turn(initial_request)
+            .await
+            .map_err(LoopError::ToolsetRpc)?
+    };
     let mut iterations = 0u32;
 
     loop {
@@ -223,6 +217,8 @@ pub(crate) async fn llm_loop(
             }
         };
 
+        tracing::info!(conversation_id = %ctx.conversation_id, stop_reason = ?result.stop_reason, "model responded");
+
         match result.stop_reason {
             StopReason::EndTurn => {
                 let assistant = assistant_message(&result);
@@ -244,6 +240,10 @@ pub(crate) async fn llm_loop(
                     let assistant = assistant_message(&result);
                     persist_assistant(log, &assistant, tag.clone(), &attribution).await;
                     return Ok(collect_text(&result.content));
+                }
+
+                for tc in &result.tool_calls {
+                    tracing::info!(conversation_id = %ctx.conversation_id, tool = %tc.name, "tool call detected");
                 }
 
                 iterations += 1;
@@ -535,14 +535,11 @@ mod tests {
     }
 
     fn mode(reply_channel: Option<&str>) -> LoopMode {
-        let dir = tempfile::tempdir().unwrap().keep();
-        let event_log = std::sync::Arc::new(crate::event_log::EventLog::new(&dir));
         LoopMode {
             reply_channel: reply_channel.map(str::to_string),
             idle_gap: std::time::Duration::from_secs(45),
             cancel: tokio_util::sync::CancellationToken::new(),
             grants: std::collections::HashMap::new(),
-            event_log,
         }
     }
 
@@ -1132,14 +1129,11 @@ mod tests {
     fn cancelled_mode() -> LoopMode {
         let cancel = tokio_util::sync::CancellationToken::new();
         cancel.cancel(); // fired before the loop consumes the model call
-        let dir = tempfile::tempdir().unwrap().keep();
-        let event_log = std::sync::Arc::new(crate::event_log::EventLog::new(&dir));
         LoopMode {
             reply_channel: None,
             idle_gap: std::time::Duration::from_secs(45),
             cancel,
             grants: std::collections::HashMap::new(),
-            event_log,
         }
     }
 

@@ -23,11 +23,9 @@ const (
 )
 
 type DeliverStreamItemRequest struct {
-	state     protoimpl.MessageState `protogen:"open.v1"`
-	ChannelId string                 `protobuf:"bytes,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
-	Item      *v1.StreamItem         `protobuf:"bytes,2,opt,name=item,proto3" json:"item,omitempty"`
-	// Workspace-scoped sequence number assigned by the harness.
-	WorkspaceSeq  uint64 `protobuf:"varint,3,opt,name=workspace_seq,json=workspaceSeq,proto3" json:"workspace_seq,omitempty"`
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ChannelId     string                 `protobuf:"bytes,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	Item          *v1.StreamItem         `protobuf:"bytes,2,opt,name=item,proto3" json:"item,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -74,13 +72,6 @@ func (x *DeliverStreamItemRequest) GetItem() *v1.StreamItem {
 		return x.Item
 	}
 	return nil
-}
-
-func (x *DeliverStreamItemRequest) GetWorkspaceSeq() uint64 {
-	if x != nil {
-		return x.WorkspaceSeq
-	}
-	return 0
 }
 
 type DeliverStreamItemResponse struct {
@@ -133,10 +124,8 @@ type DeliverReplyRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	ConversationId string                 `protobuf:"bytes,1,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
 	Content        []*v1.ContentBlock     `protobuf:"bytes,2,rep,name=content,proto3" json:"content,omitempty"`
-	// Workspace-scoped sequence number assigned by the harness.
-	WorkspaceSeq  uint64 `protobuf:"varint,3,opt,name=workspace_seq,json=workspaceSeq,proto3" json:"workspace_seq,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *DeliverReplyRequest) Reset() {
@@ -181,13 +170,6 @@ func (x *DeliverReplyRequest) GetContent() []*v1.ContentBlock {
 		return x.Content
 	}
 	return nil
-}
-
-func (x *DeliverReplyRequest) GetWorkspaceSeq() uint64 {
-	if x != nil {
-		return x.WorkspaceSeq
-	}
-	return 0
 }
 
 type DeliverReplyResponse struct {
@@ -240,8 +222,6 @@ type DeliverTurnStateRequest struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	ChannelId string                 `protobuf:"bytes,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
 	TurnState *v1.TurnStateEvent     `protobuf:"bytes,2,opt,name=turn_state,json=turnState,proto3" json:"turn_state,omitempty"`
-	// Workspace-scoped sequence number assigned by the harness.
-	WorkspaceSeq uint64 `protobuf:"varint,3,opt,name=workspace_seq,json=workspaceSeq,proto3" json:"workspace_seq,omitempty"`
 	// The subject that owns this turn state. The relay uses this to
 	// record the turn state keyed by subject, not channel.
 	Subject       string `protobuf:"bytes,4,opt,name=subject,proto3" json:"subject,omitempty"`
@@ -291,13 +271,6 @@ func (x *DeliverTurnStateRequest) GetTurnState() *v1.TurnStateEvent {
 		return x.TurnState
 	}
 	return nil
-}
-
-func (x *DeliverTurnStateRequest) GetWorkspaceSeq() uint64 {
-	if x != nil {
-		return x.WorkspaceSeq
-	}
-	return 0
 }
 
 func (x *DeliverTurnStateRequest) GetSubject() string {
@@ -609,27 +582,24 @@ var File_relay_v1_relay_proto protoreflect.FileDescriptor
 
 const file_relay_v1_relay_proto_rawDesc = "" +
 	"\n" +
-	"\x14relay/v1/relay.proto\x12\brelay.v1\x1a sycophant/common/v1/common.proto\"\x93\x01\n" +
+	"\x14relay/v1/relay.proto\x12\brelay.v1\x1a sycophant/common/v1/common.proto\"\x83\x01\n" +
 	"\x18DeliverStreamItemRequest\x12\x1d\n" +
 	"\n" +
 	"channel_id\x18\x01 \x01(\tR\tchannelId\x123\n" +
-	"\x04item\x18\x02 \x01(\v2\x1f.sycophant.common.v1.StreamItemR\x04item\x12#\n" +
-	"\rworkspace_seq\x18\x03 \x01(\x04R\fworkspaceSeq\"9\n" +
+	"\x04item\x18\x02 \x01(\v2\x1f.sycophant.common.v1.StreamItemR\x04itemJ\x04\b\x03\x10\x04R\rworkspace_seq\"9\n" +
 	"\x19DeliverStreamItemResponse\x12\x1c\n" +
-	"\tdelivered\x18\x01 \x01(\bR\tdelivered\"\xa0\x01\n" +
+	"\tdelivered\x18\x01 \x01(\bR\tdelivered\"\x90\x01\n" +
 	"\x13DeliverReplyRequest\x12'\n" +
 	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12;\n" +
-	"\acontent\x18\x02 \x03(\v2!.sycophant.common.v1.ContentBlockR\acontent\x12#\n" +
-	"\rworkspace_seq\x18\x03 \x01(\x04R\fworkspaceSeq\"4\n" +
+	"\acontent\x18\x02 \x03(\v2!.sycophant.common.v1.ContentBlockR\acontentJ\x04\b\x03\x10\x04R\rworkspace_seq\"4\n" +
 	"\x14DeliverReplyResponse\x12\x1c\n" +
-	"\tdelivered\x18\x01 \x01(\bR\tdelivered\"\xbb\x01\n" +
+	"\tdelivered\x18\x01 \x01(\bR\tdelivered\"\xab\x01\n" +
 	"\x17DeliverTurnStateRequest\x12\x1d\n" +
 	"\n" +
 	"channel_id\x18\x01 \x01(\tR\tchannelId\x12B\n" +
 	"\n" +
-	"turn_state\x18\x02 \x01(\v2#.sycophant.common.v1.TurnStateEventR\tturnState\x12#\n" +
-	"\rworkspace_seq\x18\x03 \x01(\x04R\fworkspaceSeq\x12\x18\n" +
-	"\asubject\x18\x04 \x01(\tR\asubject\"8\n" +
+	"turn_state\x18\x02 \x01(\v2#.sycophant.common.v1.TurnStateEventR\tturnState\x12\x18\n" +
+	"\asubject\x18\x04 \x01(\tR\asubjectJ\x04\b\x03\x10\x04R\rworkspace_seq\"8\n" +
 	"\x18DeliverTurnStateResponse\x12\x1c\n" +
 	"\tdelivered\x18\x01 \x01(\bR\tdelivered\"\xe1\x01\n" +
 	"\x16DeliverOutboundRequest\x12\x1d\n" +

@@ -2,13 +2,16 @@
 //! modules. `FakeToolset` backs the `ToolRouter<A>` toolset generic without a
 //! live gRPC server; `EndlessToolset`/`EndlessSource` drive the cancellation
 //! tests that run a never-terminating sub-agent stream through the router.
+//! `RecordingRelay` stands in for the relay and records what the harness
+//! delivers to it.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use proto_common::{ContentBlock, StreamItem, TurnStateEvent};
 use toolset_proto::{turn_event, ContentDelta, TurnEvent, TurnRequest};
 
-use crate::clients::{ToolsetRpc, TurnSource};
+use crate::clients::{RelayRpc, ServerRequestOutcome, ToolsetRpc, TurnSource};
 use crate::instructions::Instructions;
 
 /// The workspace name used by test routers/instructions.
@@ -68,5 +71,58 @@ impl TurnSource for EndlessSource {
                 text: "more".into(),
             })),
         }))
+    }
+}
+
+/// Test relay that answers every call successfully and records the stream
+/// items and turn-state frames (with their subject) the harness hands it.
+#[derive(Default)]
+pub(crate) struct RecordingRelay {
+    pub(crate) stream_items: Vec<(String, StreamItem)>,
+    pub(crate) turn_states: Vec<(TurnStateEvent, String)>,
+}
+
+#[async_trait]
+impl RelayRpc for RecordingRelay {
+    async fn send_server_notification(
+        &mut self,
+        _workspace: &str,
+        _method: &str,
+        _params_json: &str,
+    ) -> Result<bool, String> {
+        Ok(true)
+    }
+    async fn send_server_request_and_await(
+        &mut self,
+        _workspace: &str,
+        _request_id: &str,
+        _method: &str,
+        _params_json: &str,
+        _timeout_seconds: u32,
+    ) -> Result<ServerRequestOutcome, String> {
+        Ok(ServerRequestOutcome::Result(String::new()))
+    }
+    async fn deliver_stream_item(
+        &mut self,
+        channel_id: &str,
+        item: StreamItem,
+    ) -> Result<bool, String> {
+        self.stream_items.push((channel_id.to_string(), item));
+        Ok(true)
+    }
+    async fn deliver_reply(
+        &mut self,
+        _conversation_id: &str,
+        _content: Vec<ContentBlock>,
+    ) -> Result<bool, String> {
+        Ok(true)
+    }
+    async fn deliver_turn_state(
+        &mut self,
+        turn_state: TurnStateEvent,
+        subject: &str,
+    ) -> Result<bool, String> {
+        self.turn_states.push((turn_state, subject.to_string()));
+        Ok(true)
     }
 }

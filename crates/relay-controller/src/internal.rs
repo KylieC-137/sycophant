@@ -83,14 +83,9 @@ impl RelayInternal for InternalService {
         if req.method.is_empty() {
             return Err(Status::invalid_argument("method required"));
         }
-        let workspace_seq = if req.workspace_seq > 0 {
-            Some(req.workspace_seq)
-        } else {
-            None
-        };
         let delivered = match self
             .state
-            .send_server_notification(&workspace, &req.method, req.params_json, workspace_seq)
+            .send_server_notification(&workspace, &req.method, req.params_json)
             .await
         {
             Ok(()) => true,
@@ -179,18 +174,15 @@ impl RelayInternal for InternalService {
     ) -> Result<Response<relay_proto::DeliverReplyResponse>, Status> {
         let workspace = self.verify_caller(&request).await?;
         let req = request.into_inner();
+        tracing::info!(conversation_id = %req.conversation_id, workspace = %workspace, "deliver_reply received from harness");
         let send = ChannelOutbound {
             command: Some(channel_outbound::Command::SendMessage(ChannelSend {
                 content: req.content,
                 conversation_id: req.conversation_id.clone(),
             })),
-            workspace_seq: if req.workspace_seq > 0 {
-                Some(req.workspace_seq)
-            } else {
-                None
-            },
         };
         let delivered = self.state.send_to_workspace(&workspace, send).await > 0;
+        tracing::info!(conversation_id = %req.conversation_id, workspace = %workspace, delivered = delivered, "deliver_reply fanned out");
         Ok(Response::new(relay_proto::DeliverReplyResponse {
             delivered,
         }))
@@ -205,6 +197,7 @@ impl RelayInternal for InternalService {
         let Some(turn_state) = req.turn_state else {
             return Err(Status::invalid_argument("turn_state required"));
         };
+        tracing::info!(conversation_id = %turn_state.conversation_id, workspace = %workspace, "deliver_turn_state received from harness");
         let subject = if req.subject.is_empty() {
             // Backward compat: resolve subject from channel_id if provided
             match self.state.channel_binding(&req.channel_id).await {
@@ -215,11 +208,6 @@ impl RelayInternal for InternalService {
             req.subject
         };
         let state = TurnState::try_from(turn_state.state).unwrap_or(TurnState::Unspecified);
-        let ws_seq = if req.workspace_seq > 0 {
-            Some(req.workspace_seq)
-        } else {
-            None
-        };
 
         // Record the turn state for poll recovery.
         if state == TurnState::Failed {
@@ -249,6 +237,7 @@ impl RelayInternal for InternalService {
         }
 
         // Build the outbound frame and fan out to all workspace channels.
+        let conv_id = turn_state.conversation_id.clone();
         let msg = ChannelOutbound {
             command: Some(channel_outbound::Command::TurnState(TurnStateEvent {
                 state: turn_state.state,
@@ -257,9 +246,9 @@ impl RelayInternal for InternalService {
                 code: turn_state.code,
                 ..Default::default()
             })),
-            workspace_seq: ws_seq,
         };
         let delivered = self.state.send_to_workspace(&workspace, msg).await > 0;
+        tracing::info!(conversation_id = %conv_id, workspace = %workspace, delivered = delivered, "deliver_turn_state fanned out");
         Ok(Response::new(relay_proto::DeliverTurnStateResponse {
             delivered,
         }))
@@ -281,11 +270,6 @@ impl RelayInternal for InternalService {
         // collapsing. The harness is the sole egress authority.
         let frame = ChannelOutbound {
             command: Some(channel_outbound::Command::StreamItem(item)),
-            workspace_seq: if req.workspace_seq > 0 {
-                Some(req.workspace_seq)
-            } else {
-                None
-            },
         };
         let delivered = self.state.send_to_workspace(&workspace, frame).await > 0;
         Ok(Response::new(DeliverStreamItemResponse { delivered }))
@@ -402,7 +386,6 @@ mod tests {
                 method: "RevealPath".into(),
                 params_json: "{}".into(),
                 workspace: "ws".into(),
-                workspace_seq: 0,
             }))
             .await
             .unwrap()
@@ -420,7 +403,6 @@ mod tests {
                 params_json: "{}".into(),
                 timeout_seconds: 1,
                 workspace: "ws".into(),
-                workspace_seq: 0,
             }))
             .await
             .unwrap()
@@ -442,7 +424,6 @@ mod tests {
                         proto_common::TextBlock { text: "hi".into() },
                     )),
                 }],
-                workspace_seq: 42,
             }))
             .await
             .unwrap()
@@ -453,7 +434,6 @@ mod tests {
             frame.command,
             Some(channel_outbound::Command::SendMessage(_))
         ));
-        assert_eq!(frame.workspace_seq, Some(42));
     }
 
     #[tokio::test]
@@ -472,7 +452,6 @@ mod tests {
                     code: String::new(),
                     ..Default::default()
                 }),
-                workspace_seq: 0,
                 subject: "subject-ws".into(),
             }))
             .await
@@ -507,7 +486,6 @@ mod tests {
                     code: "14".into(),
                     ..Default::default()
                 }),
-                workspace_seq: 0,
                 subject: "subject-ws".into(),
             }))
             .await
@@ -539,7 +517,6 @@ mod tests {
         // A tool-use start frame with a distinctive envelope; the gateway must
         // forward the StreamItem's bytes unchanged (no inspection/collapsing).
         let item = StreamItem {
-            workspace_seq: 7,
             event_id: "ev-1".into(),
             item_id: "tc-1".into(),
             conversation_id: "ws.conv".into(),
@@ -555,7 +532,6 @@ mod tests {
             .deliver_stream_item(authed(DeliverStreamItemRequest {
                 channel_id: id,
                 item: Some(item.clone()),
-                workspace_seq: 7,
             }))
             .await
             .unwrap()
@@ -584,7 +560,6 @@ mod tests {
             .deliver_stream_item(authed(DeliverStreamItemRequest {
                 channel_id: String::new(),
                 item: Some(proto_common::StreamItem::default()),
-                workspace_seq: 0,
             }))
             .await
             .unwrap()
