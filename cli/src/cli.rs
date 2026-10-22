@@ -22,13 +22,29 @@ pub(crate) enum Command {
     Upgrade(UpgradeCmd),
     Tenant(TenantCmd),
     /// Install or remove one toolset through its provision and reap commands
+    #[command(
+        mut_subcommand("up", |c| c.after_long_help(TOOLSET_UP_EXAMPLES)),
+        mut_subcommand("down", |c| c.after_long_help(TOOLSET_DOWN_EXAMPLES))
+    )]
     Toolset(ComponentCmd),
     /// Install or remove one workspace through its provision and reap commands
+    #[command(
+        mut_subcommand("up", |c| c.after_long_help(WORKSPACE_UP_EXAMPLES)),
+        mut_subcommand("down", |c| c.after_long_help(WORKSPACE_DOWN_EXAMPLES))
+    )]
     Workspace(ComponentCmd),
     User(UserCmd),
     /// Install or remove one model through its provision and reap commands
+    #[command(
+        mut_subcommand("up", |c| c.after_long_help(INFERENCE_UP_EXAMPLES)),
+        mut_subcommand("down", |c| c.after_long_help(INFERENCE_DOWN_EXAMPLES))
+    )]
     Inference(ComponentCmd),
     /// Install or remove one channel through its provision and reap commands
+    #[command(
+        mut_subcommand("up", |c| c.after_long_help(CHANNEL_UP_EXAMPLES)),
+        mut_subcommand("down", |c| c.after_long_help(CHANNEL_DOWN_EXAMPLES))
+    )]
     Channel(ComponentCmd),
 }
 
@@ -61,6 +77,7 @@ pub(crate) struct DestroyCmd {}
 /// first failure while applying stops the run. `--check` runs validation only,
 /// making no changes.
 #[derive(Args)]
+#[command(after_long_help = UPGRADE_EXAMPLES)]
 pub(crate) struct UpgradeCmd {
     /// Validate the cluster and tenants without applying upgrades or other changes
     #[arg(long)]
@@ -91,13 +108,17 @@ pub(crate) enum TenantSub {
     /// values (`tenant: {name, capacity}`), writes it, and waits for its
     /// installer, which upgrades the release in place. The capacity quota is set
     /// on first provision and not resized after
+    #[command(after_long_help = TENANT_UP_EXAMPLES)]
     Up(Up),
     /// Temporarily stop the tenant from running,  does not delete its stored data.
+    #[command(after_long_help = TENANT_DOWN_EXAMPLES)]
     Down(TenantDown),
     /// Delete a tenant completely, including its persistent data (irreversible)
+    #[command(after_long_help = TENANT_REMOVE_EXAMPLES)]
     Remove(TenantRemove),
     Secret(SecretCmd),
     /// Audit a running workspace against Sycophant security controls
+    #[command(after_long_help = TENANT_AUDIT_EXAMPLES)]
     Audit(AuditCmd),
 }
 
@@ -196,6 +217,7 @@ pub(crate) enum UserSub {
     /// wait for its installer. Prompts for the operator password. A leftover
     /// command of the same name is replaced; a rejected command or a failed
     /// install exits non-zero
+    #[command(after_long_help = USER_UP_EXAMPLES)]
     Up(Up),
 }
 
@@ -268,6 +290,106 @@ pub(crate) struct ComponentDown {
     #[arg(long)]
     pub tenant: String,
 }
+
+
+
+// --- long help: examples (shown by --help, not -h) ---
+
+const UPGRADE_EXAMPLES: &str = "\
+Examples:
+  # Validate the cluster and every tenant without changing anything
+  sycoadm upgrade --check
+
+  # Upgrade the cluster chart and re-provision every tenant
+  sycoadm upgrade";
+
+const TENANT_UP_EXAMPLES: &str = "\
+Examples:
+  # Provision the example tenant (namespace tenant-e2e-test)
+  sycoadm tenant up -f examples/sycoadm/tenants/e2e-test.yaml
+
+  # Reuse the same file for a different tenant name
+  sycoadm tenant up -f examples/sycoadm/tenants/e2e-test.yaml \\
+      --set tenant.name=staging";
+
+const TENANT_DOWN_EXAMPLES: &str = "\
+Examples:
+  # Suspend a tenant with no deletion deadline
+  sycoadm tenant down e2e-test
+
+  # Suspend a tenant and let the cluster delete it after 7 days
+  sycoadm tenant down e2e-test --keepalive 7";
+
+const TENANT_REMOVE_EXAMPLES: &str = "\
+Examples:
+  # Delete the tenant and all of its data
+  sycoadm tenant remove e2e-test";
+
+const TENANT_AUDIT_EXAMPLES: &str = "\
+Examples:
+  # Audit a workspace after it has made at least one tool call
+  sycoadm tenant audit hello-world --ns tenant-e2e-test";
+
+const USER_UP_EXAMPLES: &str = "\
+Examples:
+  # Bind the example user to the hello-world workspace
+  sycoadm user up -f examples/sycoadm/users/alice.yaml
+
+  # Override the subject (<issuer>#<sub>) from the file
+  sycoadm user up -f examples/sycoadm/users/alice.yaml \\
+      --set \"user.subject=<issuer>#<sub>\"";
+
+const TOOLSET_UP_EXAMPLES: &str = "\
+Examples:
+  # Install a toolset; the second file supplies its image and tool list
+  sycoadm toolset up -f examples/sycoadm/toolsets/stdlib/values.yaml \\
+      -f stdlib-image.yaml
+
+  # Install the same toolset into another tenant
+  sycoadm toolset up -f examples/sycoadm/toolsets/stdlib/values.yaml \\
+      -f stdlib-image.yaml --set toolset.tenant=staging";
+
+const TOOLSET_DOWN_EXAMPLES: &str = "\
+Examples:
+  # Remove the stdlib toolset from tenant e2e-test
+  sycoadm toolset down stdlib --tenant e2e-test";
+
+const WORKSPACE_UP_EXAMPLES: &str = "\
+Examples:
+  # Install a workspace (its models and toolsets must already be installed)
+  sycoadm workspace up -f examples/sycoadm/workspaces/hello-world.yaml
+
+  # Install it into another tenant
+  sycoadm workspace up -f examples/sycoadm/workspaces/hello-world.yaml \\
+      --set workspace.tenant=staging";
+
+const WORKSPACE_DOWN_EXAMPLES: &str = "\
+Examples:
+  # Remove the hello-world workspace from tenant e2e-test
+  sycoadm workspace down hello-world --tenant e2e-test";
+
+const INFERENCE_UP_EXAMPLES: &str = "\
+Examples:
+  # Install an in-cluster model
+  sycoadm inference up -f examples/sycoadm/inference/local.yaml
+
+  # Install a remote model (its API key secret must already exist)
+  sycoadm inference up -f examples/sycoadm/inference/deepseek-v4-flash.yaml";
+
+const INFERENCE_DOWN_EXAMPLES: &str = "\
+Examples:
+  # Remove the local model from tenant e2e-test
+  sycoadm inference down local --tenant e2e-test";
+
+const CHANNEL_UP_EXAMPLES: &str = "\
+Examples:
+  # Install the app channel
+  sycoadm channel up -f examples/sycoadm/channels/app.yaml";
+
+const CHANNEL_DOWN_EXAMPLES: &str = "\
+Examples:
+  # Remove the app channel from tenant e2e-test
+  sycoadm channel down app --tenant e2e-test";
 
 #[cfg(test)]
 mod tests {
