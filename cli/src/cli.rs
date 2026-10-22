@@ -4,7 +4,8 @@ use clap::{Args, Parser, Subcommand};
 #[command(
     name = "sycoadm",
     about = "Administer Sycophant clusters, tenants, and components",
-    version
+    version,
+    after_long_help = TOP_LEVEL_HELP
 )]
 pub(crate) struct Cli {
     #[command(subcommand)]
@@ -58,6 +59,7 @@ pub(crate) enum Command {
 /// operator as its one password user (prompted on first run); scaffold the
 /// global config. Idempotent.
 #[derive(Args)]
+#[command(after_long_help = SETUP_HELP)]
 pub(crate) struct SetupCmd {}
 
 /// Delete the cluster and all tenant data (irreversible)
@@ -294,6 +296,34 @@ pub(crate) struct ComponentDown {
 
 
 // --- long help: examples (shown by --help, not -h) ---
+
+const TOP_LEVEL_HELP: &str = "\
+Environment:
+  SYCO_EMAIL       Operator email; skips the email prompt
+  SYCO_PASSWORD    Operator password; skips the password prompt
+  SYCO_CONFIG_DIR  Config root (default: ~/.config/sycophant)
+
+Examples:
+  # Create a local cluster, then a tenant and a workspace in it
+  sycoadm setup
+  sycoadm tenant up -f examples/sycoadm/tenants/e2e-test.yaml
+  sycoadm workspace up -f examples/sycoadm/workspaces/hello-world.yaml
+
+  # Show help for one command
+  sycoadm workspace up --help";
+
+const SETUP_HELP: &str = "\
+Environment:
+  SYCO_EMAIL               Operator email; skips the email prompt
+  SYCO_PASSWORD            Operator password; skips both password prompts
+  SYCO_SKIP_BUILD          Truthy: skip the image build (bring your own images)
+  SYCO_K3D_ARGS            Extra `k3d cluster create` arguments, space-separated
+  SYCO_AUTH_CONFIG_APPEND  File appended to the apiserver auth config
+  SYCO_KYVERNO_VALUES      Extra Helm values file for Kyverno
+  SYCO_CLUSTER_VALUES      Extra Helm values file for the cluster chart
+  SYCO_CILIUM_PRELOAD      Truthy: import the Cilium image from local Docker
+
+  Truthy means set, non-empty, and not 0.";
 
 const UPGRADE_EXAMPLES: &str = "\
 Examples:
