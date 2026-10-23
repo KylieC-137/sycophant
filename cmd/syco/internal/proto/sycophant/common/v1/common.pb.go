@@ -77,7 +77,7 @@ type TurnState int32
 
 const (
 	TurnState_TURN_STATE_UNSPECIFIED TurnState = 0
-	// No active turn. Default for fresh channels; emitted after the
+	// No active turn. Default for fresh channel streams; emitted after the
 	// assistant message persists.
 	TurnState_TURN_STATE_IDLE TurnState = 1
 	// Turn is in flight on the cluster: controller enqueued the user
@@ -1402,30 +1402,30 @@ func (x *ListGrantsResponse) GetToolsets() []*ToolsetGrants {
 	return nil
 }
 
-type ChannelAck struct {
+type ChannelStreamAck struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Server-minted opaque UUID. Echo on every ChannelIngest; valid only
-	// within the lifetime of the originating ChannelReceive /
-	// ChannelStream response stream.
-	ChannelId     string `protobuf:"bytes,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Server-minted opaque UUID. Echo on every ChannelStreamIngest; valid only
+	// within the lifetime of the originating ChannelStreamReceive
+	// response stream.
+	ChannelStreamId string `protobuf:"bytes,1,opt,name=channel_stream_id,json=channelStreamId,proto3" json:"channel_stream_id,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
-func (x *ChannelAck) Reset() {
-	*x = ChannelAck{}
+func (x *ChannelStreamAck) Reset() {
+	*x = ChannelStreamAck{}
 	mi := &file_sycophant_common_v1_common_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ChannelAck) String() string {
+func (x *ChannelStreamAck) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ChannelAck) ProtoMessage() {}
+func (*ChannelStreamAck) ProtoMessage() {}
 
-func (x *ChannelAck) ProtoReflect() protoreflect.Message {
+func (x *ChannelStreamAck) ProtoReflect() protoreflect.Message {
 	mi := &file_sycophant_common_v1_common_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1437,47 +1437,47 @@ func (x *ChannelAck) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ChannelAck.ProtoReflect.Descriptor instead.
-func (*ChannelAck) Descriptor() ([]byte, []int) {
+// Deprecated: Use ChannelStreamAck.ProtoReflect.Descriptor instead.
+func (*ChannelStreamAck) Descriptor() ([]byte, []int) {
 	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{22}
 }
 
-func (x *ChannelAck) GetChannelId() string {
+func (x *ChannelStreamAck) GetChannelStreamId() string {
 	if x != nil {
-		return x.ChannelId
+		return x.ChannelStreamId
 	}
 	return ""
 }
 
-type ChannelOutbound struct {
+type ChannelStreamOutbound struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Command:
 	//
-	//	*ChannelOutbound_Ack
-	//	*ChannelOutbound_SendMessage
-	//	*ChannelOutbound_TurnState
-	//	*ChannelOutbound_ServerRequest
-	//	*ChannelOutbound_StreamItem
-	//	*ChannelOutbound_Heartbeat
-	Command       isChannelOutbound_Command `protobuf_oneof:"command"`
+	//	*ChannelStreamOutbound_Ack
+	//	*ChannelStreamOutbound_SendMessage
+	//	*ChannelStreamOutbound_TurnState
+	//	*ChannelStreamOutbound_ServerRequest
+	//	*ChannelStreamOutbound_StreamItem
+	//	*ChannelStreamOutbound_Heartbeat
+	Command       isChannelStreamOutbound_Command `protobuf_oneof:"command"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ChannelOutbound) Reset() {
-	*x = ChannelOutbound{}
+func (x *ChannelStreamOutbound) Reset() {
+	*x = ChannelStreamOutbound{}
 	mi := &file_sycophant_common_v1_common_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ChannelOutbound) String() string {
+func (x *ChannelStreamOutbound) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ChannelOutbound) ProtoMessage() {}
+func (*ChannelStreamOutbound) ProtoMessage() {}
 
-func (x *ChannelOutbound) ProtoReflect() protoreflect.Message {
+func (x *ChannelStreamOutbound) ProtoReflect() protoreflect.Message {
 	mi := &file_sycophant_common_v1_common_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1489,113 +1489,113 @@ func (x *ChannelOutbound) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ChannelOutbound.ProtoReflect.Descriptor instead.
-func (*ChannelOutbound) Descriptor() ([]byte, []int) {
+// Deprecated: Use ChannelStreamOutbound.ProtoReflect.Descriptor instead.
+func (*ChannelStreamOutbound) Descriptor() ([]byte, []int) {
 	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{23}
 }
 
-func (x *ChannelOutbound) GetCommand() isChannelOutbound_Command {
+func (x *ChannelStreamOutbound) GetCommand() isChannelStreamOutbound_Command {
 	if x != nil {
 		return x.Command
 	}
 	return nil
 }
 
-func (x *ChannelOutbound) GetAck() *ChannelAck {
+func (x *ChannelStreamOutbound) GetAck() *ChannelStreamAck {
 	if x != nil {
-		if x, ok := x.Command.(*ChannelOutbound_Ack); ok {
+		if x, ok := x.Command.(*ChannelStreamOutbound_Ack); ok {
 			return x.Ack
 		}
 	}
 	return nil
 }
 
-func (x *ChannelOutbound) GetSendMessage() *ChannelSend {
+func (x *ChannelStreamOutbound) GetSendMessage() *ChannelStreamSend {
 	if x != nil {
-		if x, ok := x.Command.(*ChannelOutbound_SendMessage); ok {
+		if x, ok := x.Command.(*ChannelStreamOutbound_SendMessage); ok {
 			return x.SendMessage
 		}
 	}
 	return nil
 }
 
-func (x *ChannelOutbound) GetTurnState() *TurnStateEvent {
+func (x *ChannelStreamOutbound) GetTurnState() *TurnStateEvent {
 	if x != nil {
-		if x, ok := x.Command.(*ChannelOutbound_TurnState); ok {
+		if x, ok := x.Command.(*ChannelStreamOutbound_TurnState); ok {
 			return x.TurnState
 		}
 	}
 	return nil
 }
 
-func (x *ChannelOutbound) GetServerRequest() *ServerRequest {
+func (x *ChannelStreamOutbound) GetServerRequest() *ServerRequest {
 	if x != nil {
-		if x, ok := x.Command.(*ChannelOutbound_ServerRequest); ok {
+		if x, ok := x.Command.(*ChannelStreamOutbound_ServerRequest); ok {
 			return x.ServerRequest
 		}
 	}
 	return nil
 }
 
-func (x *ChannelOutbound) GetStreamItem() *StreamItem {
+func (x *ChannelStreamOutbound) GetStreamItem() *StreamItem {
 	if x != nil {
-		if x, ok := x.Command.(*ChannelOutbound_StreamItem); ok {
+		if x, ok := x.Command.(*ChannelStreamOutbound_StreamItem); ok {
 			return x.StreamItem
 		}
 	}
 	return nil
 }
 
-func (x *ChannelOutbound) GetHeartbeat() *Heartbeat {
+func (x *ChannelStreamOutbound) GetHeartbeat() *Heartbeat {
 	if x != nil {
-		if x, ok := x.Command.(*ChannelOutbound_Heartbeat); ok {
+		if x, ok := x.Command.(*ChannelStreamOutbound_Heartbeat); ok {
 			return x.Heartbeat
 		}
 	}
 	return nil
 }
 
-type isChannelOutbound_Command interface {
-	isChannelOutbound_Command()
+type isChannelStreamOutbound_Command interface {
+	isChannelStreamOutbound_Command()
 }
 
-type ChannelOutbound_Ack struct {
-	Ack *ChannelAck `protobuf:"bytes,1,opt,name=ack,proto3,oneof"`
+type ChannelStreamOutbound_Ack struct {
+	Ack *ChannelStreamAck `protobuf:"bytes,1,opt,name=ack,proto3,oneof"`
 }
 
-type ChannelOutbound_SendMessage struct {
-	SendMessage *ChannelSend `protobuf:"bytes,2,opt,name=send_message,json=sendMessage,proto3,oneof"`
+type ChannelStreamOutbound_SendMessage struct {
+	SendMessage *ChannelStreamSend `protobuf:"bytes,2,opt,name=send_message,json=sendMessage,proto3,oneof"`
 }
 
-type ChannelOutbound_TurnState struct {
+type ChannelStreamOutbound_TurnState struct {
 	TurnState *TurnStateEvent `protobuf:"bytes,3,opt,name=turn_state,json=turnState,proto3,oneof"`
 }
 
-type ChannelOutbound_ServerRequest struct {
+type ChannelStreamOutbound_ServerRequest struct {
 	ServerRequest *ServerRequest `protobuf:"bytes,4,opt,name=server_request,json=serverRequest,proto3,oneof"`
 }
 
-type ChannelOutbound_StreamItem struct {
+type ChannelStreamOutbound_StreamItem struct {
 	StreamItem *StreamItem `protobuf:"bytes,5,opt,name=stream_item,json=streamItem,proto3,oneof"`
 }
 
-type ChannelOutbound_Heartbeat struct {
+type ChannelStreamOutbound_Heartbeat struct {
 	Heartbeat *Heartbeat `protobuf:"bytes,7,opt,name=heartbeat,proto3,oneof"`
 }
 
-func (*ChannelOutbound_Ack) isChannelOutbound_Command() {}
+func (*ChannelStreamOutbound_Ack) isChannelStreamOutbound_Command() {}
 
-func (*ChannelOutbound_SendMessage) isChannelOutbound_Command() {}
+func (*ChannelStreamOutbound_SendMessage) isChannelStreamOutbound_Command() {}
 
-func (*ChannelOutbound_TurnState) isChannelOutbound_Command() {}
+func (*ChannelStreamOutbound_TurnState) isChannelStreamOutbound_Command() {}
 
-func (*ChannelOutbound_ServerRequest) isChannelOutbound_Command() {}
+func (*ChannelStreamOutbound_ServerRequest) isChannelStreamOutbound_Command() {}
 
-func (*ChannelOutbound_StreamItem) isChannelOutbound_Command() {}
+func (*ChannelStreamOutbound_StreamItem) isChannelStreamOutbound_Command() {}
 
-func (*ChannelOutbound_Heartbeat) isChannelOutbound_Command() {}
+func (*ChannelStreamOutbound_Heartbeat) isChannelStreamOutbound_Command() {}
 
-// Periodic liveness signal, sent on every channel at the relay's heartbeat interval.
+// Periodic liveness signal, sent on every channel stream at the relay's heartbeat interval.
 type Heartbeat struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -1636,7 +1636,7 @@ func (*Heartbeat) Descriptor() ([]byte, []int) {
 //
 // Carries one class of live turn activity — streamed text and tool calls —
 // from the harness to the client as it is produced, instead of a single
-// terminal reply. A top-level ChannelOutbound variant (not nested in the
+// terminal reply. A top-level ChannelStreamOutbound variant (not nested in the
 // reply). Each item's start/delta/stop frames share `item_id`; every frame
 // carries an `event_id`. Streaming-only: not persisted as individual log
 // events.
@@ -2068,7 +2068,7 @@ func (*ItemStop) Descriptor() ([]byte, []int) {
 	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{30}
 }
 
-type ChannelSend struct {
+type ChannelStreamSend struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	Content []*ContentBlock        `protobuf:"bytes,1,rep,name=content,proto3" json:"content,omitempty"`
 	// Conversation this reply belongs to. Lets the client filter outbound
@@ -2078,20 +2078,20 @@ type ChannelSend struct {
 	sizeCache      protoimpl.SizeCache
 }
 
-func (x *ChannelSend) Reset() {
-	*x = ChannelSend{}
+func (x *ChannelStreamSend) Reset() {
+	*x = ChannelStreamSend{}
 	mi := &file_sycophant_common_v1_common_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ChannelSend) String() string {
+func (x *ChannelStreamSend) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ChannelSend) ProtoMessage() {}
+func (*ChannelStreamSend) ProtoMessage() {}
 
-func (x *ChannelSend) ProtoReflect() protoreflect.Message {
+func (x *ChannelStreamSend) ProtoReflect() protoreflect.Message {
 	mi := &file_sycophant_common_v1_common_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -2103,19 +2103,19 @@ func (x *ChannelSend) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ChannelSend.ProtoReflect.Descriptor instead.
-func (*ChannelSend) Descriptor() ([]byte, []int) {
+// Deprecated: Use ChannelStreamSend.ProtoReflect.Descriptor instead.
+func (*ChannelStreamSend) Descriptor() ([]byte, []int) {
 	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{31}
 }
 
-func (x *ChannelSend) GetContent() []*ContentBlock {
+func (x *ChannelStreamSend) GetContent() []*ContentBlock {
 	if x != nil {
 		return x.Content
 	}
 	return nil
 }
 
-func (x *ChannelSend) GetConversationId() string {
+func (x *ChannelStreamSend) GetConversationId() string {
 	if x != nil {
 		return x.ConversationId
 	}
@@ -2123,15 +2123,15 @@ func (x *ChannelSend) GetConversationId() string {
 }
 
 // Streaming turn-lifecycle phase. The controller pushes this to every
-// ChannelReceive subscriber so clients can render a "working" indicator
+// ChannelStreamReceive subscriber so clients can render a "working" indicator
 // without polling or per-tool detail. Sending (between user submit and
-// the controller's ChannelIngest ack) stays purely client-side; only
+// the controller's ChannelStreamIngest ack) stays purely client-side; only
 // WORKING and IDLE are server-pushed today.
 type TurnStateEvent struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	State TurnState              `protobuf:"varint,1,opt,name=state,proto3,enum=sycophant.common.v1.TurnState" json:"state,omitempty"`
 	// Conversation this state transition belongs to. Empty string is
-	// reserved for channel-wide replay frames emitted on (re)connect —
+	// reserved for stream-wide replay frames emitted on (re)connect —
 	// clients should treat empty as "no conversation context" and skip
 	// the per-conversation indicator update.
 	ConversationId string `protobuf:"bytes,2,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
@@ -2221,19 +2221,18 @@ func (x *TurnStateEvent) GetSystemPromptSha256() string {
 }
 
 // UserMessage is the canonical "user said something" event. Flows from
-// the relay gateway to the harness. `reply_channel` is the
-// server-minted channel_id (UUID) stamped by the gateway after
-// ChannelIngest / ChannelStream message ingress, so the harness's
-// reply routes back to the originating adapter. Opaque to clients;
-// only valid within the lifetime of the originating ChannelReceive /
-// ChannelStream stream.
+// the relay gateway to the harness. `reply_channel_stream` is the
+// server-minted channel_stream_id (UUID) stamped by the gateway after
+// ChannelStreamIngest message ingress. Opaque to clients;
+// only valid within the lifetime of the originating ChannelStreamReceive
+// stream.
 type UserMessage struct {
-	state        protoimpl.MessageState `protogen:"open.v1"`
-	Content      []*ContentBlock        `protobuf:"bytes,1,rep,name=content,proto3" json:"content,omitempty"`
-	Sender       string                 `protobuf:"bytes,2,opt,name=sender,proto3" json:"sender,omitempty"`
-	ReplyChannel *string                `protobuf:"bytes,3,opt,name=reply_channel,json=replyChannel,proto3,oneof" json:"reply_channel,omitempty"`
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	Content            []*ContentBlock        `protobuf:"bytes,1,rep,name=content,proto3" json:"content,omitempty"`
+	Sender             string                 `protobuf:"bytes,2,opt,name=sender,proto3" json:"sender,omitempty"`
+	ReplyChannelStream *string                `protobuf:"bytes,3,opt,name=reply_channel_stream,json=replyChannelStream,proto3,oneof" json:"reply_channel_stream,omitempty"`
 	// Conversation this message belongs to. Stamped by the relay gateway
-	// at ingest time (caller may supply via ChannelIngestRequest, or the
+	// at ingest time (caller may supply via ChannelStreamIngestRequest, or the
 	// gateway mints a fresh id). The harness reads this verbatim
 	// when constructing the TurnRequest — it never mints conversation
 	// ids on its own anymore.
@@ -2291,9 +2290,9 @@ func (x *UserMessage) GetSender() string {
 	return ""
 }
 
-func (x *UserMessage) GetReplyChannel() string {
-	if x != nil && x.ReplyChannel != nil {
-		return *x.ReplyChannel
+func (x *UserMessage) GetReplyChannelStream() string {
+	if x != nil && x.ReplyChannelStream != nil {
+		return *x.ReplyChannelStream
 	}
 	return ""
 }
@@ -2890,8 +2889,8 @@ type CallToolRequest struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	Name      string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	InputJson string                 `protobuf:"bytes,2,opt,name=input_json,json=inputJson,proto3" json:"input_json,omitempty"`
-	// Conversation this tool call attaches to. The caller (the Flutter app
-	// for an app-run dispatch, the harness for a model-run call) supplies
+	// Conversation this tool call attaches to. The caller (a client for an
+	// app-run dispatch, the harness for a model-run call) supplies
 	// its active conversation; the harness records the call's frames in
 	// that conversation's execution log. Empty is accepted: a
 	// conversation-less app call streams live but persists no per-conversation
@@ -3384,23 +3383,23 @@ func (x *CancelToolResponse) GetCancelled() bool {
 	return false
 }
 
-type ChannelIngestRequest struct {
+type ChannelStreamIngestRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The channel_id received as the first frame on the ChannelReceive
+	// The channel_stream_id received as the first frame on the ChannelStreamReceive
 	// response stream. Server-minted; opaque to clients.
-	ChannelId string `protobuf:"bytes,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	ChannelStreamId string `protobuf:"bytes,1,opt,name=channel_stream_id,json=channelStreamId,proto3" json:"channel_stream_id,omitempty"`
 	// The user's message payload. The workspace comes from the
-	// channel_id's server-side binding (NOT from this field) so external
+	// channel_stream_id's server-side binding (NOT from this field) so external
 	// callers cannot inject into other workspaces.
 	//
 	// Exactly one of `user_message` / `client_response` MUST be set per
 	// call. Both-set or neither-set → InvalidArgument at the handler.
 	UserMessage *UserMessage `protobuf:"bytes,2,opt,name=user_message,json=userMessage,proto3" json:"user_message,omitempty"`
 	// Reply to a prior ServerRequest the client received over its
-	// ChannelReceive stream. Correlation key is request_id.
+	// ChannelStreamReceive stream. Correlation key is request_id.
 	ClientResponse *ClientResponse `protobuf:"bytes,3,opt,name=client_response,json=clientResponse,proto3" json:"client_response,omitempty"`
 	// Methods the sending device is willing to render when the agent
-	// dispatches a ServerRequest. Last-sender-wins per channel; sent on
+	// dispatches a ServerRequest. Last-sender-wins per channel stream; sent on
 	// every ingest. Names match ServerRequest.method values.
 	SupportedMethods []string `protobuf:"bytes,4,rep,name=supported_methods,json=supportedMethods,proto3" json:"supported_methods,omitempty"`
 	// Conversation this message belongs to. Empty string → controller
@@ -3412,20 +3411,20 @@ type ChannelIngestRequest struct {
 	sizeCache      protoimpl.SizeCache
 }
 
-func (x *ChannelIngestRequest) Reset() {
-	*x = ChannelIngestRequest{}
+func (x *ChannelStreamIngestRequest) Reset() {
+	*x = ChannelStreamIngestRequest{}
 	mi := &file_sycophant_common_v1_common_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ChannelIngestRequest) String() string {
+func (x *ChannelStreamIngestRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ChannelIngestRequest) ProtoMessage() {}
+func (*ChannelStreamIngestRequest) ProtoMessage() {}
 
-func (x *ChannelIngestRequest) ProtoReflect() protoreflect.Message {
+func (x *ChannelStreamIngestRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_sycophant_common_v1_common_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -3437,50 +3436,50 @@ func (x *ChannelIngestRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ChannelIngestRequest.ProtoReflect.Descriptor instead.
-func (*ChannelIngestRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use ChannelStreamIngestRequest.ProtoReflect.Descriptor instead.
+func (*ChannelStreamIngestRequest) Descriptor() ([]byte, []int) {
 	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{52}
 }
 
-func (x *ChannelIngestRequest) GetChannelId() string {
+func (x *ChannelStreamIngestRequest) GetChannelStreamId() string {
 	if x != nil {
-		return x.ChannelId
+		return x.ChannelStreamId
 	}
 	return ""
 }
 
-func (x *ChannelIngestRequest) GetUserMessage() *UserMessage {
+func (x *ChannelStreamIngestRequest) GetUserMessage() *UserMessage {
 	if x != nil {
 		return x.UserMessage
 	}
 	return nil
 }
 
-func (x *ChannelIngestRequest) GetClientResponse() *ClientResponse {
+func (x *ChannelStreamIngestRequest) GetClientResponse() *ClientResponse {
 	if x != nil {
 		return x.ClientResponse
 	}
 	return nil
 }
 
-func (x *ChannelIngestRequest) GetSupportedMethods() []string {
+func (x *ChannelStreamIngestRequest) GetSupportedMethods() []string {
 	if x != nil {
 		return x.SupportedMethods
 	}
 	return nil
 }
 
-func (x *ChannelIngestRequest) GetConversationId() string {
+func (x *ChannelStreamIngestRequest) GetConversationId() string {
 	if x != nil {
 		return x.ConversationId
 	}
 	return ""
 }
 
-type ChannelIngestAck struct {
+type ChannelStreamIngestAck struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Echoed for caller correlation.
-	ChannelId string `protobuf:"bytes,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	ChannelStreamId string `protobuf:"bytes,1,opt,name=channel_stream_id,json=channelStreamId,proto3" json:"channel_stream_id,omitempty"`
 	// Conversation under which this message was filed. Pair with
 	// GetConversationHistory for replay across reconnects.
 	ConversationId string `protobuf:"bytes,2,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
@@ -3488,20 +3487,20 @@ type ChannelIngestAck struct {
 	sizeCache      protoimpl.SizeCache
 }
 
-func (x *ChannelIngestAck) Reset() {
-	*x = ChannelIngestAck{}
+func (x *ChannelStreamIngestAck) Reset() {
+	*x = ChannelStreamIngestAck{}
 	mi := &file_sycophant_common_v1_common_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ChannelIngestAck) String() string {
+func (x *ChannelStreamIngestAck) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ChannelIngestAck) ProtoMessage() {}
+func (*ChannelStreamIngestAck) ProtoMessage() {}
 
-func (x *ChannelIngestAck) ProtoReflect() protoreflect.Message {
+func (x *ChannelStreamIngestAck) ProtoReflect() protoreflect.Message {
 	mi := &file_sycophant_common_v1_common_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -3513,55 +3512,55 @@ func (x *ChannelIngestAck) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ChannelIngestAck.ProtoReflect.Descriptor instead.
-func (*ChannelIngestAck) Descriptor() ([]byte, []int) {
+// Deprecated: Use ChannelStreamIngestAck.ProtoReflect.Descriptor instead.
+func (*ChannelStreamIngestAck) Descriptor() ([]byte, []int) {
 	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{53}
 }
 
-func (x *ChannelIngestAck) GetChannelId() string {
+func (x *ChannelStreamIngestAck) GetChannelStreamId() string {
 	if x != nil {
-		return x.ChannelId
+		return x.ChannelStreamId
 	}
 	return ""
 }
 
-func (x *ChannelIngestAck) GetConversationId() string {
+func (x *ChannelStreamIngestAck) GetConversationId() string {
 	if x != nil {
 		return x.ConversationId
 	}
 	return ""
 }
 
-type ChannelReceiveRequest struct {
+type ChannelStreamReceiveRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Free-form, untrusted, log-only label for operator debugging.
-	AdapterHint *string `protobuf:"bytes,1,opt,name=adapter_hint,json=adapterHint,proto3,oneof" json:"adapter_hint,omitempty"`
+	ChannelHint *string `protobuf:"bytes,1,opt,name=channel_hint,json=channelHint,proto3,oneof" json:"channel_hint,omitempty"`
 	// The workspace this receive stream serves. Every workspace-scoped
 	// request names its workspace; the relay authorizes it per credential
 	// class.
 	Workspace string `protobuf:"bytes,2,opt,name=workspace,proto3" json:"workspace,omitempty"`
-	// The adapter path's sender: the platform user ID the adapter reports
+	// The channel path's sender: the platform user ID the channel reports
 	// verbatim. The relay resolves it to a subject through the operator's
-	// handle binding; the adapter vouches for no one.
+	// handle binding; the channel vouches for no one.
 	Sender        string `protobuf:"bytes,3,opt,name=sender,proto3" json:"sender,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ChannelReceiveRequest) Reset() {
-	*x = ChannelReceiveRequest{}
+func (x *ChannelStreamReceiveRequest) Reset() {
+	*x = ChannelStreamReceiveRequest{}
 	mi := &file_sycophant_common_v1_common_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ChannelReceiveRequest) String() string {
+func (x *ChannelStreamReceiveRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ChannelReceiveRequest) ProtoMessage() {}
+func (*ChannelStreamReceiveRequest) ProtoMessage() {}
 
-func (x *ChannelReceiveRequest) ProtoReflect() protoreflect.Message {
+func (x *ChannelStreamReceiveRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_sycophant_common_v1_common_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -3573,26 +3572,26 @@ func (x *ChannelReceiveRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ChannelReceiveRequest.ProtoReflect.Descriptor instead.
-func (*ChannelReceiveRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use ChannelStreamReceiveRequest.ProtoReflect.Descriptor instead.
+func (*ChannelStreamReceiveRequest) Descriptor() ([]byte, []int) {
 	return file_sycophant_common_v1_common_proto_rawDescGZIP(), []int{54}
 }
 
-func (x *ChannelReceiveRequest) GetAdapterHint() string {
-	if x != nil && x.AdapterHint != nil {
-		return *x.AdapterHint
+func (x *ChannelStreamReceiveRequest) GetChannelHint() string {
+	if x != nil && x.ChannelHint != nil {
+		return *x.ChannelHint
 	}
 	return ""
 }
 
-func (x *ChannelReceiveRequest) GetWorkspace() string {
+func (x *ChannelStreamReceiveRequest) GetWorkspace() string {
 	if x != nil {
 		return x.Workspace
 	}
 	return ""
 }
 
-func (x *ChannelReceiveRequest) GetSender() string {
+func (x *ChannelStreamReceiveRequest) GetSender() string {
 	if x != nil {
 		return x.Sender
 	}
@@ -3820,7 +3819,7 @@ type SendServerNotificationRequest struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
 	Method     string                 `protobuf:"bytes,2,opt,name=method,proto3" json:"method,omitempty"`
 	ParamsJson string                 `protobuf:"bytes,3,opt,name=params_json,json=paramsJson,proto3" json:"params_json,omitempty"`
-	// The workspace to fan out to. All channels for this workspace that
+	// The workspace to fan out to. All channel streams for this workspace that
 	// support the method receive the notification.
 	Workspace     string `protobuf:"bytes,4,opt,name=workspace,proto3" json:"workspace,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -3880,9 +3879,8 @@ func (x *SendServerNotificationRequest) GetWorkspace() string {
 
 type SendServerNotificationResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Best-effort: true if the frame was enqueued for delivery on the
-	// channel's mpsc. False on unknown channel or unsupported method (the
-	// client did not advertise the method in supported_methods).
+	// Best-effort: true if any channel stream in the workspace that advertises
+	// the method enqueued it.
 	Delivered     bool `protobuf:"varint,1,opt,name=delivered,proto3" json:"delivered,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3936,7 +3934,7 @@ type SendServerRequestAndAwaitRequest struct {
 	// range. Zero falls back to a server default.
 	TimeoutSeconds uint32 `protobuf:"varint,5,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
 	// The workspace to fan out to. The first ClientResponse from any
-	// channel wins; subsequent responses are dropped by request_id.
+	// channel stream wins; subsequent responses are dropped by request_id.
 	Workspace     string `protobuf:"bytes,6,opt,name=workspace,proto3" json:"workspace,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -4009,15 +4007,15 @@ func (x *SendServerRequestAndAwaitRequest) GetWorkspace() string {
 
 type SendServerRequestAndAwaitResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Exactly one of result_json / error / timed_out / unknown_channel /
+	// Exactly one of result_json / error / timed_out / unknown_channel_stream /
 	// unsupported_method MUST be set on success-shaped outcomes.
-	ResultJson        string               `protobuf:"bytes,1,opt,name=result_json,json=resultJson,proto3" json:"result_json,omitempty"`
-	Error             *ClientResponseError `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
-	TimedOut          bool                 `protobuf:"varint,3,opt,name=timed_out,json=timedOut,proto3" json:"timed_out,omitempty"`
-	UnknownChannel    bool                 `protobuf:"varint,4,opt,name=unknown_channel,json=unknownChannel,proto3" json:"unknown_channel,omitempty"`
-	UnsupportedMethod bool                 `protobuf:"varint,5,opt,name=unsupported_method,json=unsupportedMethod,proto3" json:"unsupported_method,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	ResultJson           string               `protobuf:"bytes,1,opt,name=result_json,json=resultJson,proto3" json:"result_json,omitempty"`
+	Error                *ClientResponseError `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	TimedOut             bool                 `protobuf:"varint,3,opt,name=timed_out,json=timedOut,proto3" json:"timed_out,omitempty"`
+	UnknownChannelStream bool                 `protobuf:"varint,4,opt,name=unknown_channel_stream,json=unknownChannelStream,proto3" json:"unknown_channel_stream,omitempty"`
+	UnsupportedMethod    bool                 `protobuf:"varint,5,opt,name=unsupported_method,json=unsupportedMethod,proto3" json:"unsupported_method,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *SendServerRequestAndAwaitResponse) Reset() {
@@ -4071,9 +4069,9 @@ func (x *SendServerRequestAndAwaitResponse) GetTimedOut() bool {
 	return false
 }
 
-func (x *SendServerRequestAndAwaitResponse) GetUnknownChannel() bool {
+func (x *SendServerRequestAndAwaitResponse) GetUnknownChannelStream() bool {
 	if x != nil {
-		return x.UnknownChannel
+		return x.UnknownChannelStream
 	}
 	return false
 }
@@ -4163,14 +4161,12 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\atoolset\x18\x01 \x01(\tR\atoolset\x12\x16\n" +
 	"\x06grants\x18\x02 \x03(\tR\x06grants\"T\n" +
 	"\x12ListGrantsResponse\x12>\n" +
-	"\btoolsets\x18\x01 \x03(\v2\".sycophant.common.v1.ToolsetGrantsR\btoolsets\"+\n" +
-	"\n" +
-	"ChannelAck\x12\x1d\n" +
-	"\n" +
-	"channel_id\x18\x01 \x01(\tR\tchannelId\"\xf6\x03\n" +
-	"\x0fChannelOutbound\x123\n" +
-	"\x03ack\x18\x01 \x01(\v2\x1f.sycophant.common.v1.ChannelAckH\x00R\x03ack\x12E\n" +
-	"\fsend_message\x18\x02 \x01(\v2 .sycophant.common.v1.ChannelSendH\x00R\vsendMessage\x12D\n" +
+	"\btoolsets\x18\x01 \x03(\v2\".sycophant.common.v1.ToolsetGrantsR\btoolsets\">\n" +
+	"\x10ChannelStreamAck\x12*\n" +
+	"\x11channel_stream_id\x18\x01 \x01(\tR\x0fchannelStreamId\"\x88\x04\n" +
+	"\x15ChannelStreamOutbound\x129\n" +
+	"\x03ack\x18\x01 \x01(\v2%.sycophant.common.v1.ChannelStreamAckH\x00R\x03ack\x12K\n" +
+	"\fsend_message\x18\x02 \x01(\v2&.sycophant.common.v1.ChannelStreamSendH\x00R\vsendMessage\x12D\n" +
 	"\n" +
 	"turn_state\x18\x03 \x01(\v2#.sycophant.common.v1.TurnStateEventH\x00R\tturnState\x12K\n" +
 	"\x0eserver_request\x18\x04 \x01(\v2\".sycophant.common.v1.ServerRequestH\x00R\rserverRequest\x12B\n" +
@@ -4206,8 +4202,8 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\x0ftool_input_json\x18\x02 \x01(\tH\x00R\rtoolInputJsonB\x06\n" +
 	"\x04kind\"\n" +
 	"\n" +
-	"\bItemStop\"s\n" +
-	"\vChannelSend\x12;\n" +
+	"\bItemStop\"y\n" +
+	"\x11ChannelStreamSend\x12;\n" +
 	"\acontent\x18\x01 \x03(\v2!.sycophant.common.v1.ContentBlockR\acontent\x12'\n" +
 	"\x0fconversation_id\x18\x02 \x01(\tR\x0econversationId\"\xec\x01\n" +
 	"\x0eTurnStateEvent\x124\n" +
@@ -4217,14 +4213,14 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\x04code\x18\x04 \x01(\tR\x04code\x12\x1d\n" +
 	"\n" +
 	"agent_name\x18\x05 \x01(\tR\tagentName\x120\n" +
-	"\x14system_prompt_sha256\x18\x06 \x01(\tR\x12systemPromptSha256\"\x84\x02\n" +
+	"\x14system_prompt_sha256\x18\x06 \x01(\tR\x12systemPromptSha256\"\x98\x02\n" +
 	"\vUserMessage\x12;\n" +
 	"\acontent\x18\x01 \x03(\v2!.sycophant.common.v1.ContentBlockR\acontent\x12\x16\n" +
-	"\x06sender\x18\x02 \x01(\tR\x06sender\x12(\n" +
-	"\rreply_channel\x18\x03 \x01(\tH\x00R\freplyChannel\x88\x01\x01\x12'\n" +
+	"\x06sender\x18\x02 \x01(\tR\x06sender\x125\n" +
+	"\x14reply_channel_stream\x18\x03 \x01(\tH\x00R\x12replyChannelStream\x88\x01\x01\x12'\n" +
 	"\x0fconversation_id\x18\x04 \x01(\tR\x0econversationId\x12;\n" +
-	"\x06grants\x18\x05 \x03(\v2#.sycophant.common.v1.GrantSelectionR\x06grantsB\x10\n" +
-	"\x0e_reply_channel\"@\n" +
+	"\x06grants\x18\x05 \x03(\v2#.sycophant.common.v1.GrantSelectionR\x06grantsB\x17\n" +
+	"\x15_reply_channel_stream\"@\n" +
 	"\x0eGrantSelection\x12\x18\n" +
 	"\atoolset\x18\x01 \x01(\tR\atoolset\x12\x14\n" +
 	"\x05grant\x18\x02 \x01(\tR\x05grant\"\xa1\x01\n" +
@@ -4288,23 +4284,21 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\x11CancelToolRequest\x12\x17\n" +
 	"\acall_id\x18\x01 \x01(\tR\x06callId\"2\n" +
 	"\x12CancelToolResponse\x12\x1c\n" +
-	"\tcancelled\x18\x01 \x01(\bR\tcancelled\"\x9e\x02\n" +
-	"\x14ChannelIngestRequest\x12\x1d\n" +
-	"\n" +
-	"channel_id\x18\x01 \x01(\tR\tchannelId\x12C\n" +
+	"\tcancelled\x18\x01 \x01(\bR\tcancelled\"\xb1\x02\n" +
+	"\x1aChannelStreamIngestRequest\x12*\n" +
+	"\x11channel_stream_id\x18\x01 \x01(\tR\x0fchannelStreamId\x12C\n" +
 	"\fuser_message\x18\x02 \x01(\v2 .sycophant.common.v1.UserMessageR\vuserMessage\x12L\n" +
 	"\x0fclient_response\x18\x03 \x01(\v2#.sycophant.common.v1.ClientResponseR\x0eclientResponse\x12+\n" +
 	"\x11supported_methods\x18\x04 \x03(\tR\x10supportedMethods\x12'\n" +
-	"\x0fconversation_id\x18\x05 \x01(\tR\x0econversationId\"Z\n" +
-	"\x10ChannelIngestAck\x12\x1d\n" +
-	"\n" +
-	"channel_id\x18\x01 \x01(\tR\tchannelId\x12'\n" +
-	"\x0fconversation_id\x18\x02 \x01(\tR\x0econversationId\"\x9e\x01\n" +
-	"\x15ChannelReceiveRequest\x12&\n" +
-	"\fadapter_hint\x18\x01 \x01(\tH\x00R\vadapterHint\x88\x01\x01\x12\x1c\n" +
+	"\x0fconversation_id\x18\x05 \x01(\tR\x0econversationId\"m\n" +
+	"\x16ChannelStreamIngestAck\x12*\n" +
+	"\x11channel_stream_id\x18\x01 \x01(\tR\x0fchannelStreamId\x12'\n" +
+	"\x0fconversation_id\x18\x02 \x01(\tR\x0econversationId\"\xa4\x01\n" +
+	"\x1bChannelStreamReceiveRequest\x12&\n" +
+	"\fchannel_hint\x18\x01 \x01(\tH\x00R\vchannelHint\x88\x01\x01\x12\x1c\n" +
 	"\tworkspace\x18\x02 \x01(\tR\tworkspace\x12\x16\n" +
 	"\x06sender\x18\x03 \x01(\tR\x06senderB\x0f\n" +
-	"\r_adapter_hintJ\x04\b\x04\x10\x05R\x10resume_after_seq\"\x12\n" +
+	"\r_channel_hintJ\x04\b\x04\x10\x05R\x10resume_after_seq\"\x12\n" +
 	"\x10SubscribeRequest\"g\n" +
 	"\rServerRequest\x12\x1d\n" +
 	"\n" +
@@ -4320,15 +4314,14 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\x05error\x18\x03 \x01(\v2(.sycophant.common.v1.ClientResponseErrorR\x05error\"C\n" +
 	"\x13ClientResponseError\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\x05R\x04code\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"\x9d\x01\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"\x91\x01\n" +
 	"\x1dSendServerNotificationRequest\x12\x16\n" +
 	"\x06method\x18\x02 \x01(\tR\x06method\x12\x1f\n" +
 	"\vparams_json\x18\x03 \x01(\tR\n" +
 	"paramsJson\x12\x1c\n" +
-	"\tworkspace\x18\x04 \x01(\tR\tworkspaceJ\x04\b\x01\x10\x02J\x04\b\x05\x10\x06R\n" +
-	"channel_idR\rworkspace_seq\">\n" +
+	"\tworkspace\x18\x04 \x01(\tR\tworkspaceJ\x04\b\x01\x10\x02J\x04\b\x05\x10\x06R\rworkspace_seq\">\n" +
 	"\x1eSendServerNotificationResponse\x12\x1c\n" +
-	"\tdelivered\x18\x01 \x01(\bR\tdelivered\"\xe8\x01\n" +
+	"\tdelivered\x18\x01 \x01(\bR\tdelivered\"\xdc\x01\n" +
 	" SendServerRequestAndAwaitRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x02 \x01(\tR\trequestId\x12\x16\n" +
@@ -4336,14 +4329,13 @@ const file_sycophant_common_v1_common_proto_rawDesc = "" +
 	"\vparams_json\x18\x04 \x01(\tR\n" +
 	"paramsJson\x12'\n" +
 	"\x0ftimeout_seconds\x18\x05 \x01(\rR\x0etimeoutSeconds\x12\x1c\n" +
-	"\tworkspace\x18\x06 \x01(\tR\tworkspaceJ\x04\b\x01\x10\x02J\x04\b\a\x10\bR\n" +
-	"channel_idR\rworkspace_seq\"\xf9\x01\n" +
+	"\tworkspace\x18\x06 \x01(\tR\tworkspaceJ\x04\b\x01\x10\x02J\x04\b\a\x10\bR\rworkspace_seq\"\x86\x02\n" +
 	"!SendServerRequestAndAwaitResponse\x12\x1f\n" +
 	"\vresult_json\x18\x01 \x01(\tR\n" +
 	"resultJson\x12>\n" +
 	"\x05error\x18\x02 \x01(\v2(.sycophant.common.v1.ClientResponseErrorR\x05error\x12\x1b\n" +
-	"\ttimed_out\x18\x03 \x01(\bR\btimedOut\x12'\n" +
-	"\x0funknown_channel\x18\x04 \x01(\bR\x0eunknownChannel\x12-\n" +
+	"\ttimed_out\x18\x03 \x01(\bR\btimedOut\x124\n" +
+	"\x16unknown_channel_stream\x18\x04 \x01(\bR\x14unknownChannelStream\x12-\n" +
 	"\x12unsupported_method\x18\x05 \x01(\bR\x11unsupportedMethod*U\n" +
 	"\n" +
 	"StopReason\x12\x1b\n" +
@@ -4404,8 +4396,8 @@ var file_sycophant_common_v1_common_proto_goTypes = []any{
 	(*ListGrantsRequest)(nil),                 // 22: sycophant.common.v1.ListGrantsRequest
 	(*ToolsetGrants)(nil),                     // 23: sycophant.common.v1.ToolsetGrants
 	(*ListGrantsResponse)(nil),                // 24: sycophant.common.v1.ListGrantsResponse
-	(*ChannelAck)(nil),                        // 25: sycophant.common.v1.ChannelAck
-	(*ChannelOutbound)(nil),                   // 26: sycophant.common.v1.ChannelOutbound
+	(*ChannelStreamAck)(nil),                  // 25: sycophant.common.v1.ChannelStreamAck
+	(*ChannelStreamOutbound)(nil),             // 26: sycophant.common.v1.ChannelStreamOutbound
 	(*Heartbeat)(nil),                         // 27: sycophant.common.v1.Heartbeat
 	(*StreamItem)(nil),                        // 28: sycophant.common.v1.StreamItem
 	(*ItemStart)(nil),                         // 29: sycophant.common.v1.ItemStart
@@ -4413,7 +4405,7 @@ var file_sycophant_common_v1_common_proto_goTypes = []any{
 	(*ToolUseItem)(nil),                       // 31: sycophant.common.v1.ToolUseItem
 	(*ItemDelta)(nil),                         // 32: sycophant.common.v1.ItemDelta
 	(*ItemStop)(nil),                          // 33: sycophant.common.v1.ItemStop
-	(*ChannelSend)(nil),                       // 34: sycophant.common.v1.ChannelSend
+	(*ChannelStreamSend)(nil),                 // 34: sycophant.common.v1.ChannelStreamSend
 	(*TurnStateEvent)(nil),                    // 35: sycophant.common.v1.TurnStateEvent
 	(*UserMessage)(nil),                       // 36: sycophant.common.v1.UserMessage
 	(*GrantSelection)(nil),                    // 37: sycophant.common.v1.GrantSelection
@@ -4434,9 +4426,9 @@ var file_sycophant_common_v1_common_proto_goTypes = []any{
 	(*AwaitToolResultRequest)(nil),            // 52: sycophant.common.v1.AwaitToolResultRequest
 	(*CancelToolRequest)(nil),                 // 53: sycophant.common.v1.CancelToolRequest
 	(*CancelToolResponse)(nil),                // 54: sycophant.common.v1.CancelToolResponse
-	(*ChannelIngestRequest)(nil),              // 55: sycophant.common.v1.ChannelIngestRequest
-	(*ChannelIngestAck)(nil),                  // 56: sycophant.common.v1.ChannelIngestAck
-	(*ChannelReceiveRequest)(nil),             // 57: sycophant.common.v1.ChannelReceiveRequest
+	(*ChannelStreamIngestRequest)(nil),        // 55: sycophant.common.v1.ChannelStreamIngestRequest
+	(*ChannelStreamIngestAck)(nil),            // 56: sycophant.common.v1.ChannelStreamIngestAck
+	(*ChannelStreamReceiveRequest)(nil),       // 57: sycophant.common.v1.ChannelStreamReceiveRequest
 	(*SubscribeRequest)(nil),                  // 58: sycophant.common.v1.SubscribeRequest
 	(*ServerRequest)(nil),                     // 59: sycophant.common.v1.ServerRequest
 	(*ClientResponse)(nil),                    // 60: sycophant.common.v1.ClientResponse
@@ -4455,18 +4447,18 @@ var file_sycophant_common_v1_common_proto_depIdxs = []int32{
 	9,  // 5: sycophant.common.v1.Message.tool_calls:type_name -> sycophant.common.v1.ToolCall
 	15, // 6: sycophant.common.v1.ListConversationsResponse.conversations:type_name -> sycophant.common.v1.ConversationSummary
 	23, // 7: sycophant.common.v1.ListGrantsResponse.toolsets:type_name -> sycophant.common.v1.ToolsetGrants
-	25, // 8: sycophant.common.v1.ChannelOutbound.ack:type_name -> sycophant.common.v1.ChannelAck
-	34, // 9: sycophant.common.v1.ChannelOutbound.send_message:type_name -> sycophant.common.v1.ChannelSend
-	35, // 10: sycophant.common.v1.ChannelOutbound.turn_state:type_name -> sycophant.common.v1.TurnStateEvent
-	59, // 11: sycophant.common.v1.ChannelOutbound.server_request:type_name -> sycophant.common.v1.ServerRequest
-	28, // 12: sycophant.common.v1.ChannelOutbound.stream_item:type_name -> sycophant.common.v1.StreamItem
-	27, // 13: sycophant.common.v1.ChannelOutbound.heartbeat:type_name -> sycophant.common.v1.Heartbeat
+	25, // 8: sycophant.common.v1.ChannelStreamOutbound.ack:type_name -> sycophant.common.v1.ChannelStreamAck
+	34, // 9: sycophant.common.v1.ChannelStreamOutbound.send_message:type_name -> sycophant.common.v1.ChannelStreamSend
+	35, // 10: sycophant.common.v1.ChannelStreamOutbound.turn_state:type_name -> sycophant.common.v1.TurnStateEvent
+	59, // 11: sycophant.common.v1.ChannelStreamOutbound.server_request:type_name -> sycophant.common.v1.ServerRequest
+	28, // 12: sycophant.common.v1.ChannelStreamOutbound.stream_item:type_name -> sycophant.common.v1.StreamItem
+	27, // 13: sycophant.common.v1.ChannelStreamOutbound.heartbeat:type_name -> sycophant.common.v1.Heartbeat
 	29, // 14: sycophant.common.v1.StreamItem.start:type_name -> sycophant.common.v1.ItemStart
 	32, // 15: sycophant.common.v1.StreamItem.delta:type_name -> sycophant.common.v1.ItemDelta
 	33, // 16: sycophant.common.v1.StreamItem.stop:type_name -> sycophant.common.v1.ItemStop
 	30, // 17: sycophant.common.v1.ItemStart.text:type_name -> sycophant.common.v1.TextItem
 	31, // 18: sycophant.common.v1.ItemStart.tool_use:type_name -> sycophant.common.v1.ToolUseItem
-	3,  // 19: sycophant.common.v1.ChannelSend.content:type_name -> sycophant.common.v1.ContentBlock
+	3,  // 19: sycophant.common.v1.ChannelStreamSend.content:type_name -> sycophant.common.v1.ContentBlock
 	1,  // 20: sycophant.common.v1.TurnStateEvent.state:type_name -> sycophant.common.v1.TurnState
 	3,  // 21: sycophant.common.v1.UserMessage.content:type_name -> sycophant.common.v1.ContentBlock
 	37, // 22: sycophant.common.v1.UserMessage.grants:type_name -> sycophant.common.v1.GrantSelection
@@ -4477,8 +4469,8 @@ var file_sycophant_common_v1_common_proto_depIdxs = []int32{
 	6,  // 27: sycophant.common.v1.ToolResultFrame.image:type_name -> sycophant.common.v1.ImageBlock
 	50, // 28: sycophant.common.v1.ToolResultFrame.complete:type_name -> sycophant.common.v1.ToolComplete
 	2,  // 29: sycophant.common.v1.ToolComplete.outcome:type_name -> sycophant.common.v1.ToolOutcome
-	36, // 30: sycophant.common.v1.ChannelIngestRequest.user_message:type_name -> sycophant.common.v1.UserMessage
-	60, // 31: sycophant.common.v1.ChannelIngestRequest.client_response:type_name -> sycophant.common.v1.ClientResponse
+	36, // 30: sycophant.common.v1.ChannelStreamIngestRequest.user_message:type_name -> sycophant.common.v1.UserMessage
+	60, // 31: sycophant.common.v1.ChannelStreamIngestRequest.client_response:type_name -> sycophant.common.v1.ClientResponse
 	61, // 32: sycophant.common.v1.ClientResponse.error:type_name -> sycophant.common.v1.ClientResponseError
 	61, // 33: sycophant.common.v1.SendServerRequestAndAwaitResponse.error:type_name -> sycophant.common.v1.ClientResponseError
 	34, // [34:34] is the sub-list for method output_type
@@ -4501,12 +4493,12 @@ func file_sycophant_common_v1_common_proto_init() {
 	}
 	file_sycophant_common_v1_common_proto_msgTypes[7].OneofWrappers = []any{}
 	file_sycophant_common_v1_common_proto_msgTypes[23].OneofWrappers = []any{
-		(*ChannelOutbound_Ack)(nil),
-		(*ChannelOutbound_SendMessage)(nil),
-		(*ChannelOutbound_TurnState)(nil),
-		(*ChannelOutbound_ServerRequest)(nil),
-		(*ChannelOutbound_StreamItem)(nil),
-		(*ChannelOutbound_Heartbeat)(nil),
+		(*ChannelStreamOutbound_Ack)(nil),
+		(*ChannelStreamOutbound_SendMessage)(nil),
+		(*ChannelStreamOutbound_TurnState)(nil),
+		(*ChannelStreamOutbound_ServerRequest)(nil),
+		(*ChannelStreamOutbound_StreamItem)(nil),
+		(*ChannelStreamOutbound_Heartbeat)(nil),
 	}
 	file_sycophant_common_v1_common_proto_msgTypes[25].OneofWrappers = []any{
 		(*StreamItem_Start)(nil),

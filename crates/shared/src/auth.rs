@@ -184,7 +184,7 @@ impl tonic::service::Interceptor for SaTokenInterceptor {
 /// On-disk mount path for the harness's relay-audience SA token.
 /// The chart's harness Deployment mounts the `harness-relay-auth`
 /// projected volume here. Used by the harness to dial the gateway's
-/// internal listener (Subscribe + the channel server-request methods).
+/// internal listener (Subscribe + the channel-stream server-request methods).
 pub const HARNESS_RELAY_TOKEN_PATH: &str = "/var/run/secrets/harness/relay/token";
 
 /// On-disk mount path for the relay-controller's harness-audience
@@ -193,9 +193,9 @@ pub const HARNESS_RELAY_TOKEN_PATH: &str = "/var/run/secrets/harness/relay/token
 /// when forwarding external `CallTool`/`WatchTools` calls.
 pub const RELAY_HARNESS_TOKEN_PATH: &str = "/var/run/secrets/relay/harness/token";
 
-/// Audience a channel adapter's SA token is minted for and the relay pins on
+/// Audience a channel's SA token is minted for and the relay pins on
 /// TokenReview, per the `<sender>.<recipient>.sycophant.md` convention.
-pub const ADAPTER_RELAY_AUDIENCE: &str = "adapter.relay.sycophant.md";
+pub const CHANNEL_RELAY_AUDIENCE: &str = "channel.relay.sycophant.md";
 
 /// Build the SubjectAccessReview checking `subject` for `get` on the named
 /// workspace's harness Service in the relay's own namespace. The namespace is
@@ -467,7 +467,7 @@ mod tests {
             TOOL_TOOLSET_AUDIENCE,
             RELAY_HARNESS_AUDIENCE,
             HARNESS_RELAY_AUDIENCE,
-            ADAPTER_RELAY_AUDIENCE,
+            CHANNEL_RELAY_AUDIENCE,
         ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {

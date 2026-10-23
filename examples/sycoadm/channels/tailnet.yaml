@@ -1,0 +1,10 @@
+# The tailnet channel joins the tenant's headscale tailnet at the Service DNS
+# name. `sycoadm channel up` mints its pre-auth key once headscale is
+# Available.
+#
+# Headscale itself is installed by the tenant chart — see
+# examples/sycoadm/tenants/hello-world.yaml for the headscale settings.
+channel:
+  name: tailnet
+  tenant: hello-world
+  loginServer: http://headscale:8080

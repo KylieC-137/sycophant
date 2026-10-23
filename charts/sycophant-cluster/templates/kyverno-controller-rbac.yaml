@@ -41,16 +41,15 @@ rules:
       - "secrets"
     verbs: ["create", "update", "patch", "delete"]
 
-  # Mirrors provision-write's two readable Secrets (relay-controller device
-  # public keys and the app adapter's tailnet node state) and its events
-  # rule. Kyverno binds provision-write via the generated provision-tenant
-  # RoleBinding, so anti-escalation requires it to hold these too: the
-  # generated bind is rejected for any pinned `get` name the mirror omits,
-  # so this list must match provision-write's pinned names exactly.
+  # Mirrors provision-write's pinned Secret `get` and its events rule. Kyverno
+  # binds provision-write via the generated provision-tenant RoleBinding, so
+  # anti-escalation requires it to hold these too: the generated bind is
+  # rejected for any pinned `get` name the mirror omits, so this list must
+  # match provision-write's pinned names exactly.
   - apiGroups: [""]
     resources:
       - "secrets"
-    resourceNames: ["adapter-state"]
+    resourceNames: ["tailnet-identity"]
     verbs: ["get"]
   - apiGroups: ["events.k8s.io"]
     resources: ["events"]

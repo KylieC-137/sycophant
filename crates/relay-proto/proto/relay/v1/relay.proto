@@ -8,7 +8,7 @@ import "sycophant/common/v1/common.proto";
 // --- External client-facing gateway ---
 //
 // The external ingress surface for person tokens (app and terminal-client
-// paths) and channel-adapter SA tokens. Every RPC here is reachable only
+// paths) and channel ServiceAccount tokens. Every RPC here is reachable only
 // through the listeners that demand the matching credential class.
 
 service RelayGateway {
@@ -22,8 +22,8 @@ service RelayGateway {
   rpc GetConversationHistory (sycophant.common.v1.GetConversationHistoryRequest) returns (sycophant.common.v1.GetConversationHistoryResponse);
   rpc GetTurnState (sycophant.common.v1.GetTurnStateRequest) returns (sycophant.common.v1.TurnStateEvent);
   rpc CancelTurn (sycophant.common.v1.CancelTurnRequest) returns (sycophant.common.v1.CancelTurnResponse);
-  rpc ChannelIngest (sycophant.common.v1.ChannelIngestRequest) returns (sycophant.common.v1.ChannelIngestAck);
-  rpc ChannelReceive (sycophant.common.v1.ChannelReceiveRequest) returns (stream sycophant.common.v1.ChannelOutbound);
+  rpc ChannelStreamIngest (sycophant.common.v1.ChannelStreamIngestRequest) returns (sycophant.common.v1.ChannelStreamIngestAck);
+  rpc ChannelStreamReceive (sycophant.common.v1.ChannelStreamReceiveRequest) returns (stream sycophant.common.v1.ChannelStreamOutbound);
   rpc WatchTools (sycophant.common.v1.WatchToolsRequest) returns (stream sycophant.common.v1.ToolListUpdate);
 
   // --- Client-driven tool-call lifecycle (dispatch / await / cancel) ---
@@ -52,12 +52,12 @@ service RelayInternal {
   rpc DeliverTurnState (DeliverTurnStateRequest) returns (DeliverTurnStateResponse);
   // Harness pushes one streamed activity frame produced during a turn.
   // Unary-per-frame; the gateway wraps the StreamItem verbatim into a
-  // ChannelOutbound and relays it unchanged (no payload inspection).
+  // ChannelStreamOutbound and relays it unchanged (no payload inspection).
   rpc DeliverStreamItem (DeliverStreamItemRequest) returns (DeliverStreamItemResponse);
 }
 
 message DeliverStreamItemRequest {
-  string channel_id = 1;
+  string channel_stream_id = 1;
   sycophant.common.v1.StreamItem item = 2;
   reserved 3;
   reserved "workspace_seq";
@@ -67,7 +67,7 @@ message DeliverStreamItemResponse {
   bool delivered = 1;
 }
 
-// The harness pushes the assistant reply (ChannelSend) as a separate
+// The harness pushes the assistant reply (ChannelStreamSend) as a separate
 // frame from the terminal turn-state.
 message DeliverReplyRequest {
   string conversation_id = 1;
@@ -81,14 +81,14 @@ message DeliverReplyResponse {
 }
 
 // The harness pushes a turn-state event. Carries the subject directly
-// so the relay can record turn state without a per-channel lookup.
+// so the relay can record turn state without a per-channel-stream lookup.
 message DeliverTurnStateRequest {
-  string channel_id = 1;
+  string channel_stream_id = 1;
   sycophant.common.v1.TurnStateEvent turn_state = 2;
   reserved 3;
   reserved "workspace_seq";
   // The subject that owns this turn state. The relay uses this to
-  // record the turn state keyed by subject, not channel.
+  // record the turn state keyed by subject, not channel stream.
   string subject = 4;
 }
 
@@ -98,14 +98,14 @@ message DeliverTurnStateResponse {
 
 // Kept for backward compatibility — no longer used by the harness.
 message DeliverOutboundRequest {
-  string channel_id = 1;
+  string channel_stream_id = 1;
   string conversation_id = 2;
   // present => enqueue reply BEFORE turn_state
-  optional ChannelReply reply = 3;
+  optional ChannelStreamReply reply = 3;
   sycophant.common.v1.TurnStateEvent turn_state = 4;
 }
 
-message ChannelReply {
+message ChannelStreamReply {
   repeated sycophant.common.v1.ContentBlock content = 1;
 }
 

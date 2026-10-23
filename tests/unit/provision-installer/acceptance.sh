@@ -368,11 +368,11 @@ def write_scope():
         return f"provision-write can read any Secret: {sorted(uverbs & reads)}"
     for r in rules:
         if r.get("resourceNames") and set(r.get("verbs", [])) & reads:
-            if sorted(r["resourceNames"]) != ["adapter-state"] or set(r["verbs"]) - {"get"}:
-                return f"scoped Secret read must be get on adapter-state only: {r}"
+            if sorted(r["resourceNames"]) != ["tailnet-identity"] or set(r["verbs"]) - {"get"}:
+                return f"scoped Secret read must be get on tailnet-identity only: {r}"
     admission = [r for r in role.get("rules") or [] if {"admissionregistration.k8s.io", "*"} & set(r.get("apiGroups") or [])]
     return admission and f"provision-write must not reach the admission rules (cluster-gvisor-pod-policy): {admission}"
-check("provision-write is write-only on Secrets except the pinned adapter-state read, and reaches no admission rule", write_scope())
+check("provision-write is write-only on Secrets except the pinned tailnet-identity read, and reaches no admission rule", write_scope())
 
 def generate_set():
     pol = [b for b in blocks if "kind: GeneratingPolicy" in b and "configmaps" in b and "kind: ResourceQuota" in b]

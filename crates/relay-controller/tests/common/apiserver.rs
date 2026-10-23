@@ -19,16 +19,16 @@ use tonic::{Request, Response};
 
 use relay_controller::listener::ListenerClass;
 use relay_controller::state::GatewayState;
-use shared::auth::ADAPTER_RELAY_AUDIENCE;
+use shared::auth::CHANNEL_RELAY_AUDIENCE;
 
 use super::{identity_cm, NAMESPACE};
 
 pub(crate) const ALICE: &str = "https://issuer.example#alice";
 pub(crate) const BOB: &str = "https://issuer.example#bob";
-pub(crate) const ADAPTER_SLACK: &str = "system:serviceaccount:tenant-acme:adapter-slack";
+pub(crate) const CHANNEL_SLACK: &str = "system:serviceaccount:tenant-acme:ch-slack";
 pub(crate) const ALICE_TOKEN: &str = "alice-person-token";
 pub(crate) const BOB_TOKEN: &str = "bob-person-token";
-pub(crate) const ADAPTER_TOKEN: &str = "slack-adapter-sa-token";
+pub(crate) const CHANNEL_TOKEN: &str = "slack-channel-sa-token";
 
 /// One allowed-review decision: access reviews naming `name` (and, when
 /// `user` is set, carrying that user) answer allowed; everything else answers
@@ -52,12 +52,12 @@ impl Decision {
 }
 
 /// Whether the apiserver authenticates `username`'s token for the requested
-/// `audiences`. A ServiceAccount token is bound to the adapter audience, so
+/// `audiences`. A ServiceAccount token is bound to the channel audience, so
 /// it authenticates only when the review asks for that audience; a person
 /// token only when the review asks for none.
 fn audience_accepts(username: &str, audiences: &[&str]) -> bool {
     if username.starts_with("system:serviceaccount:") {
-        audiences.contains(&ADAPTER_RELAY_AUDIENCE)
+        audiences.contains(&CHANNEL_RELAY_AUDIENCE)
     } else {
         audiences.is_empty()
     }
@@ -249,7 +249,7 @@ pub(crate) fn bearer<T>(token: &str, message: T) -> Request<T> {
 }
 
 /// The class the per-listener layer stamps in production: person requests
-/// arrive on 9091, adapter requests on 9092.
+/// arrive on 9091, channel requests on 9092.
 pub(crate) fn bearer_classed<T>(token: &str, class: ListenerClass, message: T) -> Request<T> {
     let mut req = bearer_unclassed(token, message);
     req.extensions_mut().insert(class);

@@ -1,7 +1,0 @@
-# toolset.image is pushed to the in-cluster registry automatically by
-# `sycoadm toolset up`; the tools label is read from the image.
-toolset:
-  name: stdlib
-  tenant: e2e-test
-  image: toolset:local
-  keepalive: true

@@ -15,8 +15,8 @@ const DEFAULT_INTERNAL_GRPC_PORT: u16 = 9090;
 /// App/terminal-client listener: person tokens, authenticated by
 /// TokenReview and authorized per request by SubjectAccessReview.
 const DEFAULT_PERSON_GRPC_PORT: u16 = 9091;
-/// Adapter listener: `adapter-<channel>` ServiceAccount tokens only.
-const DEFAULT_ADAPTER_GRPC_PORT: u16 = 9092;
+/// Channel listener: `ch-<channel>` ServiceAccount tokens only.
+const DEFAULT_CHANNEL_GRPC_PORT: u16 = 9092;
 
 /// One `tonic` server future, boxed so the listener table can hold the
 /// internal and per-class servers side by side.
@@ -44,8 +44,8 @@ fn listeners() -> Vec<(std::net::SocketAddr, ListenerAuth)> {
             ListenerAuth::Class(ListenerClass::PersonToken),
         ),
         (
-            DEFAULT_ADAPTER_GRPC_PORT,
-            ListenerAuth::Class(ListenerClass::AdapterToken),
+            DEFAULT_CHANNEL_GRPC_PORT,
+            ListenerAuth::Class(ListenerClass::ChannelToken),
         ),
     ]
     .into_iter()
@@ -204,39 +204,39 @@ mod tests {
     use super::*;
 
     // `main` builds its servers by walking `listeners()`, wrapping the
-    // person and adapter entries in their per-class layer and leaving the
+    // person and channel entries in their per-class layer and leaving the
     // `Harness` entry bare. The tests below constrain that table rather
     // than describing it.
 
     #[test]
-    fn adapter_port_is_9092() {
-        assert_eq!(DEFAULT_ADAPTER_GRPC_PORT, 9092);
+    fn channel_port_is_9092() {
+        assert_eq!(DEFAULT_CHANNEL_GRPC_PORT, 9092);
     }
 
-    // Drop the adapter entry from the table and the count is two; give it 9091
+    // Drop the channel entry from the table and the count is two; give it 9091
     // or 9090 and the distinctness assertion reds. The relay would then have no
-    // adapter port at all while every other test in the suite stayed green.
+    // channel port at all while every other test in the suite stayed green.
     #[test]
     fn three_listeners_are_served_on_three_distinct_sockets() {
         let table = listeners();
-        assert_eq!(table.len(), 3, "internal, person, and adapter");
+        assert_eq!(table.len(), 3, "internal, person, and channel");
         let mut ports: Vec<u16> = table.iter().map(|(a, _)| a.port()).collect();
         ports.sort_unstable();
         ports.dedup();
         assert_eq!(ports.len(), 3, "listener ports must be distinct");
         assert!(ports.contains(&DEFAULT_INTERNAL_GRPC_PORT));
         assert!(ports.contains(&DEFAULT_PERSON_GRPC_PORT));
-        assert!(ports.contains(&DEFAULT_ADAPTER_GRPC_PORT));
+        assert!(ports.contains(&DEFAULT_CHANNEL_GRPC_PORT));
     }
 
-    // The person and adapter ports bind off loopback and are admitted by the
+    // The person and channel ports bind off loopback and are admitted by the
     // relay's ingress CNP, not by the pod boundary.
     //
     // Leave `format!("127.0.0.1:{DEFAULT_PERSON_GRPC_PORT}")` in place and the
-    // app adapter, a separate Deployment, can never reach the relay. Nothing
+    // tailnet channel, a separate Deployment, can never reach the relay. Nothing
     // else in the Rust suite observes the bind address.
     #[test]
-    fn person_and_adapter_listeners_bind_in_cluster_addresses() {
+    fn person_and_channel_listeners_bind_in_cluster_addresses() {
         for (addr, _) in listeners() {
             assert!(
                 !addr.ip().is_loopback(),
@@ -254,8 +254,8 @@ mod tests {
             .collect()
     }
 
-    // The person socket carries the person-token class and the adapter socket
-    // the adapter-token class; neither is the internal harness socket, so no
+    // The person socket carries the person-token class and the channel socket
+    // the channel-token class; neither is the internal harness socket, so no
     // external listener accepts a harness credential.
     #[test]
     fn each_external_listener_carries_its_own_credential_class() {
@@ -265,8 +265,8 @@ mod tests {
             vec![DEFAULT_PERSON_GRPC_PORT]
         );
         assert_eq!(
-            ports_for(&table, ListenerAuth::Class(ListenerClass::AdapterToken)),
-            vec![DEFAULT_ADAPTER_GRPC_PORT]
+            ports_for(&table, ListenerAuth::Class(ListenerClass::ChannelToken)),
+            vec![DEFAULT_CHANNEL_GRPC_PORT]
         );
         assert_eq!(
             ports_for(&table, ListenerAuth::Harness),
@@ -300,7 +300,7 @@ mod tests {
     }
 
     // The external listeners carry the gateway only. Add `RelayInternalServer`
-    // to `external_routes` and a person or adapter token reaches the
+    // to `external_routes` and a person or channel token reaches the
     // harness-facing Subscribe surface from outside the cluster.
     #[tokio::test]
     async fn external_listeners_do_not_serve_relay_internal() {

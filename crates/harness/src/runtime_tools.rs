@@ -240,7 +240,7 @@ pub(crate) async fn dispatch(
     tool_router: &dyn ToolDispatcher,
     registry: &ConversationRegistry,
     parent_conversation_id: &str,
-    reply_channel: Option<&str>,
+    reply_channel_stream: Option<&str>,
     relay: Option<&mut dyn RelayRpc>,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<CallToolResponse, DispatchAbort> {
@@ -256,7 +256,7 @@ pub(crate) async fn dispatch(
                 tool_router,
                 registry,
                 parent_conversation_id,
-                reply_channel,
+                reply_channel_stream,
                 relay,
                 cancel,
             )
@@ -438,7 +438,7 @@ async fn dispatch_verb(
     tool_router: &dyn ToolDispatcher,
     registry: &ConversationRegistry,
     parent_conversation_id: &str,
-    reply_channel: Option<&str>,
+    reply_channel_stream: Option<&str>,
     relay: Option<&mut dyn RelayRpc>,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<CallToolResponse, DispatchAbort> {
@@ -527,14 +527,14 @@ async fn dispatch_verb(
         })?;
 
     // Sub-turn frames relay through a live GatewaySink when the turn has a reply
-    // channel; otherwise they drop.
+    // channel stream; otherwise they drop.
     let mut null_sink = turn::NullSink;
     let mut gateway_sink;
-    let sink: &mut dyn turn::StreamSink = match (reply_channel, relay) {
-        (Some(channel_id), Some(rpc)) => {
+    let sink: &mut dyn turn::StreamSink = match (reply_channel_stream, relay) {
+        (Some(channel_stream_id), Some(rpc)) => {
             gateway_sink = turn::GatewaySink {
                 rpc,
-                channel_id: channel_id.to_string(),
+                channel_stream_id: channel_stream_id.to_string(),
             };
             &mut gateway_sink
         }
@@ -555,7 +555,7 @@ async fn dispatch_verb(
             is_error: None,
         }],
         model,
-        reply_channel: None,
+        reply_channel_stream: None,
         role: Some(TurnRole::Delegate as i32),
         correlation_id: Some(parent_conversation_id.to_string()),
         conversation_id: child_conversation_id.clone(),
@@ -581,7 +581,7 @@ async fn dispatch_verb(
         attribution,
         initial_request,
         LoopMode {
-            reply_channel: None,
+            reply_channel_stream: None,
             idle_gap: turn::DEFAULT_IDLE_GAP,
             cancel: cancel.clone(),
             grants: HashMap::new(),
@@ -741,7 +741,7 @@ mod tests {
             _grants: &HashMap<String, String>,
             _toolset: &mut dyn ToolsetRpc,
             _conversation_id: &str,
-            _reply_channel: Option<&str>,
+            _reply_channel_stream: Option<&str>,
             _tool_call_id: &str,
             _cancel: &CancellationToken,
         ) -> Result<CallToolResponse, DispatchAbort> {
@@ -1137,12 +1137,12 @@ mod tests {
             !relay.stream_items.is_empty(),
             "sub-turn streamed frames must be delivered to the gateway, not dropped"
         );
-        let (channel, item) = relay
+        let (channel_stream, item) = relay
             .stream_items
             .iter()
             .find(|(_, i)| !i.parent_conversation_id.is_empty())
             .expect("a delivered sub-turn frame must carry the parent link");
-        assert_eq!(channel, "reply-chan");
+        assert_eq!(channel_stream, "reply-chan");
         assert_eq!(
             item.parent_conversation_id, "parent-conv",
             "the delivered frame links to the parent conversation"

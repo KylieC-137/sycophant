@@ -23,11 +23,11 @@ const (
 )
 
 type DeliverStreamItemRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ChannelId     string                 `protobuf:"bytes,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
-	Item          *v1.StreamItem         `protobuf:"bytes,2,opt,name=item,proto3" json:"item,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	ChannelStreamId string                 `protobuf:"bytes,1,opt,name=channel_stream_id,json=channelStreamId,proto3" json:"channel_stream_id,omitempty"`
+	Item            *v1.StreamItem         `protobuf:"bytes,2,opt,name=item,proto3" json:"item,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *DeliverStreamItemRequest) Reset() {
@@ -60,9 +60,9 @@ func (*DeliverStreamItemRequest) Descriptor() ([]byte, []int) {
 	return file_relay_v1_relay_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *DeliverStreamItemRequest) GetChannelId() string {
+func (x *DeliverStreamItemRequest) GetChannelStreamId() string {
 	if x != nil {
-		return x.ChannelId
+		return x.ChannelStreamId
 	}
 	return ""
 }
@@ -118,7 +118,7 @@ func (x *DeliverStreamItemResponse) GetDelivered() bool {
 	return false
 }
 
-// The harness pushes the assistant reply (ChannelSend) as a separate
+// The harness pushes the assistant reply (ChannelStreamSend) as a separate
 // frame from the terminal turn-state.
 type DeliverReplyRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
@@ -217,13 +217,13 @@ func (x *DeliverReplyResponse) GetDelivered() bool {
 }
 
 // The harness pushes a turn-state event. Carries the subject directly
-// so the relay can record turn state without a per-channel lookup.
+// so the relay can record turn state without a per-channel-stream lookup.
 type DeliverTurnStateRequest struct {
-	state     protoimpl.MessageState `protogen:"open.v1"`
-	ChannelId string                 `protobuf:"bytes,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
-	TurnState *v1.TurnStateEvent     `protobuf:"bytes,2,opt,name=turn_state,json=turnState,proto3" json:"turn_state,omitempty"`
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	ChannelStreamId string                 `protobuf:"bytes,1,opt,name=channel_stream_id,json=channelStreamId,proto3" json:"channel_stream_id,omitempty"`
+	TurnState       *v1.TurnStateEvent     `protobuf:"bytes,2,opt,name=turn_state,json=turnState,proto3" json:"turn_state,omitempty"`
 	// The subject that owns this turn state. The relay uses this to
-	// record the turn state keyed by subject, not channel.
+	// record the turn state keyed by subject, not channel stream.
 	Subject       string `protobuf:"bytes,4,opt,name=subject,proto3" json:"subject,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -259,9 +259,9 @@ func (*DeliverTurnStateRequest) Descriptor() ([]byte, []int) {
 	return file_relay_v1_relay_proto_rawDescGZIP(), []int{4}
 }
 
-func (x *DeliverTurnStateRequest) GetChannelId() string {
+func (x *DeliverTurnStateRequest) GetChannelStreamId() string {
 	if x != nil {
-		return x.ChannelId
+		return x.ChannelStreamId
 	}
 	return ""
 }
@@ -326,12 +326,12 @@ func (x *DeliverTurnStateResponse) GetDelivered() bool {
 
 // Kept for backward compatibility — no longer used by the harness.
 type DeliverOutboundRequest struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	ChannelId      string                 `protobuf:"bytes,1,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
-	ConversationId string                 `protobuf:"bytes,2,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	ChannelStreamId string                 `protobuf:"bytes,1,opt,name=channel_stream_id,json=channelStreamId,proto3" json:"channel_stream_id,omitempty"`
+	ConversationId  string                 `protobuf:"bytes,2,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
 	// present => enqueue reply BEFORE turn_state
-	Reply         *ChannelReply      `protobuf:"bytes,3,opt,name=reply,proto3,oneof" json:"reply,omitempty"`
-	TurnState     *v1.TurnStateEvent `protobuf:"bytes,4,opt,name=turn_state,json=turnState,proto3" json:"turn_state,omitempty"`
+	Reply         *ChannelStreamReply `protobuf:"bytes,3,opt,name=reply,proto3,oneof" json:"reply,omitempty"`
+	TurnState     *v1.TurnStateEvent  `protobuf:"bytes,4,opt,name=turn_state,json=turnState,proto3" json:"turn_state,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -366,9 +366,9 @@ func (*DeliverOutboundRequest) Descriptor() ([]byte, []int) {
 	return file_relay_v1_relay_proto_rawDescGZIP(), []int{6}
 }
 
-func (x *DeliverOutboundRequest) GetChannelId() string {
+func (x *DeliverOutboundRequest) GetChannelStreamId() string {
 	if x != nil {
-		return x.ChannelId
+		return x.ChannelStreamId
 	}
 	return ""
 }
@@ -380,7 +380,7 @@ func (x *DeliverOutboundRequest) GetConversationId() string {
 	return ""
 }
 
-func (x *DeliverOutboundRequest) GetReply() *ChannelReply {
+func (x *DeliverOutboundRequest) GetReply() *ChannelStreamReply {
 	if x != nil {
 		return x.Reply
 	}
@@ -394,27 +394,27 @@ func (x *DeliverOutboundRequest) GetTurnState() *v1.TurnStateEvent {
 	return nil
 }
 
-type ChannelReply struct {
+type ChannelStreamReply struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Content       []*v1.ContentBlock     `protobuf:"bytes,1,rep,name=content,proto3" json:"content,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ChannelReply) Reset() {
-	*x = ChannelReply{}
+func (x *ChannelStreamReply) Reset() {
+	*x = ChannelStreamReply{}
 	mi := &file_relay_v1_relay_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ChannelReply) String() string {
+func (x *ChannelStreamReply) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ChannelReply) ProtoMessage() {}
+func (*ChannelStreamReply) ProtoMessage() {}
 
-func (x *ChannelReply) ProtoReflect() protoreflect.Message {
+func (x *ChannelStreamReply) ProtoReflect() protoreflect.Message {
 	mi := &file_relay_v1_relay_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -426,12 +426,12 @@ func (x *ChannelReply) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ChannelReply.ProtoReflect.Descriptor instead.
-func (*ChannelReply) Descriptor() ([]byte, []int) {
+// Deprecated: Use ChannelStreamReply.ProtoReflect.Descriptor instead.
+func (*ChannelStreamReply) Descriptor() ([]byte, []int) {
 	return file_relay_v1_relay_proto_rawDescGZIP(), []int{7}
 }
 
-func (x *ChannelReply) GetContent() []*v1.ContentBlock {
+func (x *ChannelStreamReply) GetContent() []*v1.ContentBlock {
 	if x != nil {
 		return x.Content
 	}
@@ -582,10 +582,9 @@ var File_relay_v1_relay_proto protoreflect.FileDescriptor
 
 const file_relay_v1_relay_proto_rawDesc = "" +
 	"\n" +
-	"\x14relay/v1/relay.proto\x12\brelay.v1\x1a sycophant/common/v1/common.proto\"\x83\x01\n" +
-	"\x18DeliverStreamItemRequest\x12\x1d\n" +
-	"\n" +
-	"channel_id\x18\x01 \x01(\tR\tchannelId\x123\n" +
+	"\x14relay/v1/relay.proto\x12\brelay.v1\x1a sycophant/common/v1/common.proto\"\x90\x01\n" +
+	"\x18DeliverStreamItemRequest\x12*\n" +
+	"\x11channel_stream_id\x18\x01 \x01(\tR\x0fchannelStreamId\x123\n" +
 	"\x04item\x18\x02 \x01(\v2\x1f.sycophant.common.v1.StreamItemR\x04itemJ\x04\b\x03\x10\x04R\rworkspace_seq\"9\n" +
 	"\x19DeliverStreamItemResponse\x12\x1c\n" +
 	"\tdelivered\x18\x01 \x01(\bR\tdelivered\"\x90\x01\n" +
@@ -593,24 +592,22 @@ const file_relay_v1_relay_proto_rawDesc = "" +
 	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12;\n" +
 	"\acontent\x18\x02 \x03(\v2!.sycophant.common.v1.ContentBlockR\acontentJ\x04\b\x03\x10\x04R\rworkspace_seq\"4\n" +
 	"\x14DeliverReplyResponse\x12\x1c\n" +
-	"\tdelivered\x18\x01 \x01(\bR\tdelivered\"\xab\x01\n" +
-	"\x17DeliverTurnStateRequest\x12\x1d\n" +
-	"\n" +
-	"channel_id\x18\x01 \x01(\tR\tchannelId\x12B\n" +
+	"\tdelivered\x18\x01 \x01(\bR\tdelivered\"\xb8\x01\n" +
+	"\x17DeliverTurnStateRequest\x12*\n" +
+	"\x11channel_stream_id\x18\x01 \x01(\tR\x0fchannelStreamId\x12B\n" +
 	"\n" +
 	"turn_state\x18\x02 \x01(\v2#.sycophant.common.v1.TurnStateEventR\tturnState\x12\x18\n" +
 	"\asubject\x18\x04 \x01(\tR\asubjectJ\x04\b\x03\x10\x04R\rworkspace_seq\"8\n" +
 	"\x18DeliverTurnStateResponse\x12\x1c\n" +
-	"\tdelivered\x18\x01 \x01(\bR\tdelivered\"\xe1\x01\n" +
-	"\x16DeliverOutboundRequest\x12\x1d\n" +
-	"\n" +
-	"channel_id\x18\x01 \x01(\tR\tchannelId\x12'\n" +
-	"\x0fconversation_id\x18\x02 \x01(\tR\x0econversationId\x121\n" +
-	"\x05reply\x18\x03 \x01(\v2\x16.relay.v1.ChannelReplyH\x00R\x05reply\x88\x01\x01\x12B\n" +
+	"\tdelivered\x18\x01 \x01(\bR\tdelivered\"\xf4\x01\n" +
+	"\x16DeliverOutboundRequest\x12*\n" +
+	"\x11channel_stream_id\x18\x01 \x01(\tR\x0fchannelStreamId\x12'\n" +
+	"\x0fconversation_id\x18\x02 \x01(\tR\x0econversationId\x127\n" +
+	"\x05reply\x18\x03 \x01(\v2\x1c.relay.v1.ChannelStreamReplyH\x00R\x05reply\x88\x01\x01\x12B\n" +
 	"\n" +
 	"turn_state\x18\x04 \x01(\v2#.sycophant.common.v1.TurnStateEventR\tturnStateB\b\n" +
-	"\x06_reply\"K\n" +
-	"\fChannelReply\x12;\n" +
+	"\x06_reply\"Q\n" +
+	"\x12ChannelStreamReply\x12;\n" +
 	"\acontent\x18\x01 \x03(\v2!.sycophant.common.v1.ContentBlockR\acontent\"7\n" +
 	"\x17DeliverOutboundResponse\x12\x1c\n" +
 	"\tdelivered\x18\x01 \x01(\bR\tdelivered\"\x11\n" +
@@ -618,7 +615,7 @@ const file_relay_v1_relay_proto_rawDesc = "" +
 	"\x10DiscoverResponse\x12\x16\n" +
 	"\x06issuer\x18\x01 \x01(\tR\x06issuer\x12\x1b\n" +
 	"\tclient_id\x18\x02 \x01(\tR\bclientId\x123\n" +
-	"\x15certificate_authority\x18\x03 \x01(\tR\x14certificateAuthority2\x81\r\n" +
+	"\x15certificate_authority\x18\x03 \x01(\tR\x14certificateAuthority2\xa5\r\n" +
 	"\fRelayGateway\x12A\n" +
 	"\bDiscover\x12\x19.relay.v1.DiscoverRequest\x1a\x1a.relay.v1.DiscoverResponse\x12i\n" +
 	"\x0eListWorkspaces\x12*.sycophant.common.v1.ListWorkspacesRequest\x1a+.sycophant.common.v1.ListWorkspacesResponse\x12]\n" +
@@ -631,9 +628,9 @@ const file_relay_v1_relay_proto_rawDesc = "" +
 	"\x16GetConversationHistory\x122.sycophant.common.v1.GetConversationHistoryRequest\x1a3.sycophant.common.v1.GetConversationHistoryResponse\x12]\n" +
 	"\fGetTurnState\x12(.sycophant.common.v1.GetTurnStateRequest\x1a#.sycophant.common.v1.TurnStateEvent\x12]\n" +
 	"\n" +
-	"CancelTurn\x12&.sycophant.common.v1.CancelTurnRequest\x1a'.sycophant.common.v1.CancelTurnResponse\x12a\n" +
-	"\rChannelIngest\x12).sycophant.common.v1.ChannelIngestRequest\x1a%.sycophant.common.v1.ChannelIngestAck\x12d\n" +
-	"\x0eChannelReceive\x12*.sycophant.common.v1.ChannelReceiveRequest\x1a$.sycophant.common.v1.ChannelOutbound0\x01\x12[\n" +
+	"CancelTurn\x12&.sycophant.common.v1.CancelTurnRequest\x1a'.sycophant.common.v1.CancelTurnResponse\x12s\n" +
+	"\x13ChannelStreamIngest\x12/.sycophant.common.v1.ChannelStreamIngestRequest\x1a+.sycophant.common.v1.ChannelStreamIngestAck\x12v\n" +
+	"\x14ChannelStreamReceive\x120.sycophant.common.v1.ChannelStreamReceiveRequest\x1a*.sycophant.common.v1.ChannelStreamOutbound0\x01\x12[\n" +
 	"\n" +
 	"WatchTools\x12&.sycophant.common.v1.WatchToolsRequest\x1a#.sycophant.common.v1.ToolListUpdate0\x01\x12_\n" +
 	"\fDispatchTool\x12$.sycophant.common.v1.CallToolRequest\x1a).sycophant.common.v1.DispatchToolResponse\x12f\n" +
@@ -669,7 +666,7 @@ var file_relay_v1_relay_proto_goTypes = []any{
 	(*DeliverTurnStateRequest)(nil),              // 4: relay.v1.DeliverTurnStateRequest
 	(*DeliverTurnStateResponse)(nil),             // 5: relay.v1.DeliverTurnStateResponse
 	(*DeliverOutboundRequest)(nil),               // 6: relay.v1.DeliverOutboundRequest
-	(*ChannelReply)(nil),                         // 7: relay.v1.ChannelReply
+	(*ChannelStreamReply)(nil),                   // 7: relay.v1.ChannelStreamReply
 	(*DeliverOutboundResponse)(nil),              // 8: relay.v1.DeliverOutboundResponse
 	(*DiscoverRequest)(nil),                      // 9: relay.v1.DiscoverRequest
 	(*DiscoverResponse)(nil),                     // 10: relay.v1.DiscoverResponse
@@ -685,8 +682,8 @@ var file_relay_v1_relay_proto_goTypes = []any{
 	(*v1.GetConversationHistoryRequest)(nil),     // 20: sycophant.common.v1.GetConversationHistoryRequest
 	(*v1.GetTurnStateRequest)(nil),               // 21: sycophant.common.v1.GetTurnStateRequest
 	(*v1.CancelTurnRequest)(nil),                 // 22: sycophant.common.v1.CancelTurnRequest
-	(*v1.ChannelIngestRequest)(nil),              // 23: sycophant.common.v1.ChannelIngestRequest
-	(*v1.ChannelReceiveRequest)(nil),             // 24: sycophant.common.v1.ChannelReceiveRequest
+	(*v1.ChannelStreamIngestRequest)(nil),        // 23: sycophant.common.v1.ChannelStreamIngestRequest
+	(*v1.ChannelStreamReceiveRequest)(nil),       // 24: sycophant.common.v1.ChannelStreamReceiveRequest
 	(*v1.WatchToolsRequest)(nil),                 // 25: sycophant.common.v1.WatchToolsRequest
 	(*v1.CallToolRequest)(nil),                   // 26: sycophant.common.v1.CallToolRequest
 	(*v1.AwaitToolResultRequest)(nil),            // 27: sycophant.common.v1.AwaitToolResultRequest
@@ -702,8 +699,8 @@ var file_relay_v1_relay_proto_goTypes = []any{
 	(*v1.SetConversationNameResponse)(nil),       // 37: sycophant.common.v1.SetConversationNameResponse
 	(*v1.GetConversationHistoryResponse)(nil),    // 38: sycophant.common.v1.GetConversationHistoryResponse
 	(*v1.CancelTurnResponse)(nil),                // 39: sycophant.common.v1.CancelTurnResponse
-	(*v1.ChannelIngestAck)(nil),                  // 40: sycophant.common.v1.ChannelIngestAck
-	(*v1.ChannelOutbound)(nil),                   // 41: sycophant.common.v1.ChannelOutbound
+	(*v1.ChannelStreamIngestAck)(nil),            // 40: sycophant.common.v1.ChannelStreamIngestAck
+	(*v1.ChannelStreamOutbound)(nil),             // 41: sycophant.common.v1.ChannelStreamOutbound
 	(*v1.ToolListUpdate)(nil),                    // 42: sycophant.common.v1.ToolListUpdate
 	(*v1.DispatchToolResponse)(nil),              // 43: sycophant.common.v1.DispatchToolResponse
 	(*v1.ToolResultFrame)(nil),                   // 44: sycophant.common.v1.ToolResultFrame
@@ -716,9 +713,9 @@ var file_relay_v1_relay_proto_depIdxs = []int32{
 	11, // 0: relay.v1.DeliverStreamItemRequest.item:type_name -> sycophant.common.v1.StreamItem
 	12, // 1: relay.v1.DeliverReplyRequest.content:type_name -> sycophant.common.v1.ContentBlock
 	13, // 2: relay.v1.DeliverTurnStateRequest.turn_state:type_name -> sycophant.common.v1.TurnStateEvent
-	7,  // 3: relay.v1.DeliverOutboundRequest.reply:type_name -> relay.v1.ChannelReply
+	7,  // 3: relay.v1.DeliverOutboundRequest.reply:type_name -> relay.v1.ChannelStreamReply
 	13, // 4: relay.v1.DeliverOutboundRequest.turn_state:type_name -> sycophant.common.v1.TurnStateEvent
-	12, // 5: relay.v1.ChannelReply.content:type_name -> sycophant.common.v1.ContentBlock
+	12, // 5: relay.v1.ChannelStreamReply.content:type_name -> sycophant.common.v1.ContentBlock
 	9,  // 6: relay.v1.RelayGateway.Discover:input_type -> relay.v1.DiscoverRequest
 	14, // 7: relay.v1.RelayGateway.ListWorkspaces:input_type -> sycophant.common.v1.ListWorkspacesRequest
 	15, // 8: relay.v1.RelayGateway.ListGrants:input_type -> sycophant.common.v1.ListGrantsRequest
@@ -729,8 +726,8 @@ var file_relay_v1_relay_proto_depIdxs = []int32{
 	20, // 13: relay.v1.RelayGateway.GetConversationHistory:input_type -> sycophant.common.v1.GetConversationHistoryRequest
 	21, // 14: relay.v1.RelayGateway.GetTurnState:input_type -> sycophant.common.v1.GetTurnStateRequest
 	22, // 15: relay.v1.RelayGateway.CancelTurn:input_type -> sycophant.common.v1.CancelTurnRequest
-	23, // 16: relay.v1.RelayGateway.ChannelIngest:input_type -> sycophant.common.v1.ChannelIngestRequest
-	24, // 17: relay.v1.RelayGateway.ChannelReceive:input_type -> sycophant.common.v1.ChannelReceiveRequest
+	23, // 16: relay.v1.RelayGateway.ChannelStreamIngest:input_type -> sycophant.common.v1.ChannelStreamIngestRequest
+	24, // 17: relay.v1.RelayGateway.ChannelStreamReceive:input_type -> sycophant.common.v1.ChannelStreamReceiveRequest
 	25, // 18: relay.v1.RelayGateway.WatchTools:input_type -> sycophant.common.v1.WatchToolsRequest
 	26, // 19: relay.v1.RelayGateway.DispatchTool:input_type -> sycophant.common.v1.CallToolRequest
 	27, // 20: relay.v1.RelayGateway.AwaitToolResult:input_type -> sycophant.common.v1.AwaitToolResultRequest
@@ -751,8 +748,8 @@ var file_relay_v1_relay_proto_depIdxs = []int32{
 	38, // 35: relay.v1.RelayGateway.GetConversationHistory:output_type -> sycophant.common.v1.GetConversationHistoryResponse
 	13, // 36: relay.v1.RelayGateway.GetTurnState:output_type -> sycophant.common.v1.TurnStateEvent
 	39, // 37: relay.v1.RelayGateway.CancelTurn:output_type -> sycophant.common.v1.CancelTurnResponse
-	40, // 38: relay.v1.RelayGateway.ChannelIngest:output_type -> sycophant.common.v1.ChannelIngestAck
-	41, // 39: relay.v1.RelayGateway.ChannelReceive:output_type -> sycophant.common.v1.ChannelOutbound
+	40, // 38: relay.v1.RelayGateway.ChannelStreamIngest:output_type -> sycophant.common.v1.ChannelStreamIngestAck
+	41, // 39: relay.v1.RelayGateway.ChannelStreamReceive:output_type -> sycophant.common.v1.ChannelStreamOutbound
 	42, // 40: relay.v1.RelayGateway.WatchTools:output_type -> sycophant.common.v1.ToolListUpdate
 	43, // 41: relay.v1.RelayGateway.DispatchTool:output_type -> sycophant.common.v1.DispatchToolResponse
 	44, // 42: relay.v1.RelayGateway.AwaitToolResult:output_type -> sycophant.common.v1.ToolResultFrame

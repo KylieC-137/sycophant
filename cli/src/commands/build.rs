@@ -14,7 +14,8 @@ use crate::runner::{run_passthrough, run_passthrough_in};
 
 const REGISTRY_PUSH: &str = "localhost:5555";
 
-/// The one toolset base image. Built first: every toolset image builds FROM it.
+/// The one toolset base image. Built first: the stdlib `toolset` image builds
+/// FROM it.
 const TOOLSET_BASE_TAG: &str = "toolset-base:local";
 
 // Controller and tool-job binaries packaged from build/Dockerfile (BINARY build-arg → <name>:local).
@@ -22,27 +23,23 @@ const TOOLSET_BASE_TAG: &str = "toolset-base:local";
 // built through the generic build/Dockerfile, not a FROM-base toolset path.
 const CONTROLLER_BINS: [&str; 3] = ["toolset-runtime", "relay-controller", "inference-runtime"];
 
-// Images loaded straight into the k3d node. toolset-git:local is here (not only
-// in the registry) because the workspace-init Job runs it node-local with
-// pullPolicy=Never (chart default workspaceInit.image=toolset-git, tag=local).
-const IMPORT_IMAGES: [&str; 6] = [
+// Images loaded straight into the k3d node.
+const IMPORT_IMAGES: [&str; 5] = [
     "inference-runtime:local",
     "sycophant-harness:local",
     "relay-controller:local",
     "sycophant-kubectl:local",
     "sycophant-provisioner:local",
-    "toolset-git:local",
 ];
 
 // Toolset images (built from the toolset-runtime binary) served via the registry.
-const TOOLSET_IMAGES: [&str; 3] = ["toolset", "toolset-git", "toolset-ssh-credentials"];
+const TOOLSET_IMAGES: [&str; 2] = ["toolset", "toolset-hello-world"];
 
 /// Build context dir for a toolset image, relative to the repo root.
 fn toolset_context(image: &str) -> &'static str {
     match image {
         "toolset" => "images/toolset",
-        "toolset-git" => "images/git",
-        "toolset-ssh-credentials" => "examples/sycoadm/toolsets/ssh-credentials",
+        "toolset-hello-world" => "examples/sycoadm/toolsets/hello-world",
         _ => unreachable!("unknown toolset image"),
     }
 }
@@ -140,8 +137,10 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
     )?;
     let _ = fs::remove_file(&staged);
 
-    // Tool toolsets: each adds only its tools on top of the base image, and
-    // carries its tools.yaml, as one-line JSON, in the md.sycophant.tools label.
+    // Tool toolsets: the stdlib `toolset` adds its tools on top of the base
+    // image; `toolset-hello-world` builds FROM `toolset:local`, so the order of
+    // TOOLSET_IMAGES matters. Each carries its tools.yaml, as one-line JSON, in
+    // the md.sycophant.tools label.
     for img in TOOLSET_IMAGES {
         let ctx = toolset_context(img);
         let basearg = format!("BASE_IMAGE={TOOLSET_BASE_TAG}");

@@ -17,7 +17,7 @@ pub(crate) trait StreamSink: Send {
 }
 
 /// A sink that drops every frame. Used where streamed items are out of scope
-/// (sub-agent dispatch) or absent (no reply channel).
+/// (sub-agent dispatch) or absent (no reply channel stream).
 pub(crate) struct NullSink;
 
 #[async_trait::async_trait]
@@ -30,13 +30,17 @@ impl StreamSink for NullSink {
 /// delta must never fail the turn.
 pub(crate) struct GatewaySink<'a> {
     pub(crate) rpc: &'a mut dyn RelayRpc,
-    pub(crate) channel_id: String,
+    pub(crate) channel_stream_id: String,
 }
 
 #[async_trait::async_trait]
 impl StreamSink for GatewaySink<'_> {
     async fn emit(&mut self, item: StreamItem) {
-        if let Err(e) = self.rpc.deliver_stream_item(&self.channel_id, item).await {
+        if let Err(e) = self
+            .rpc
+            .deliver_stream_item(&self.channel_stream_id, item)
+            .await
+        {
             tracing::warn!(error = %e, "failed to deliver streamed item");
         }
     }

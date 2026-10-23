@@ -25,9 +25,9 @@ inference:
     singleNodeException: false
 
 toolset:
-  name: git
+  name: hello-world
   tenant: acme
-  image: ghcr.io/sycophant-md/git@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  image: ghcr.io/sycophant-md/hello-world@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   keepalive: true
   deadlineSeconds: 300
   env:
@@ -43,13 +43,13 @@ toolset:
 workspace:
   name: hello-world
   tenant: acme
-  toolsets: [stdlib, ssh-credentials]
+  toolsets: [hello-world]
   models: [deepseek, local]
   storage: 5Gi
   # Read by sycoadm only; never rendered into the command.
-  instructions: ../instructions/simple
+  instructions: ../instructions/hello-world
   grants:
-    ssh-credentials:
+    hello-world:
       demo-key:
         secret: demo-ssh-key
         path: /home/agent/.ssh/id_ed25519
@@ -62,7 +62,6 @@ user:
 channel:
   name: app
   tenant: acme
-  kind: app
   loginServer: http://headscale:8080
   image: tailscale/tailscale
   tag: v1.80.0

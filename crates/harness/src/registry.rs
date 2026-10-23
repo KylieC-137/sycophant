@@ -352,7 +352,7 @@ mod tests {
     // rejects it outright, while a freshly minted (bare UUID) id still loads.
     //
     // Pins the reject-non-UUID behavior (first-party path segments only) AND that
-    // the real mint->load flow the Flutter client depends on survives the
+    // the real mint->load flow clients depend on survives the
     // tightening — a stub that accepts everything fails the first assertion.
     #[tokio::test]
     async fn get_or_create_rejects_a_non_uuid_id() {

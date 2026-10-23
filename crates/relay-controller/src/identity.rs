@@ -5,7 +5,7 @@
 //! `handle.<channel>` keys naming that channel's platform user ID. The table
 //! answers two questions and only these: which workspaces a subject reaches
 //! (ListWorkspaces), and which subject a channel handle resolves to (the
-//! adapter path). Authorization itself is not here — every request is checked
+//! channel path). Authorization itself is not here — every request is checked
 //! by a Kubernetes review; this table only names the list and resolves
 //! senders.
 //!

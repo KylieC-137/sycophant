@@ -8,5 +8,5 @@ metadata:
     sycophant.md/command: "true"
     app.kubernetes.io/part-of: sycophant
 data:
-  toolsets: stdlib,ssh-credentials
-  grant.ssh-credentials.demo-key.secret: demo-ssh-key
+  toolsets: hello-world
+  grant.hello-world.demo-key.secret: demo-ssh-key

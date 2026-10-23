@@ -8,7 +8,7 @@ metadata:
     app.kubernetes.io/part-of: sycophant
 data:
   toolsets: 'stdlib'
-  grant.ssh-credentials.demo-key.secret: 'demo-ssh-key'
+  grant.hello-world.demo-key.secret: 'demo-ssh-key'
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -19,8 +19,8 @@ metadata:
     sycophant.md/command: 'true'
     app.kubernetes.io/part-of: sycophant
 data:
-  toolsets: 'stdlib,ssh-credentials'
-  grant.ssh-credentials.demo-key.path: '/home/agent/.ssh/id_ed25519'
+  toolsets: 'stdlib,hello-world'
+  grant.hello-world.demo-key.path: '/home/agent/.ssh/id_ed25519'
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -31,9 +31,9 @@ metadata:
     sycophant.md/command: 'true'
     app.kubernetes.io/part-of: sycophant
 data:
-  toolsets: 'ssh-credentials'
-  grant.ssh-credentials.demo-key.secret: 'demo-ssh-key'
-  grant.ssh-credentials.demo-key.egress: 'github'
+  toolsets: 'hello-world'
+  grant.hello-world.demo-key.secret: 'demo-ssh-key'
+  grant.hello-world.demo-key.egress: 'github'
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -44,9 +44,9 @@ metadata:
     sycophant.md/command: 'true'
     app.kubernetes.io/part-of: sycophant
 data:
-  toolsets: 'ssh-credentials'
-  grant.ssh-credentials.demo-key.secret: 'demo-ssh-key'
-  grant.ssh-credentials.demo-key.path: 'home/agent/.ssh/id'
+  toolsets: 'hello-world'
+  grant.hello-world.demo-key.secret: 'demo-ssh-key'
+  grant.hello-world.demo-key.path: 'home/agent/.ssh/id'
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -57,8 +57,8 @@ metadata:
     sycophant.md/command: 'true'
     app.kubernetes.io/part-of: sycophant
 data:
-  toolsets: 'ssh-credentials'
-  grant.ssh-credentials.demo-key.secret: 'Demo_Key'
+  toolsets: 'hello-world'
+  grant.hello-world.demo-key.secret: 'Demo_Key'
 ---
 apiVersion: v1
 kind: ConfigMap

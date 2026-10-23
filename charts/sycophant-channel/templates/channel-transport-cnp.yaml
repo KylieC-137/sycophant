@@ -1,0 +1,69 @@
+{{/*
+Fail-closed egress for transport-class channel pods.
+
+One policy for the class, not one per channel: every transport channel pod needs
+the identical destination set (headscale, the world ports WireGuard
+needs, DNS, the relay's app port, and the kube-apiserver for its tailnet
+identity Secret), and a policy selector must never name `sycophant.md/channel`,
+which is an operator-chosen instance name.
+
+No ingress policy selects this pod. It is the tailnet terminus and must
+accept inbound WireGuard; any ingress policy selecting it flips it to
+default-deny and breaks NAT traversal.
+*/}}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: channel-transport-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: channel
+      sycophant.md/channel-class: transport
+      app.kubernetes.io/part-of: sycophant
+  egress:
+    # kube-apiserver: the tailnet node identity Secret (TS_KUBE_SECRET).
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "6443"
+              protocol: TCP
+    {{- include "sycophant.dnsEgress" . | nindent 4 }}
+    # The relay's app port. This forward is the channel pod's whole job.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: relay-controller
+            app.kubernetes.io/part-of: sycophant
+      toPorts:
+        - ports:
+            - port: "9091"
+              protocol: TCP
+    # In-cluster headscale control plane registration.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: headscale
+            app.kubernetes.io/part-of: sycophant
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+    # Public internet for external headscale (when not bundled) AND for
+    # Tailscale DERP relay fallback when direct NAT punching fails.
+    #   - 443/TCP: headscale HTTPS + DERP HTTPS
+    #   - 41641/UDP: WireGuard direct/DERP fallback default port
+    #   - 3478/UDP: STUN
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "41641"
+              protocol: UDP
+            - port: "3478"
+              protocol: UDP

@@ -6,8 +6,8 @@
 //!
 //! - **Person tokens** (app and terminal-client paths): the relay resolves
 //!   the caller's subject by TokenReview of the bearer.
-//! - **Adapter tokens**: the relay authenticates the adapter by a TokenReview
-//!   pinned to the adapter audience, requires the adapter's
+//! - **Channel tokens**: the relay authenticates the channel by a TokenReview
+//!   pinned to the channel audience, requires the channel's
 //!   ServiceAccount shape, resolves the reported sender through the identity
 //!   table.
 //!
@@ -29,15 +29,16 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use proto_common::{
-    channel_outbound, AwaitToolResultRequest, CallToolRequest, CancelToolRequest,
-    CancelToolResponse, CancelTurnRequest, CancelTurnResponse, ChannelAck, ChannelIngestAck,
-    ChannelIngestRequest, ChannelOutbound, ChannelReceiveRequest, DeleteConversationRequest,
-    DeleteConversationResponse, DispatchToolResponse, GetConversationHistoryRequest,
-    GetConversationHistoryResponse, GetTurnStateRequest, ListConversationsRequest,
-    ListConversationsResponse, ListGrantsRequest, ListGrantsResponse, ListWorkspacesRequest,
-    ListWorkspacesResponse, MintConversationRequest, MintConversationResponse,
-    SetConversationNameRequest, SetConversationNameResponse, ToolListUpdate, ToolResultFrame,
-    ToolsetGrants, TurnState, TurnStateEvent, UserMessage, WatchToolsRequest,
+    channel_stream_outbound, AwaitToolResultRequest, CallToolRequest, CancelToolRequest,
+    CancelToolResponse, CancelTurnRequest, CancelTurnResponse, ChannelStreamAck,
+    ChannelStreamIngestAck, ChannelStreamIngestRequest, ChannelStreamOutbound,
+    ChannelStreamReceiveRequest, DeleteConversationRequest, DeleteConversationResponse,
+    DispatchToolResponse, GetConversationHistoryRequest, GetConversationHistoryResponse,
+    GetTurnStateRequest, ListConversationsRequest, ListConversationsResponse, ListGrantsRequest,
+    ListGrantsResponse, ListWorkspacesRequest, ListWorkspacesResponse, MintConversationRequest,
+    MintConversationResponse, SetConversationNameRequest, SetConversationNameResponse,
+    ToolListUpdate, ToolResultFrame, ToolsetGrants, TurnState, TurnStateEvent, UserMessage,
+    WatchToolsRequest,
 };
 use relay_proto::relay_gateway_server::RelayGateway;
 use relay_proto::{DiscoverRequest, DiscoverResponse};
@@ -47,23 +48,23 @@ use tonic::{Request, Response, Status};
 
 use crate::harness_client::HarnessClient;
 use crate::listener::ListenerClass;
-use crate::state::{ChannelOpener, GatewayState};
+use crate::state::{ChannelStreamOpener, GatewayState};
 use shared::auth::{
     build_subject_access_review, extract_bearer_token, review_token_username,
-    serviceaccount_from_username, ADAPTER_RELAY_AUDIENCE,
+    serviceaccount_from_username, CHANNEL_RELAY_AUDIENCE,
 };
 
-/// Seconds to keep the channel's outbound side open after the client
+/// Seconds to keep the channel stream's outbound side open after the client
 /// half-closes. Just under the 60s default gRPC client deadline.
-const CHANNEL_DRAIN_SECS: u64 = 55;
+const CHANNEL_STREAM_DRAIN_SECS: u64 = 55;
 
 /// Server-side clamp ceiling for `SetConversationName`. Enforced before
 /// the forward so a hostile name never reaches the harness.
 const MAX_CONVERSATION_NAME_CHARS: usize = 200;
 
-/// An adapter ServiceAccount is named `adapter-<channel>`; the channel is the
+/// A channel ServiceAccount is named `ch-<channel>`; the channel is the
 /// SA name minus this prefix.
-const ADAPTER_SA_NAME_PREFIX: &str = "adapter-";
+const CHANNEL_SA_NAME_PREFIX: &str = "ch-";
 
 /// The authenticated identity one request runs under, stamped by the
 /// per-listener class layer. Handlers branch on the class only to pick the
@@ -72,42 +73,42 @@ const ADAPTER_SA_NAME_PREFIX: &str = "adapter-";
 enum Caller {
     /// A person token presented on the app/terminal-client listener.
     Person { subject: String },
-    /// An adapter ServiceAccount token presented on the adapter listener.
-    Adapter { channel: String },
+    /// A channel ServiceAccount token presented on the channel listener.
+    Channel { channel: String },
 }
 
-/// Fires `unregister_channel` after a drain delay when the held
-/// outbound stream is dropped. Used by `channel_receive` to tie
-/// channel-registry lifetime to the gRPC response stream's lifetime
+/// Fires `unregister_channel_stream` after a drain delay when the held
+/// outbound stream is dropped. Used by `channel_stream_receive` to tie
+/// channel-stream registry lifetime to the gRPC response stream's lifetime
 /// instead of a wall-clock timer. The drain delay lets multi-frame
 /// outbound replies that were queued at the moment of drop finish.
-struct ChannelDropGuard {
+struct ChannelStreamDropGuard {
     state: Arc<GatewayState>,
-    channel_id: String,
+    channel_stream_id: String,
 }
 
-impl Drop for ChannelDropGuard {
+impl Drop for ChannelStreamDropGuard {
     fn drop(&mut self) {
         let state = self.state.clone();
-        let channel_id = std::mem::take(&mut self.channel_id);
+        let channel_stream_id = std::mem::take(&mut self.channel_stream_id);
         tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(CHANNEL_DRAIN_SECS)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(CHANNEL_STREAM_DRAIN_SECS)).await;
             tracing::info!(
-                channel_id = %channel_id,
-                "channel_receive: drain elapsed after stream drop, unregistering channel"
+                channel_stream_id = %channel_stream_id,
+                "channel_stream_receive: drain elapsed after stream drop, unregistering channel stream"
             );
-            state.unregister_channel(&channel_id).await;
+            state.unregister_channel_stream(&channel_stream_id).await;
         });
     }
 }
 
-/// Wraps an outbound stream with a `ChannelDropGuard`. When tonic drops
+/// Wraps an outbound stream with a `ChannelStreamDropGuard`. When tonic drops
 /// the response stream (client disconnect or request cancellation), the
 /// guard's `Drop` schedules the drain-and-unregister task. While the
-/// stream is alive, the channel stays registered indefinitely.
+/// stream is alive, the channel stream stays registered indefinitely.
 struct GuardedStream<S> {
     inner: S,
-    _guard: ChannelDropGuard,
+    _guard: ChannelStreamDropGuard,
 }
 
 impl<S: futures::Stream + Unpin> futures::Stream for GuardedStream<S> {
@@ -152,7 +153,7 @@ async fn review_reach(
     }
 }
 
-/// An adapter stream's sender handle, re-resolved before each item against
+/// A channel's stream's sender handle, re-resolved before each item against
 /// the live identity table.
 struct HandleCheck {
     identity: Arc<tokio::sync::RwLock<crate::identity::IdentityTable>>,
@@ -172,7 +173,7 @@ struct TokenCheck {
 #[allow(clippy::result_large_err)]
 fn token_check<T>(request: &Request<T>) -> Result<TokenCheck, Status> {
     let audience = match request.extensions().get::<ListenerClass>() {
-        Some(ListenerClass::AdapterToken) => Some(ADAPTER_RELAY_AUDIENCE),
+        Some(ListenerClass::ChannelToken) => Some(CHANNEL_RELAY_AUDIENCE),
         _ => None,
     };
     Ok(TokenCheck {
@@ -220,7 +221,7 @@ fn denied_sender() -> Status {
     Status::permission_denied("sender has no operator handle binding")
 }
 
-/// Resolve an adapter's reported sender to the subject its operator handle
+/// Resolve a channel's reported sender to the subject its operator handle
 /// binding names in the live identity table.
 async fn resolve_sender(
     identity: &tokio::sync::RwLock<crate::identity::IdentityTable>,
@@ -235,8 +236,8 @@ async fn resolve_sender(
         .ok_or_else(denied_sender)
 }
 
-/// Require that an adapter's sender still resolves to `subject`, the subject
-/// the channel was opened for.
+/// Require that a channel's sender still resolves to `subject`, the subject
+/// the channel stream was opened for.
 async fn require_sender(
     identity: &tokio::sync::RwLock<crate::identity::IdentityTable>,
     channel: &str,
@@ -259,12 +260,12 @@ fn require_workspace(workspace: &str) -> Result<(), Status> {
     Ok(())
 }
 
-/// Extract the channel an adapter ServiceAccount username names. `None`
-/// when the username is not an `adapter-<channel>` SA of `namespace`.
-fn adapter_channel(username: &str, namespace: &str) -> Option<String> {
+/// Extract the channel a channel ServiceAccount username names. `None`
+/// when the username is not a `ch-<channel>` SA of `namespace`.
+fn channel_from_service_account(username: &str, namespace: &str) -> Option<String> {
     serviceaccount_from_username(username)
         .and_then(|(ns, sa)| (ns == namespace).then_some(sa))
-        .and_then(|sa| sa.strip_prefix(ADAPTER_SA_NAME_PREFIX))
+        .and_then(|sa| sa.strip_prefix(CHANNEL_SA_NAME_PREFIX))
         .filter(|channel| !channel.is_empty())
         .map(str::to_string)
 }
@@ -299,19 +300,20 @@ impl GatewayService {
                 let subject = review_token_username(&client, token, None).await?;
                 Ok(Caller::Person { subject })
             }
-            ListenerClass::AdapterToken => {
+            ListenerClass::ChannelToken => {
                 // Audience-pinned TokenReview returning the raw username:
-                // the structural adapter-<channel> check below, not a
+                // the structural ch-<channel> check below, not a
                 // workspace mapping, derives the channel.
                 let username =
-                    review_token_username(&client, token, Some(ADAPTER_RELAY_AUDIENCE)).await?;
+                    review_token_username(&client, token, Some(CHANNEL_RELAY_AUDIENCE)).await?;
                 let namespace = self.state.namespace();
-                let channel = adapter_channel(&username, namespace).ok_or_else(|| {
-                    Status::permission_denied(format!(
-                        "caller is not an adapter ServiceAccount of {namespace}"
-                    ))
-                })?;
-                Ok(Caller::Adapter { channel })
+                let channel =
+                    channel_from_service_account(&username, namespace).ok_or_else(|| {
+                        Status::permission_denied(format!(
+                            "caller is not a channel ServiceAccount of {namespace}"
+                        ))
+                    })?;
+                Ok(Caller::Channel { channel })
             }
         }
     }
@@ -340,7 +342,7 @@ impl GatewayService {
 
     /// Wrap an open stream so it re-checks, before each item goes out,
     /// everything that admitted it: the bearer token (a TokenReview), with a
-    /// [`HandleCheck`] that the adapter sender's handle still resolves to the
+    /// [`HandleCheck`] that the channel sender's handle still resolves to the
     /// subject, and the subject's reach (a SubjectAccessReview). Once any
     /// fails, the stream ends with that status, so an expired token, a
     /// removed RoleBinding, or a removed handle binding cuts a stream opened
@@ -398,14 +400,13 @@ impl GatewayService {
         )))
     }
 
-    /// Authenticate the caller and return its person subject. An adapter
-    /// caller is refused: adapters resolve senders through ChannelReceive and
-    /// reach nothing else.
+    /// Authenticate the caller and return its person subject. A channel
+    /// caller is refused.
     async fn person_subject<T>(&self, request: &Request<T>) -> Result<String, Status> {
         match self.authenticate(request).await? {
             Caller::Person { subject } => Ok(subject),
-            Caller::Adapter { .. } => Err(Status::permission_denied(
-                "the adapter listener serves channel receive only",
+            Caller::Channel { .. } => Err(Status::permission_denied(
+                "person RPCs are not served on the channel listener",
             )),
         }
     }
@@ -424,13 +425,13 @@ impl GatewayService {
     }
 
     /// Authorize a receive stream and resolve the subject it serves. A
-    /// person token is its own subject; an adapter's sender resolves
+    /// person token is its own subject; a channel's sender resolves
     /// through the operator's handle binding. Either way the named
     /// workspace is reviewed for that subject.
     async fn authorize_receive(
         &self,
-        request: &Request<ChannelReceiveRequest>,
-    ) -> Result<(ChannelOpener, String), Status> {
+        request: &Request<ChannelStreamReceiveRequest>,
+    ) -> Result<(ChannelStreamOpener, String), Status> {
         let caller = self.authenticate(request).await?;
         let req = request.get_ref();
         require_workspace(&req.workspace)?;
@@ -438,20 +439,20 @@ impl GatewayService {
             Caller::Person { subject } => {
                 if !req.sender.is_empty() {
                     return Err(Status::invalid_argument(
-                        "ChannelReceiveRequest.sender is for the adapter path only",
+                        "ChannelStreamReceiveRequest.sender is for the channel path only",
                     ));
                 }
-                (ChannelOpener::Person, subject.clone())
+                (ChannelStreamOpener::Person, subject.clone())
             }
-            Caller::Adapter { channel } => {
+            Caller::Channel { channel } => {
                 if req.sender.is_empty() {
                     return Err(Status::invalid_argument(
-                        "ChannelReceiveRequest.sender required",
+                        "ChannelStreamReceiveRequest.sender required",
                     ));
                 }
                 let subject = resolve_sender(&self.state.identity(), channel, &req.sender).await?;
                 (
-                    ChannelOpener::Adapter {
+                    ChannelStreamOpener::Channel {
                         channel: channel.clone(),
                         sender: req.sender.clone(),
                     },
@@ -731,29 +732,29 @@ impl RelayGateway for GatewayService {
         Ok(Response::new(event))
     }
 
-    async fn channel_ingest(
+    async fn channel_stream_ingest(
         &self,
-        request: Request<ChannelIngestRequest>,
-    ) -> Result<Response<ChannelIngestAck>, Status> {
-        // The channel_id is server-minted and opaque; the registry maps it
+        request: Request<ChannelStreamIngestRequest>,
+    ) -> Result<Response<ChannelStreamIngestAck>, Status> {
+        // The channel_stream_id is server-minted and opaque; the registry maps it
         // back to the subject and workspace it was minted under, and the
         // ingest re-runs the reach check so a revocation cuts a live
-        // channel's next message. Holding a channel_id is not a credential:
-        // the caller must be the one who opened the channel.
+        // channel stream's next message. Holding a channel_stream_id is not a credential:
+        // the caller must be the one who opened the channel stream.
         let caller = self.authenticate(&request).await?;
         let req = request.into_inner();
-        if req.channel_id.is_empty() {
+        if req.channel_stream_id.is_empty() {
             return Err(Status::invalid_argument(
-                "ChannelIngestRequest.channel_id required",
+                "ChannelStreamIngestRequest.channel_stream_id required",
             ));
         }
         let (opener, subject, workspace) = self
             .state
-            .channel_binding(&req.channel_id)
+            .channel_stream_binding(&req.channel_stream_id)
             .await
             .ok_or_else(|| {
                 Status::not_found(
-                    "ChannelIngestRequest.channel_id is not registered (call ChannelReceive first)",
+                    "ChannelStreamIngestRequest.channel_stream_id is not registered (call ChannelStreamReceive first)",
                 )
             })?;
         let opened_by_caller = match (&caller, opener) {
@@ -761,18 +762,18 @@ impl RelayGateway for GatewayService {
                 Caller::Person {
                     subject: caller_subject,
                 },
-                ChannelOpener::Person,
+                ChannelStreamOpener::Person,
             ) => *caller_subject == subject,
             (
-                Caller::Adapter { channel },
-                ChannelOpener::Adapter {
+                Caller::Channel { channel },
+                ChannelStreamOpener::Channel {
                     channel: opener,
                     sender,
                 },
             ) => {
                 // The handle is re-resolved on every message, like the
                 // reach review: a removed handle binding cuts an open
-                // channel on its next message.
+                // channel stream on its next message.
                 if *channel != opener {
                     false
                 } else {
@@ -784,7 +785,7 @@ impl RelayGateway for GatewayService {
         };
         if !opened_by_caller {
             return Err(Status::permission_denied(
-                "caller did not open this channel",
+                "caller did not open this channel stream",
             ));
         }
         self.reach(&subject, &workspace).await?;
@@ -796,7 +797,7 @@ impl RelayGateway for GatewayService {
         // new renderer set immediately.
         if !req.supported_methods.is_empty() {
             self.state
-                .update_supported_methods(&req.channel_id, req.supported_methods.clone())
+                .update_supported_methods(&req.channel_stream_id, req.supported_methods.clone())
                 .await;
         }
 
@@ -804,10 +805,10 @@ impl RelayGateway for GatewayService {
         // client_response must be set.
         match (req.user_message, req.client_response) {
             (Some(_), Some(_)) => Err(Status::invalid_argument(
-                "ChannelIngestRequest must carry exactly one of user_message or client_response",
+                "ChannelStreamIngestRequest must carry exactly one of user_message or client_response",
             )),
             (None, None) => Err(Status::invalid_argument(
-                "ChannelIngestRequest must carry user_message or client_response",
+                "ChannelStreamIngestRequest must carry user_message or client_response",
             )),
             (Some(user_message), None) => {
                 // Conversation id: empty → mint a fresh one via the caller's
@@ -836,7 +837,7 @@ impl RelayGateway for GatewayService {
                         UserMessage {
                             content: user_message.content,
                             sender: user_message.sender,
-                            reply_channel: Some(req.channel_id.clone()),
+                            reply_channel_stream: Some(req.channel_stream_id.clone()),
                             conversation_id: conversation_id.clone(),
                             // The client's grant selections ride through
                             // untouched; the controller is the closed-set
@@ -846,19 +847,19 @@ impl RelayGateway for GatewayService {
                     )
                     .await;
                 // The user message has been accepted and routed; the
-                // harness will pick it up momentarily. Move the channel
+                // harness will pick it up momentarily. Move the channel stream
                 // to WORKING so the client renders an active indicator until
                 // the assistant message (or a TurnError) lands.
                 self.state
                     .set_and_broadcast_turn_state(
-                        &req.channel_id,
+                        &req.channel_stream_id,
                         &subject,
                         &conversation_id,
                         TurnState::Working,
                     )
                     .await;
-                Ok(Response::new(ChannelIngestAck {
-                    channel_id: req.channel_id,
+                Ok(Response::new(ChannelStreamIngestAck {
+                    channel_stream_id: req.channel_stream_id,
                     conversation_id,
                 }))
             }
@@ -889,86 +890,86 @@ impl RelayGateway for GatewayService {
                         .await,
                 ) {
                     tracing::warn!(
-                        channel_id = %req.channel_id,
+                        channel_stream_id = %req.channel_stream_id,
                         request_id = %cr.request_id,
-                        "channel_ingest: ClientResponse for unknown/expired request_id"
+                        "channel_stream_ingest: ClientResponse for unknown/expired request_id"
                     );
                 }
                 // ClientResponse path does not touch a conversation — empty
                 // id in the ack is the honest signal that no conversation
                 // was routed by this call.
-                Ok(Response::new(ChannelIngestAck {
-                    channel_id: req.channel_id,
+                Ok(Response::new(ChannelStreamIngestAck {
+                    channel_stream_id: req.channel_stream_id,
                     conversation_id: String::new(),
                 }))
             }
         }
     }
 
-    type ChannelReceiveStream = BoxedStream<ChannelOutbound>;
+    type ChannelStreamReceiveStream = BoxedStream<ChannelStreamOutbound>;
 
-    async fn channel_receive(
+    async fn channel_stream_receive(
         &self,
-        request: Request<ChannelReceiveRequest>,
-    ) -> Result<Response<Self::ChannelReceiveStream>, Status> {
+        request: Request<ChannelStreamReceiveRequest>,
+    ) -> Result<Response<Self::ChannelStreamReceiveStream>, Status> {
         let (opener, subject) = self.authorize_receive(&request).await?;
         let token = token_check(&request)?;
         let req = request.into_inner();
         let handle_check = match &opener {
-            ChannelOpener::Adapter { channel, sender } => Some(HandleCheck {
+            ChannelStreamOpener::Channel { channel, sender } => Some(HandleCheck {
                 identity: self.state.identity(),
                 channel: channel.clone(),
                 sender: sender.clone(),
             }),
-            ChannelOpener::Person => None,
+            ChannelStreamOpener::Person => None,
         };
 
         let (tx, rx) = mpsc::channel(16);
-        // Mint the server-side channel_id and bind it to the resolved
-        // subject and the authorized workspace. The adapter_hint is logged
+        // Mint the server-side channel_stream_id and bind it to the resolved
+        // subject and the authorized workspace. The channel_hint is logged
         // only.
-        let channel_id = self
+        let channel_stream_id = self
             .state
-            .mint_channel(opener, subject.clone(), req.workspace.clone(), tx.clone())
+            .mint_channel_stream(opener, subject.clone(), req.workspace.clone(), tx.clone())
             .await;
         tracing::info!(
-            channel_id = %channel_id,
+            channel_stream_id = %channel_stream_id,
             subject = %subject,
             workspace = %req.workspace,
-            adapter_hint = ?req.adapter_hint,
-            "channel_receive: minted channel_id"
+            channel_hint = ?req.channel_hint,
+            "channel_stream_receive: minted channel_stream_id"
         );
 
-        // First frame of the outbound stream IS the ChannelAck — the
-        // adapter MUST consume this before it can echo channel_id on
-        // ChannelIngest.
         if let Err(e) = tx
-            .send(ChannelOutbound {
-                command: Some(channel_outbound::Command::Ack(ChannelAck {
-                    channel_id: channel_id.clone(),
+            .send(ChannelStreamOutbound {
+                command: Some(channel_stream_outbound::Command::Ack(ChannelStreamAck {
+                    channel_stream_id: channel_stream_id.clone(),
                 })),
             })
             .await
         {
-            tracing::warn!(?e, "channel_receive: failed to send initial ChannelAck");
+            tracing::warn!(
+                ?e,
+                "channel_stream_receive: failed to send initial ChannelStreamAck"
+            );
         }
 
-        // Replay the channel's turn phase, then start the heartbeat.
-        self.state.replay_turn_state(&channel_id).await;
-        self.state.spawn_heartbeat(&channel_id).await;
+        // Replay the channel stream's turn phase, then start the heartbeat.
+        self.state.replay_turn_state(&channel_stream_id).await;
+        self.state.spawn_heartbeat(&channel_stream_id).await;
 
         // Tie unregister to the outbound stream's lifetime, not a
         // wall-clock timer. The guard travels with the response stream;
         // tonic drops the stream on client disconnect or cancellation,
         // and only then is the drain-and-unregister task scheduled.
-        let guard = ChannelDropGuard {
+        let guard = ChannelStreamDropGuard {
             state: self.state.clone(),
-            channel_id: channel_id.clone(),
+            channel_stream_id: channel_stream_id.clone(),
         };
 
         #[allow(clippy::result_large_err)]
         let outbound_stream =
-            ReceiverStream::new(rx).map(|msg| -> Result<ChannelOutbound, Status> { Ok(msg) });
+            ReceiverStream::new(rx).map(|msg| -> Result<ChannelStreamOutbound, Status> { Ok(msg) });
         let guarded = GuardedStream {
             inner: self.reauthorized(
                 outbound_stream,
@@ -1123,27 +1124,27 @@ mod tests {
     }
 
     #[test]
-    fn adapter_channel_extracts_channel_from_sa_name() {
+    fn channel_from_service_account_extracts_the_channel() {
         assert_eq!(
-            adapter_channel(
-                "system:serviceaccount:tenant-acme:adapter-slack",
+            channel_from_service_account(
+                "system:serviceaccount:tenant-acme:ch-slack",
                 "tenant-acme"
             ),
             Some("slack".to_string())
         );
         assert_eq!(
-            adapter_channel(
-                "system:serviceaccount:other-ns:adapter-slack",
+            channel_from_service_account("system:serviceaccount:other-ns:ch-slack", "tenant-acme"),
+            None
+        );
+        assert_eq!(
+            channel_from_service_account(
+                "system:serviceaccount:tenant-acme:harness",
                 "tenant-acme"
             ),
             None
         );
         assert_eq!(
-            adapter_channel("system:serviceaccount:tenant-acme:harness", "tenant-acme"),
-            None
-        );
-        assert_eq!(
-            adapter_channel("https://issuer.example#alice", "tenant-acme"),
+            channel_from_service_account("https://issuer.example#alice", "tenant-acme"),
             None
         );
     }

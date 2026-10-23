@@ -1,6 +1,0 @@
-# toolset.image is pushed to the in-cluster registry automatically by
-# `sycoadm toolset up`; the tools label is read from the image.
-toolset:
-  name: workspace-ro
-  tenant: e2e-test
-  image: toolset-git:local

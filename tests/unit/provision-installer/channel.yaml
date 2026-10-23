@@ -9,7 +9,6 @@ metadata:
     app.kubernetes.io/part-of: sycophant
 data:
   storageClass: local-path
-  kind: app
   image: tailscale/tailscale
   tag: v1.80.0
   pullPolicy: Always

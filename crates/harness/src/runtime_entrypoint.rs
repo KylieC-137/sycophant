@@ -93,10 +93,10 @@ pub(crate) async fn message_loop(
         tracing::info!(bytes = primary_agent_text.len(), "read primary agent");
 
         let conversation_id = inbound.conversation_id.clone();
-        let reply_channel = inbound.reply_channel.clone();
-        tracing::info!(conversation_id = %conversation_id, reply_channel = ?reply_channel, "inbound reply channel");
+        let reply_channel_stream = inbound.reply_channel_stream.clone();
+        tracing::info!(conversation_id = %conversation_id, reply_channel_stream = ?reply_channel_stream, "inbound reply channel");
         let conv_for_deliver = conversation_id.clone();
-        let reply_for_deliver = reply_channel.clone();
+        let reply_for_deliver = reply_channel_stream.clone();
 
         let log = registry
             .get_or_create(&conversation_id)
@@ -142,7 +142,7 @@ pub(crate) async fn message_loop(
         // Turn-start identity frame: name + system-prompt hash so the client
         // can label the agent and warn on a prompt change between turns.
         // Empty agent_name = the workspace primary agent (unnamed here).
-        if reply_channel.is_some() {
+        if reply_channel_stream.is_some() {
             let start = turn_start_frame(&conv_for_deliver, "", &prompt_hash);
             if let Err(e) = relay.deliver_turn_state(start, "").await {
                 tracing::warn!(error = %e, "failed to deliver turn-start identity frame");
@@ -157,21 +157,21 @@ pub(crate) async fn message_loop(
             history,
             &tool_defs,
             model,
-            reply_channel.clone(),
+            reply_channel_stream.clone(),
             conversation_id,
         );
         // Stream activity frames to the client only when there is a reply
-        // channel (mirrors deliver_turn_outcome's early return). The sink
+        // channel stream (mirrors deliver_turn_outcome's early return). The sink
         // borrows `relay` for the loop's duration; scope it so the
         // borrow ends before the terminal delivery below reborrows it.
         let result = {
             let mut null_sink = crate::turn::NullSink;
             let mut gateway_sink;
-            let sink: &mut dyn StreamSink = match reply_channel.clone() {
-                Some(channel_id) => {
+            let sink: &mut dyn StreamSink = match reply_channel_stream.clone() {
+                Some(channel_stream_id) => {
                     gateway_sink = crate::turn::GatewaySink {
                         rpc: &mut *relay,
-                        channel_id,
+                        channel_stream_id,
                     };
                     &mut gateway_sink
                 }
@@ -186,7 +186,7 @@ pub(crate) async fn message_loop(
                 attribution,
                 request,
                 LoopMode {
-                    reply_channel: reply_channel.clone(),
+                    reply_channel_stream: reply_channel_stream.clone(),
                     idle_gap,
                     cancel: cancel.clone(),
                     grants: inbound.grants,
@@ -282,16 +282,16 @@ fn turn_start_frame(
 /// Push one orchestrator turn's outcome to the client via the gateway.
 /// The terminal turn-state frame carries the conversation's owner as its
 /// subject, so the relay records it under the key the gateway minted the
-/// conversation with. No-op when the turn had no reply channel; delivery
+/// conversation with. No-op when the turn had no reply channel stream; delivery
 /// failure is logged, not fatal (the durable log already holds the reply).
 async fn deliver_turn_outcome(
     relay: &mut impl RelayRpc,
     registry: &ConversationRegistry,
-    channel: Option<&str>,
+    reply_channel_stream: Option<&str>,
     conversation_id: &str,
     result: &Result<String, LoopError>,
 ) {
-    let Some(_) = channel else {
+    let Some(_) = reply_channel_stream else {
         tracing::warn!(conversation_id = %conversation_id, "no reply channel, dropping turn outcome");
         return;
     };
@@ -389,7 +389,7 @@ fn build_turn_request(
     messages: Vec<Message>,
     tool_defs: &[ToolDefinition],
     model: Option<String>,
-    reply_channel: Option<String>,
+    reply_channel_stream: Option<String>,
     conversation_id: String,
 ) -> TurnRequest {
     TurnRequest {
@@ -397,7 +397,7 @@ fn build_turn_request(
         tools: tool_defs.to_vec(),
         messages,
         model,
-        reply_channel,
+        reply_channel_stream,
         role: None,
         correlation_id: None,
         conversation_id,
@@ -541,7 +541,7 @@ mod tests {
         assert_eq!(req.tools[0].name, "Bash");
         assert_eq!(req.role, None);
         assert_eq!(req.model.as_deref(), Some("claude-x"));
-        assert_eq!(req.reply_channel.as_deref(), Some("test-channel"));
+        assert_eq!(req.reply_channel_stream.as_deref(), Some("test-channel"));
         assert_eq!(req.messages.len(), 1);
         assert_eq!(req.messages[0].role, "user");
     }

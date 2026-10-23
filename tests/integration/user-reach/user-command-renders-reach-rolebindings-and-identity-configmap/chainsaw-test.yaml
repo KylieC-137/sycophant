@@ -346,25 +346,18 @@ spec:
               HASH=$(printf '%s' "$ALICE" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)
               ALPHA_UID=$(kubectl get role ws-alpha-reach -n "$TENANT_NS" -o jsonpath='{.metadata.uid}')
               MISSING=delta
-              # Find the installer by its refusal: of alice's installers in
-              # this namespace, the one whose current or previous container
-              # logged it. A retry replaces the log, so poll both.
-              JOB=""
+              # The installer's first attempt must fail before ws-delta
+              # appears. A failed attempt restarts the container in the same pod.
+              CMD_UID=$(kubectl get configmap "provision-user-$HASH" -n "$TENANT_NS" -o jsonpath='{.metadata.uid}')
+              JOB="provision-user-$(printf '%s' "$CMD_UID" | tr -d - | cut -c1-10)"
+              RESTARTS=0
               for i in $(seq 1 180); do
-                for j in $(kubectl get jobs -n sycophant-system -o json \
-                  | jq -r --arg c "provision-user-$HASH" --arg t "$TENANT_NS" \
-                  '.items[] | select(.metadata.name | startswith("provision-user-"))
-                   | select(any(.spec.template.spec.containers[].env[]?; .name == "COMMAND" and .value == $c))
-                   | select(any(.spec.template.spec.containers[].env[]?; .name == "TENANT" and .value == $t))
-                   | .metadata.name'); do
-                  { kubectl logs -n sycophant-system "job/$j" 2>/dev/null
-                    kubectl logs -n sycophant-system "job/$j" --previous 2>/dev/null; } \
-                    | grep -q "workspace $MISSING does not exist" && { JOB=$j; break; }
-                done
-                [ -n "$JOB" ] && break
+                RESTARTS=$(kubectl get pods -n sycophant-system -l "job-name=$JOB" \
+                  -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null || true)
+                [ "${RESTARTS:-0}" -ge 1 ] && break
                 sleep 1
               done
-              [ -n "$JOB" ] || { echo "no installer refused missing ws-$MISSING"; exit 1; }
+              [ "${RESTARTS:-0}" -ge 1 ] || { echo "installer $JOB never refused missing ws-$MISSING"; exit 1; }
               # ws-delta appears while the installer still has retries left.
               helm template ws-delta "$REPO_ROOT/charts/sycophant-workspace" \
                 --set name=delta -n "$TENANT_NS" \

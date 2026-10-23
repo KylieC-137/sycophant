@@ -7,9 +7,10 @@
 use std::sync::Arc;
 
 use proto_common::{
-    channel_outbound, ChannelOutbound, ChannelSend, SendServerNotificationRequest,
-    SendServerNotificationResponse, SendServerRequestAndAwaitRequest,
-    SendServerRequestAndAwaitResponse, SubscribeRequest, TurnState, TurnStateEvent, UserMessage,
+    channel_stream_outbound, ChannelStreamOutbound, ChannelStreamSend,
+    SendServerNotificationRequest, SendServerNotificationResponse,
+    SendServerRequestAndAwaitRequest, SendServerRequestAndAwaitResponse, SubscribeRequest,
+    TurnState, TurnStateEvent, UserMessage,
 };
 use relay_proto::relay_internal_server::RelayInternal;
 use relay_proto::{DeliverStreamItemRequest, DeliverStreamItemResponse};
@@ -125,7 +126,7 @@ impl RelayInternal for InternalService {
                     result_json,
                     error: None,
                     timed_out: false,
-                    unknown_channel: false,
+                    unknown_channel_stream: false,
                     unsupported_method: false,
                 }))
             }
@@ -134,7 +135,7 @@ impl RelayInternal for InternalService {
                     result_json: String::new(),
                     error: Some(e),
                     timed_out: false,
-                    unknown_channel: false,
+                    unknown_channel_stream: false,
                     unsupported_method: false,
                 }))
             }
@@ -143,7 +144,7 @@ impl RelayInternal for InternalService {
                     result_json: String::new(),
                     error: None,
                     timed_out: false,
-                    unknown_channel: false,
+                    unknown_channel_stream: false,
                     unsupported_method: true,
                 }))
             }
@@ -152,16 +153,16 @@ impl RelayInternal for InternalService {
                     result_json: String::new(),
                     error: None,
                     timed_out: true,
-                    unknown_channel: false,
+                    unknown_channel_stream: false,
                     unsupported_method: false,
                 }))
             }
-            Err(crate::state::ServerRequestError::UnknownChannel) | Err(_) => {
+            Err(crate::state::ServerRequestError::UnknownChannelStream) | Err(_) => {
                 Ok(Response::new(SendServerRequestAndAwaitResponse {
                     result_json: String::new(),
                     error: None,
                     timed_out: false,
-                    unknown_channel: true,
+                    unknown_channel_stream: true,
                     unsupported_method: false,
                 }))
             }
@@ -175,11 +176,13 @@ impl RelayInternal for InternalService {
         let workspace = self.verify_caller(&request).await?;
         let req = request.into_inner();
         tracing::info!(conversation_id = %req.conversation_id, workspace = %workspace, "deliver_reply received from harness");
-        let send = ChannelOutbound {
-            command: Some(channel_outbound::Command::SendMessage(ChannelSend {
-                content: req.content,
-                conversation_id: req.conversation_id.clone(),
-            })),
+        let send = ChannelStreamOutbound {
+            command: Some(channel_stream_outbound::Command::SendMessage(
+                ChannelStreamSend {
+                    content: req.content,
+                    conversation_id: req.conversation_id.clone(),
+                },
+            )),
         };
         let delivered = self.state.send_to_workspace(&workspace, send).await > 0;
         tracing::info!(conversation_id = %req.conversation_id, workspace = %workspace, delivered = delivered, "deliver_reply fanned out");
@@ -199,8 +202,12 @@ impl RelayInternal for InternalService {
         };
         tracing::info!(conversation_id = %turn_state.conversation_id, workspace = %workspace, "deliver_turn_state received from harness");
         let subject = if req.subject.is_empty() {
-            // Backward compat: resolve subject from channel_id if provided
-            match self.state.channel_binding(&req.channel_id).await {
+            // Backward compat: resolve subject from channel_stream_id if provided
+            match self
+                .state
+                .channel_stream_binding(&req.channel_stream_id)
+                .await
+            {
                 Some((_, subject, bound)) if bound == workspace => subject,
                 _ => String::new(),
             }
@@ -236,16 +243,18 @@ impl RelayInternal for InternalService {
                 .await;
         }
 
-        // Build the outbound frame and fan out to all workspace channels.
+        // Build the outbound frame and fan out to all workspace channel streams.
         let conv_id = turn_state.conversation_id.clone();
-        let msg = ChannelOutbound {
-            command: Some(channel_outbound::Command::TurnState(TurnStateEvent {
-                state: turn_state.state,
-                conversation_id: turn_state.conversation_id,
-                reason: turn_state.reason,
-                code: turn_state.code,
-                ..Default::default()
-            })),
+        let msg = ChannelStreamOutbound {
+            command: Some(channel_stream_outbound::Command::TurnState(
+                TurnStateEvent {
+                    state: turn_state.state,
+                    conversation_id: turn_state.conversation_id,
+                    reason: turn_state.reason,
+                    code: turn_state.code,
+                    ..Default::default()
+                },
+            )),
         };
         let delivered = self.state.send_to_workspace(&workspace, msg).await > 0;
         tracing::info!(conversation_id = %conv_id, workspace = %workspace, delivered = delivered, "deliver_turn_state fanned out");
@@ -268,8 +277,8 @@ impl RelayInternal for InternalService {
         };
         // Pure relay: wrap the StreamItem verbatim, no payload inspection or
         // collapsing. The harness is the sole egress authority.
-        let frame = ChannelOutbound {
-            command: Some(channel_outbound::Command::StreamItem(item)),
+        let frame = ChannelStreamOutbound {
+            command: Some(channel_stream_outbound::Command::StreamItem(item)),
         };
         let delivered = self.state.send_to_workspace(&workspace, frame).await > 0;
         Ok(Response::new(DeliverStreamItemResponse { delivered }))
@@ -365,7 +374,7 @@ mod tests {
                 UserMessage {
                     content: vec![],
                     sender: "u".into(),
-                    reply_channel: Some("chan".into()),
+                    reply_channel_stream: Some("chan".into()),
                     conversation_id: "ws.c".into(),
                     grants: vec![],
                 },
@@ -379,7 +388,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_server_notification_unknown_channel_reports_not_delivered() {
+    async fn send_server_notification_unknown_channel_stream_reports_not_delivered() {
         let service = service_for(make_state(), "ws");
         let resp = service
             .send_server_notification(authed(SendServerNotificationRequest {
@@ -394,7 +403,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_server_request_unknown_channel_sets_unknown_flag() {
+    async fn send_server_request_unknown_channel_stream_sets_unknown_flag() {
         let service = service_for(make_state(), "ws");
         let resp = service
             .send_server_request_and_await(authed(SendServerRequestAndAwaitRequest {
@@ -407,7 +416,7 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        assert!(resp.unknown_channel);
+        assert!(resp.unknown_channel_stream);
     }
 
     #[tokio::test]
@@ -432,7 +441,7 @@ mod tests {
         let frame = rx.recv().await.unwrap();
         assert!(matches!(
             frame.command,
-            Some(channel_outbound::Command::SendMessage(_))
+            Some(channel_stream_outbound::Command::SendMessage(_))
         ));
     }
 
@@ -444,7 +453,7 @@ mod tests {
         let service = service_for(state.clone(), "ws");
         let resp = service
             .deliver_turn_state(authed(relay_proto::DeliverTurnStateRequest {
-                channel_id: id.clone(),
+                channel_stream_id: id.clone(),
                 turn_state: Some(TurnStateEvent {
                     state: TurnState::Working as i32,
                     conversation_id: "ws.conv".into(),
@@ -461,7 +470,7 @@ mod tests {
         let frame = rx.recv().await.unwrap();
         assert!(matches!(
             frame.command,
-            Some(channel_outbound::Command::TurnState(_))
+            Some(channel_stream_outbound::Command::TurnState(_))
         ));
         let rec = state
             .turn_state_record("subject-ws", "ws.conv")
@@ -478,7 +487,7 @@ mod tests {
         let service = service_for(state.clone(), "ws");
         service
             .deliver_turn_state(authed(relay_proto::DeliverTurnStateRequest {
-                channel_id: id.clone(),
+                channel_stream_id: id.clone(),
                 turn_state: Some(TurnStateEvent {
                     state: TurnState::Failed as i32,
                     conversation_id: "ws.conv".into(),
@@ -492,7 +501,7 @@ mod tests {
             .unwrap();
         let frame = rx.recv().await.unwrap();
         match frame.command {
-            Some(channel_outbound::Command::TurnState(e)) => {
+            Some(channel_stream_outbound::Command::TurnState(e)) => {
                 assert_eq!(e.state, TurnState::Failed as i32);
                 assert_eq!(e.reason, "inference job died");
                 assert_eq!(e.code, "14");
@@ -530,7 +539,7 @@ mod tests {
         };
         let resp = service
             .deliver_stream_item(authed(DeliverStreamItemRequest {
-                channel_id: id,
+                channel_stream_id: id,
                 item: Some(item.clone()),
             }))
             .await
@@ -539,7 +548,7 @@ mod tests {
         assert!(resp.delivered);
         let frame = rx.recv().await.unwrap();
         match frame.command {
-            Some(channel_outbound::Command::StreamItem(got)) => {
+            Some(channel_stream_outbound::Command::StreamItem(got)) => {
                 // Round-trip unchanged: the relayed item equals the input.
                 assert_eq!(got, item);
             }
@@ -551,14 +560,14 @@ mod tests {
     async fn deliver_stream_item_fans_out_to_workspace_not_cross_workspace() {
         let state = make_state();
         let (tx_other, mut rx_other) = mpsc::channel(4);
-        // Channel owned by "other" workspace.
+        // Channel stream owned by "other" workspace.
         let _id = mint_person(&state, "subject-other", "other", tx_other).await;
         let service = service_for(state, "ws");
-        // Verifier authenticates as "ws", so fan-out goes to "ws" channels only.
+        // Verifier authenticates as "ws", so fan-out goes to "ws" channel streams only.
         // There are none, so nothing is delivered.
         let resp = service
             .deliver_stream_item(authed(DeliverStreamItemRequest {
-                channel_id: String::new(),
+                channel_stream_id: String::new(),
                 item: Some(proto_common::StreamItem::default()),
             }))
             .await
@@ -567,7 +576,7 @@ mod tests {
         assert!(!resp.delivered);
         assert!(
             rx_other.try_recv().is_err(),
-            "other workspace channel must not receive"
+            "other workspace channel stream must not receive"
         );
     }
 }

@@ -8,7 +8,7 @@ Kyverno rule rejecting the request).
 
 | Test                                  | What it proves                                                                |
 |---------------------------------------|-------------------------------------------------------------------------------|
-| adapter-secret-name-allowlist/    | an adapter may only create the Secret named adapter-state, and only in its own namespace |
+| channel-secret-name-allowlist/    | a channel may only create the Secret named tailnet-identity, and only in its own namespace |
 
 The render-time bounds (provision-write, provision-identity, the relay-controller
 Role) live in `tests/unit/provision-installer/` and `tests/unit/tenant-chart/`.

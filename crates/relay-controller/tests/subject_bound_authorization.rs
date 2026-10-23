@@ -1,7 +1,7 @@
 //! Every request is authorized against its named workspace, per credential
 //! class, through the Kubernetes authorization API. The relay holds no
 //! authorization table of its own: a person token is a TokenReview-ed subject;
-//! an adapter token is a TokenReview-ed `adapter-<channel>` ServiceAccount
+//! a channel token is a TokenReview-ed `ch-<channel>` ServiceAccount
 //! whose sender resolves through the identity table. Either way the named
 //! workspace is checked by one SubjectAccessReview for the resolved subject,
 //! under the relay's own credential.
@@ -20,21 +20,21 @@ use tokio::sync::mpsc;
 use tonic::Request;
 
 use proto_common::{
-    channel_outbound, tool_result_frame, AwaitToolResultRequest, CallToolRequest,
-    ChannelIngestRequest, ChannelReceiveRequest, ContentBlock, GetTurnStateRequest,
+    channel_stream_outbound, tool_result_frame, AwaitToolResultRequest, CallToolRequest,
+    ChannelStreamIngestRequest, ChannelStreamReceiveRequest, ContentBlock, GetTurnStateRequest,
     ListGrantsRequest, ListWorkspacesRequest, ToolListUpdate, ToolResultFrame, TurnState,
     UserMessage, WatchToolsRequest,
 };
 use relay_controller::gateway::GatewayService;
 use relay_controller::listener::ListenerClass;
 use relay_proto::relay_gateway_server::RelayGateway;
-use shared::auth::ADAPTER_RELAY_AUDIENCE;
+use shared::auth::CHANNEL_RELAY_AUDIENCE;
 
 mod common;
 use common::apiserver::{
     assert_cut_on_next_item, bearer, bearer_classed, load_identities, next_item, state_for,
-    state_with_harness, stream_err, K8s, ADAPTER_SLACK, ADAPTER_TOKEN, ALICE, ALICE_TOKEN, BOB,
-    BOB_TOKEN,
+    state_with_harness, stream_err, K8s, ALICE, ALICE_TOKEN, BOB, BOB_TOKEN, CHANNEL_SLACK,
+    CHANNEL_TOKEN,
 };
 use common::harness::{spawn_mock_harness, MockHarness};
 use common::NAMESPACE;
@@ -65,9 +65,9 @@ fn call_tool(workspace: &str) -> CallToolRequest {
     }
 }
 
-fn receive(workspace: &str, sender: &str) -> ChannelReceiveRequest {
-    ChannelReceiveRequest {
-        adapter_hint: None,
+fn receive(workspace: &str, sender: &str) -> ChannelStreamReceiveRequest {
+    ChannelStreamReceiveRequest {
+        channel_hint: None,
         workspace: workspace.into(),
         sender: sender.into(),
     }
@@ -263,7 +263,7 @@ async fn a_person_token_opens_a_receive_stream_on_a_reached_workspace() {
     let svc = service(&k8s).await;
 
     let resp = svc
-        .channel_receive(bearer(ALICE_TOKEN, receive("alpha", "")))
+        .channel_stream_receive(bearer(ALICE_TOKEN, receive("alpha", "")))
         .await
         .expect("a person token on a reached workspace must open a receive stream");
     drop(resp);
@@ -287,13 +287,13 @@ async fn a_person_receive_on_an_unreached_workspace_is_denied() {
     let svc = service(&k8s).await;
 
     let err = stream_err(
-        svc.channel_receive(bearer(ALICE_TOKEN, receive("gamma", "")))
+        svc.channel_stream_receive(bearer(ALICE_TOKEN, receive("gamma", "")))
             .await,
     );
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
 }
 
-/// The sender field is the adapter path's: a person token carrying one is
+/// The sender field is the channel path's: a person token carrying one is
 /// refused rather than resolved, so a person cannot name another subject's
 /// handle.
 #[tokio::test]
@@ -302,56 +302,61 @@ async fn a_person_receive_naming_a_sender_is_refused() {
     let svc = service(&k8s).await;
 
     let err = stream_err(
-        svc.channel_receive(bearer(ALICE_TOKEN, receive("alpha", "U0123ABCDEF")))
+        svc.channel_stream_receive(bearer(ALICE_TOKEN, receive("alpha", "U0123ABCDEF")))
             .await,
     );
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
 }
 
-// --- Ingest: only the channel's opener may post on it ----------------------
+// --- Ingest: only the channel stream's opener may post on it ----------------------
 
-/// A mock apiserver authenticating alice, bob, and the slack adapter, with
+/// A mock apiserver authenticating alice, bob, and the slack channel, with
 /// both people allowed on ws-alpha and alice's slack handle bound.
-fn alice_bob_and_adapter() -> Arc<K8s> {
+fn alice_bob_and_channel() -> Arc<K8s> {
     K8s::with_tokens(&[
         (ALICE_TOKEN, ALICE),
         (BOB_TOKEN, BOB),
-        (ADAPTER_TOKEN, ADAPTER_SLACK),
+        (CHANNEL_TOKEN, CHANNEL_SLACK),
     ])
     .allow("ws-alpha", Some(ALICE))
     .allow("ws-alpha", Some(BOB))
 }
 
-/// The server-minted channel_id from a receive stream's first frame, the
-/// ChannelAck.
-async fn first_ack(stream: &mut <GatewayService as RelayGateway>::ChannelReceiveStream) -> String {
+/// The server-minted channel_stream_id from a receive stream's first frame, the
+/// ChannelStreamAck.
+async fn first_ack(
+    stream: &mut <GatewayService as RelayGateway>::ChannelStreamReceiveStream,
+) -> String {
     match stream.next().await {
         Some(Ok(frame)) => match frame.command {
-            Some(channel_outbound::Command::Ack(ack)) => ack.channel_id,
-            other => panic!("first frame must be the ChannelAck, got {other:?}"),
+            Some(channel_stream_outbound::Command::Ack(ack)) => ack.channel_stream_id,
+            other => panic!("first frame must be the ChannelStreamAck, got {other:?}"),
         },
         other => panic!("receive stream yielded no first frame: {other:?}"),
     }
 }
 
-/// Open a receive stream and return its server-minted channel_id from the
+/// Open a receive stream and return its server-minted channel_stream_id from the
 /// first frame.
-async fn open_channel(svc: &GatewayService, req: Request<ChannelReceiveRequest>) -> String {
+async fn open_channel_stream(
+    svc: &GatewayService,
+    req: Request<ChannelStreamReceiveRequest>,
+) -> String {
     let mut stream = svc
-        .channel_receive(req)
+        .channel_stream_receive(req)
         .await
-        .expect("the opener must be able to open its channel")
+        .expect("the opener must be able to open its channel stream")
         .into_inner();
-    let channel_id = first_ack(&mut stream).await;
+    let channel_stream_id = first_ack(&mut stream).await;
     // Keep the stream alive for the test's duration: dropping it unregisters
-    // the channel after a drain delay.
+    // the channel stream after a drain delay.
     std::mem::forget(stream);
-    channel_id
+    channel_stream_id
 }
 
-fn ingest(channel_id: &str) -> ChannelIngestRequest {
-    ChannelIngestRequest {
-        channel_id: channel_id.into(),
+fn ingest(channel_stream_id: &str) -> ChannelStreamIngestRequest {
+    ChannelStreamIngestRequest {
+        channel_stream_id: channel_stream_id.into(),
         user_message: Some(UserMessage {
             content: vec![ContentBlock::default()],
             ..Default::default()
@@ -384,58 +389,58 @@ async fn a_removed_rolebinding_denies_the_next_request() {
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
 }
 
-/// Removing the RoleBinding cuts an open channel on its next message: the
+/// Removing the RoleBinding cuts an open channel stream on its next message: the
 /// reach review runs again on every ingest.
 ///
 /// Without the per-ingest review the opener would keep posting to a
 /// workspace it no longer reaches.
 #[tokio::test]
-async fn a_removed_rolebinding_cuts_an_open_channels_next_message() {
-    let k8s = alice_bob_and_adapter();
+async fn a_removed_rolebinding_cuts_an_open_channel_streams_next_message() {
+    let k8s = alice_bob_and_channel();
     let svc = service(&k8s).await;
-    let ch = open_channel(&svc, bearer(ALICE_TOKEN, receive("alpha", ""))).await;
+    let ch = open_channel_stream(&svc, bearer(ALICE_TOKEN, receive("alpha", ""))).await;
 
     let err = svc
-        .channel_ingest(bearer(ALICE_TOKEN, ingest(&ch)))
+        .channel_stream_ingest(bearer(ALICE_TOKEN, ingest(&ch)))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::Unavailable, "bound: {err:?}");
 
     k8s.decisions.lock().unwrap().clear();
     let err = svc
-        .channel_ingest(bearer(ALICE_TOKEN, ingest(&ch)))
+        .channel_stream_ingest(bearer(ALICE_TOKEN, ingest(&ch)))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
 }
 
 /// Another person who reaches the same workspace still cannot post on a
-/// channel someone else opened.
+/// channel stream someone else opened.
 #[tokio::test]
-async fn another_persons_token_cannot_ingest_on_the_channel() {
-    let k8s = alice_bob_and_adapter();
+async fn another_persons_token_cannot_ingest_on_the_channel_stream() {
+    let k8s = alice_bob_and_channel();
     let svc = service(&k8s).await;
-    let ch = open_channel(&svc, bearer(ALICE_TOKEN, receive("alpha", ""))).await;
+    let ch = open_channel_stream(&svc, bearer(ALICE_TOKEN, receive("alpha", ""))).await;
 
     let err = svc
-        .channel_ingest(bearer(BOB_TOKEN, ingest(&ch)))
+        .channel_stream_ingest(bearer(BOB_TOKEN, ingest(&ch)))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
 }
 
-/// An adapter cannot post on a channel a person opened, even for the same
+/// A channel cannot post on a channel stream a person opened, even for the same
 /// subject's bound handle.
 #[tokio::test]
-async fn an_adapter_cannot_ingest_on_a_person_channel() {
-    let k8s = alice_bob_and_adapter();
+async fn a_channel_cannot_ingest_on_a_person_channel_stream() {
+    let k8s = alice_bob_and_channel();
     let svc = service(&k8s).await;
-    let ch = open_channel(&svc, bearer(ALICE_TOKEN, receive("alpha", ""))).await;
+    let ch = open_channel_stream(&svc, bearer(ALICE_TOKEN, receive("alpha", ""))).await;
 
     let err = svc
-        .channel_ingest(bearer_classed(
-            ADAPTER_TOKEN,
-            ListenerClass::AdapterToken,
+        .channel_stream_ingest(bearer_classed(
+            CHANNEL_TOKEN,
+            ListenerClass::ChannelToken,
             ingest(&ch),
         ))
         .await
@@ -443,24 +448,24 @@ async fn an_adapter_cannot_ingest_on_a_person_channel() {
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
 }
 
-/// A person cannot post on a channel an adapter opened for that person's
-/// own handle: the adapter channel belongs to the adapter.
+/// A person cannot post on a channel stream a channel opened for that person's
+/// own handle: the channel-opened stream belongs to the channel.
 #[tokio::test]
-async fn a_person_cannot_ingest_on_an_adapter_channel() {
-    let k8s = alice_bob_and_adapter();
+async fn a_person_cannot_ingest_on_a_channel_opened_stream() {
+    let k8s = alice_bob_and_channel();
     let svc = service(&k8s).await;
-    let ch = open_channel(
+    let ch = open_channel_stream(
         &svc,
         bearer_classed(
-            ADAPTER_TOKEN,
-            ListenerClass::AdapterToken,
+            CHANNEL_TOKEN,
+            ListenerClass::ChannelToken,
             receive("alpha", "U0123ABCDEF"),
         ),
     )
     .await;
 
     let err = svc
-        .channel_ingest(bearer(ALICE_TOKEN, ingest(&ch)))
+        .channel_stream_ingest(bearer(ALICE_TOKEN, ingest(&ch)))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
@@ -538,13 +543,13 @@ async fn an_unknown_call_id_is_not_found() {
     assert_eq!(err.code(), tonic::Code::NotFound);
 }
 
-/// An adapter channel opened while the sender's handle was bound stops
+/// A channel-opened stream created while the sender's handle was bound stops
 /// carrying that sender's messages as soon as the operator removes the
 /// binding: every ingest re-resolves the handle against the live identity
 /// table, the same way every request re-runs the reach review.
 #[tokio::test]
-async fn a_removed_handle_binding_cuts_an_open_adapter_channel() {
-    let k8s = alice_bob_and_adapter();
+async fn a_removed_handle_binding_cuts_an_open_channel_opened_stream() {
+    let k8s = alice_bob_and_channel();
     let state = state_for(
         &k8s,
         &[("user-alice", ALICE, "alpha", &[("slack", "U0123ABCDEF")])],
@@ -552,23 +557,23 @@ async fn a_removed_handle_binding_cuts_an_open_adapter_channel() {
     .await;
     let svc = GatewayService::new(state.clone());
 
-    let ch = open_channel(
+    let ch = open_channel_stream(
         &svc,
         bearer_classed(
-            ADAPTER_TOKEN,
-            ListenerClass::AdapterToken,
+            CHANNEL_TOKEN,
+            ListenerClass::ChannelToken,
             receive("alpha", "U0123ABCDEF"),
         ),
     )
     .await;
 
-    // While bound, the adapter's message passes the ingest check and reaches
+    // While bound, the channel's message passes the ingest check and reaches
     // the harness dial (Unavailable without a harness).
     let err = tokio::time::timeout(
         Duration::from_secs(5),
-        svc.channel_ingest(bearer_classed(
-            ADAPTER_TOKEN,
-            ListenerClass::AdapterToken,
+        svc.channel_stream_ingest(bearer_classed(
+            CHANNEL_TOKEN,
+            ListenerClass::ChannelToken,
             ingest(&ch),
         )),
     )
@@ -578,13 +583,13 @@ async fn a_removed_handle_binding_cuts_an_open_adapter_channel() {
     assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}");
 
     // The operator removes the handle; the watcher delivers the table
-    // without it. The open channel's next message is refused.
+    // without it. The open channel stream's next message is refused.
     load_identities(&state, &[("user-alice", ALICE, "alpha", &[])]).await;
 
     let err = svc
-        .channel_ingest(bearer_classed(
-            ADAPTER_TOKEN,
-            ListenerClass::AdapterToken,
+        .channel_stream_ingest(bearer_classed(
+            CHANNEL_TOKEN,
+            ListenerClass::ChannelToken,
             ingest(&ch),
         ))
         .await
@@ -592,7 +597,7 @@ async fn a_removed_handle_binding_cuts_an_open_adapter_channel() {
     assert_eq!(
         err.code(),
         tonic::Code::PermissionDenied,
-        "a removed handle binding must cut the open channel: {err:?}"
+        "a removed handle binding must cut the open channel stream: {err:?}"
     );
 }
 
@@ -605,15 +610,15 @@ async fn a_removed_handle_binding_cuts_an_open_adapter_channel() {
 /// traffic to a subject that no longer reaches the workspace.
 #[tokio::test]
 async fn a_removed_rolebinding_cuts_an_open_receive_stream() {
-    let k8s = alice_bob_and_adapter();
+    let k8s = alice_bob_and_channel();
     let state = state_for(&k8s, &[("user-alice", ALICE, "alpha", &[])]).await;
     let svc = GatewayService::new(state.clone());
     let mut stream = svc
-        .channel_receive(bearer(ALICE_TOKEN, receive("alpha", "")))
+        .channel_stream_receive(bearer(ALICE_TOKEN, receive("alpha", "")))
         .await
         .expect("alice reaches alpha")
         .into_inner();
-    let channel_id = first_ack(&mut stream).await;
+    let channel_stream_id = first_ack(&mut stream).await;
     // The replayed turn phase still arrives while alice is bound.
     assert!(matches!(stream.next().await, Some(Ok(_))));
 
@@ -621,7 +626,7 @@ async fn a_removed_rolebinding_cuts_an_open_receive_stream() {
     k8s.decisions.lock().unwrap().clear();
 
     state
-        .set_and_broadcast_turn_state(&channel_id, ALICE, "conv-1", TurnState::Working)
+        .set_and_broadcast_turn_state(&channel_stream_id, ALICE, "conv-1", TurnState::Working)
         .await;
     assert_cut_on_next_item(&mut stream, "revocation").await;
 }
@@ -634,27 +639,27 @@ async fn a_removed_rolebinding_cuts_an_open_receive_stream() {
 /// after the login expired.
 #[tokio::test]
 async fn an_expired_token_cuts_an_open_receive_stream() {
-    let k8s = alice_bob_and_adapter();
+    let k8s = alice_bob_and_channel();
     let state = state_for(&k8s, &[("user-alice", ALICE, "alpha", &[])]).await;
     let svc = GatewayService::new(state.clone());
     let mut stream = svc
-        .channel_receive(bearer(ALICE_TOKEN, receive("alpha", "")))
+        .channel_stream_receive(bearer(ALICE_TOKEN, receive("alpha", "")))
         .await
         .expect("alice reaches alpha")
         .into_inner();
-    let channel_id = first_ack(&mut stream).await;
+    let channel_stream_id = first_ack(&mut stream).await;
     assert!(matches!(stream.next().await, Some(Ok(_))));
 
     // The token expires: the apiserver no longer authenticates it.
     k8s.tokens.lock().unwrap().remove(ALICE_TOKEN);
 
     state
-        .set_and_broadcast_turn_state(&channel_id, ALICE, "conv-1", TurnState::Working)
+        .set_and_broadcast_turn_state(&channel_stream_id, ALICE, "conv-1", TurnState::Working)
         .await;
     assert_cut_on_next_item(&mut stream, "token expiry").await;
 }
 
-/// An adapter stream opened while the sender's handle was bound stops
+/// A channel's stream opened while the sender's handle was bound stops
 /// delivering as soon as the operator removes the binding: before each
 /// outbound item the relay re-resolves the handle, so the removed handle
 /// receives none of the subject's turn traffic. The subject's RBAC reach is
@@ -663,8 +668,8 @@ async fn an_expired_token_cuts_an_open_receive_stream() {
 /// Re-reviewing only the RBAC reach would keep this stream delivering to
 /// the unbound handle.
 #[tokio::test]
-async fn a_removed_handle_binding_cuts_an_open_adapter_stream() {
-    let k8s = alice_bob_and_adapter();
+async fn a_removed_handle_binding_cuts_an_open_channel_receive_stream() {
+    let k8s = alice_bob_and_channel();
     let state = state_for(
         &k8s,
         &[("user-alice", ALICE, "alpha", &[("slack", "U0123ABCDEF")])],
@@ -673,15 +678,15 @@ async fn a_removed_handle_binding_cuts_an_open_adapter_stream() {
     let svc = GatewayService::new(state.clone());
 
     let mut stream = svc
-        .channel_receive(bearer_classed(
-            ADAPTER_TOKEN,
-            ListenerClass::AdapterToken,
+        .channel_stream_receive(bearer_classed(
+            CHANNEL_TOKEN,
+            ListenerClass::ChannelToken,
             receive("alpha", "U0123ABCDEF"),
         ))
         .await
         .expect("a bound sender opens its stream")
         .into_inner();
-    let channel_id = first_ack(&mut stream).await;
+    let channel_stream_id = first_ack(&mut stream).await;
     assert!(
         matches!(stream.next().await, Some(Ok(_))),
         "replay arrives while bound"
@@ -691,57 +696,57 @@ async fn a_removed_handle_binding_cuts_an_open_adapter_stream() {
     load_identities(&state, &[("user-alice", ALICE, "alpha", &[])]).await;
 
     state
-        .set_and_broadcast_turn_state(&channel_id, ALICE, "conv-1", TurnState::Working)
+        .set_and_broadcast_turn_state(&channel_stream_id, ALICE, "conv-1", TurnState::Working)
         .await;
     assert_cut_on_next_item(&mut stream, "the handle removal").await;
 }
 
-// --- The adapter path -------------------------------------------------------
+// --- The channel path -------------------------------------------------------
 
-/// An adapter message names its workspace and sender; the relay
-/// authenticates the adapter by a TokenReview pinned to the adapter audience,
+/// A channel message names its workspace and sender; the relay
+/// authenticates the channel by a TokenReview pinned to the channel audience,
 /// resolves the sender through the identity table, and checks the workspace
 /// by a SubjectAccessReview carrying the resolved subject and the relay's own
 /// namespace.
 #[tokio::test]
-async fn an_adapter_message_is_authorized_by_a_subject_review() {
-    let k8s = K8s::with_token(ADAPTER_TOKEN, ADAPTER_SLACK).allow("ws-alpha", Some(ALICE));
+async fn a_channel_message_is_authorized_by_a_subject_review() {
+    let k8s = K8s::with_token(CHANNEL_TOKEN, CHANNEL_SLACK).allow("ws-alpha", Some(ALICE));
     let svc = service(&k8s).await;
 
     let resp = svc
-        .channel_receive(bearer_classed(
-            ADAPTER_TOKEN,
-            ListenerClass::AdapterToken,
+        .channel_stream_receive(bearer_classed(
+            CHANNEL_TOKEN,
+            ListenerClass::ChannelToken,
             receive("alpha", "U0123ABCDEF"),
         ))
         .await
         .expect("a bound sender on an allowed workspace must be received");
     drop(resp);
 
-    // The TokenReview the adapter path submitted is pinned to the adapter
+    // The TokenReview the channel path submitted is pinned to the channel
     // audience.
     let token_reviews = k8s.seen_token_reviews();
     assert_eq!(
         token_reviews.len(),
         1,
-        "one TokenReview per adapter request"
+        "one TokenReview per channel request"
     );
     assert_eq!(
         token_reviews[0]
             .1
             .pointer("/spec/token")
             .and_then(|v| v.as_str()),
-        Some(ADAPTER_TOKEN),
-        "the TokenReview must carry the adapter's token"
+        Some(CHANNEL_TOKEN),
+        "the TokenReview must carry the channel's token"
     );
     assert!(
         token_reviews[0]
             .1
             .pointer("/spec/audiences")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().any(|x| x.as_str() == Some(ADAPTER_RELAY_AUDIENCE)))
+            .map(|a| a.iter().any(|x| x.as_str() == Some(CHANNEL_RELAY_AUDIENCE)))
             .unwrap_or(false),
-        "the adapter TokenReview must pin the adapter audience; got {}",
+        "the channel TokenReview must pin the channel audience; got {}",
         token_reviews[0]
             .1
             .pointer("/spec/audiences")
@@ -775,14 +780,14 @@ async fn an_adapter_message_is_authorized_by_a_subject_review() {
 /// A sender whose platform ID has no operator binding is refused before
 /// any review or routing.
 #[tokio::test]
-async fn an_adapter_message_from_an_unbound_sender_is_refused() {
-    let k8s = K8s::with_token(ADAPTER_TOKEN, ADAPTER_SLACK);
+async fn a_channel_message_from_an_unbound_sender_is_refused() {
+    let k8s = K8s::with_token(CHANNEL_TOKEN, CHANNEL_SLACK);
     let svc = service(&k8s).await;
 
     let err = stream_err(
-        svc.channel_receive(bearer_classed(
-            ADAPTER_TOKEN,
-            ListenerClass::AdapterToken,
+        svc.channel_stream_receive(bearer_classed(
+            CHANNEL_TOKEN,
+            ListenerClass::ChannelToken,
             receive("alpha", "U999ZZZZZZZ"),
         ))
         .await,
@@ -794,31 +799,28 @@ async fn an_adapter_message_from_an_unbound_sender_is_refused() {
     );
 }
 
-/// The adapter path's structural channel identity: an authenticated token
-/// that is not an `adapter-<channel>` ServiceAccount of this tenant is
-/// refused. The imposter is `adapter-slack` from another namespace, whose
+/// The channel path's structural channel identity: an authenticated token
+/// that is not a `ch-<channel>` ServiceAccount of this tenant is
+/// refused. The imposter is `ch-slack` from another namespace, whose
 /// channel has a bound handle and whose subject the review allows, so only
 /// the structural check stands between it and alice's stream.
 #[tokio::test]
-async fn a_non_adapter_serviceaccount_is_refused_on_the_adapter_path() {
-    let k8s = K8s::with_token(
-        ADAPTER_TOKEN,
-        "system:serviceaccount:tenant-other:adapter-slack",
-    )
-    .allow("ws-alpha", Some(ALICE));
+async fn a_non_channel_serviceaccount_is_refused_on_the_channel_path() {
+    let k8s = K8s::with_token(CHANNEL_TOKEN, "system:serviceaccount:tenant-other:ch-slack")
+        .allow("ws-alpha", Some(ALICE));
     let svc = service(&k8s).await;
 
     let err = stream_err(
-        svc.channel_receive(bearer_classed(
-            ADAPTER_TOKEN,
-            ListenerClass::AdapterToken,
+        svc.channel_stream_receive(bearer_classed(
+            CHANNEL_TOKEN,
+            ListenerClass::ChannelToken,
             receive("alpha", "U0123ABCDEF"),
         ))
         .await,
     );
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
     assert!(
-        err.message().contains("not an adapter ServiceAccount"),
+        err.message().contains("not a channel ServiceAccount"),
         "{}",
         err.message()
     );
@@ -826,14 +828,14 @@ async fn a_non_adapter_serviceaccount_is_refused_on_the_adapter_path() {
 
 /// The SAR answers not-allowed and the message is refused.
 #[tokio::test]
-async fn an_adapter_message_for_an_unreachable_workspace_is_refused() {
-    let k8s = K8s::with_token(ADAPTER_TOKEN, ADAPTER_SLACK);
+async fn a_channel_message_for_an_unreachable_workspace_is_refused() {
+    let k8s = K8s::with_token(CHANNEL_TOKEN, CHANNEL_SLACK);
     let svc = service(&k8s).await;
 
     let err = stream_err(
-        svc.channel_receive(bearer_classed(
-            ADAPTER_TOKEN,
-            ListenerClass::AdapterToken,
+        svc.channel_stream_receive(bearer_classed(
+            CHANNEL_TOKEN,
+            ListenerClass::ChannelToken,
             receive("gamma", "U0123ABCDEF"),
         ))
         .await,
@@ -989,58 +991,58 @@ async fn a_removed_rolebinding_cuts_an_open_await_tool_result_stream() {
     assert_cut_on_next_item(&mut stream, "revocation").await;
 }
 
-// --- The adapter stream's per-item token review -----------------------------
+// --- A channel-opened stream's per-item token review ------------------------
 
-/// Open an adapter receive stream for alice's slack handle and read the ack
-/// and the turn-state replay. Returns the stream and its channel_id.
-async fn open_adapter_stream(
+/// Open a channel receive stream for alice's slack handle and read the ack
+/// and the turn-state replay. Returns the stream and its channel_stream_id.
+async fn open_channel_receive_stream(
     svc: &GatewayService,
 ) -> (
-    <GatewayService as RelayGateway>::ChannelReceiveStream,
+    <GatewayService as RelayGateway>::ChannelStreamReceiveStream,
     String,
 ) {
     let mut stream = svc
-        .channel_receive(bearer_classed(
-            ADAPTER_TOKEN,
-            ListenerClass::AdapterToken,
+        .channel_stream_receive(bearer_classed(
+            CHANNEL_TOKEN,
+            ListenerClass::ChannelToken,
             receive("alpha", "U0123ABCDEF"),
         ))
         .await
         .expect("a bound sender opens its stream")
         .into_inner();
-    let channel_id = first_ack(&mut stream).await;
+    let channel_stream_id = first_ack(&mut stream).await;
     assert!(
         matches!(next_item(&mut stream).await, Some(Ok(_))),
         "replay arrives while bound"
     );
-    (stream, channel_id)
+    (stream, channel_stream_id)
 }
 
-/// The adapter token is bound to the adapter audience, so the re-review
-/// before each item on an adapter stream must ask for that audience, as the
-/// review that opened it did. The mock apiserver authenticates the adapter
+/// The channel token is bound to the channel audience, so the re-review
+/// before each item on a channel's stream must ask for that audience, as the
+/// review that opened it did. The mock apiserver authenticates the channel
 /// token for that audience only.
 ///
-/// Re-reviewing the adapter's token with no audience would make the
-/// apiserver reject it, cutting the adapter's own stream on its first
+/// Re-reviewing the channel's token with no audience would make the
+/// apiserver reject it, cutting the channel's own stream on its first
 /// item.
 #[tokio::test]
-async fn an_adapter_streams_per_item_reviews_carry_the_adapter_audience() {
-    let k8s = alice_bob_and_adapter();
+async fn a_channel_streams_per_item_reviews_carry_the_channel_audience() {
+    let k8s = alice_bob_and_channel();
     let state = state_for(
         &k8s,
         &[("user-alice", ALICE, "alpha", &[("slack", "U0123ABCDEF")])],
     )
     .await;
     let svc = GatewayService::new(state.clone());
-    let (mut stream, channel_id) = open_adapter_stream(&svc).await;
+    let (mut stream, channel_stream_id) = open_channel_receive_stream(&svc).await;
 
     state
-        .set_and_broadcast_turn_state(&channel_id, ALICE, "conv-1", TurnState::Working)
+        .set_and_broadcast_turn_state(&channel_stream_id, ALICE, "conv-1", TurnState::Working)
         .await;
     assert!(
         matches!(next_item(&mut stream).await, Some(Ok(_))),
-        "a live turn reaches the adapter while it is bound"
+        "a live turn reaches the channel while it is bound"
     );
 
     let reviews = k8s.seen_token_reviews();
@@ -1054,8 +1056,8 @@ async fn an_adapter_streams_per_item_reviews_carry_the_adapter_audience() {
             .unwrap_or_default();
         assert_eq!(
             audiences,
-            vec![serde_json::Value::from(ADAPTER_RELAY_AUDIENCE)],
-            "every review of the adapter's token must pin the adapter audience"
+            vec![serde_json::Value::from(CHANNEL_RELAY_AUDIENCE)],
+            "every review of the channel's token must pin the channel audience"
         );
     }
 }

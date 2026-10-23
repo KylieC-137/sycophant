@@ -22,7 +22,7 @@ use tonic::Status;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::channel_tools;
+use crate::channel_stream_tools;
 use crate::clients::{RelayClient, RelayRpc, ToolsetRpc};
 use crate::dispatch::DispatchState;
 use crate::execution_log::{assemble_from_frames, frames_from_response, ExecutionLogWriter};
@@ -35,11 +35,11 @@ use crate::runtime_tools::{self, DispatchAbort};
 pub(crate) enum Source {
     Toolset,
     Runtime,
-    /// Client-side tool. Executes on the user's device (Flutter app
-    /// today) via a `ServerRequest` over the channel. Dispatch routes
+    /// Client-side tool. Executes on the user's device via a
+    /// `ServerRequest` over the channel stream. Dispatch routes
     /// through the relay gateway's `SendServerNotification` /
     /// `SendServerRequestAndAwait` depending on the tool's `Kind`.
-    Channel,
+    ChannelStream,
 }
 
 /// Tool dispatch surface used by the agent loop. The trait carries the
@@ -60,13 +60,13 @@ pub(crate) trait ToolDispatcher: Send + Sync {
         grants: &HashMap<String, String>,
         toolset: &mut dyn ToolsetRpc,
         conversation_id: &str,
-        reply_channel: Option<&str>,
+        reply_channel_stream: Option<&str>,
         tool_call_id: &str,
         cancel: &CancellationToken,
     ) -> Result<CallToolResponse, DispatchAbort>;
 
     /// The advertised tool set narrowed to an agent's declared `tools:` list.
-    /// Runtime and channel tools are always advertised; the list scopes only
+    /// Runtime and channel-stream tools are always advertised; the list scopes only
     /// toolset tools. `None` returns the full snapshot. A dispatched sub-turn
     /// builds its sub-request tool set through this, the same seam the primary
     /// turn uses.
@@ -86,7 +86,7 @@ struct CatalogEntry {
     /// For a `Toolset` tool, its toolset's grants: the credential rows a
     /// call may select, keyed by grant name. The in-process dispatch producer
     /// resolves the turn-selected grant name against it. Empty for runtime and
-    /// channel tools. Rides the same atomic swap as `args`, so a tool's grants
+    /// channel-stream tools. Rides the same atomic swap as `args`, so a tool's grants
     /// can never lag its definition.
     grants: HashMap<String, CapabilityGrant>,
 }
@@ -103,7 +103,7 @@ pub(crate) struct ToolRouter<A = UnconfiguredToolset> {
     /// back the `Source::Toolset` arm with a `FakeToolset`. Production leaves it
     /// unset: agent turns dial the model directly via `InferenceDispatch`.
     toolset: Option<A>,
-    /// Dialer for the relay gateway's internal listener. `Channel`-source
+    /// Dialer for the relay gateway's internal listener. `ChannelStream`-source
     /// tools push `ServerRequest` frames through it. `None` in tests and when
     /// no gateway is configured.
     relay: Option<RelayClient>,
@@ -187,7 +187,7 @@ impl ToolsetRpc for UnconfiguredToolset {
     }
 }
 
-/// Why a toolset cannot be listed: a tool shadowing a runtime or channel tool,
+/// Why a toolset cannot be listed: a tool shadowing a runtime or channel-stream tool,
 /// or an arg mapped to an env the harness reserves on tool jobs.
 fn clash(entry: &ToolsetEntry, builtin: &[String]) -> Option<String> {
     for tool in &entry.tools {
@@ -248,20 +248,17 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
                 grants: HashMap::new(),
             })
             .collect();
-        // Channel-source tools (RevealPath, RequestUserInput, RequestUserAuth)
-        // are framework-defined just like runtime tools — declared in
-        // `channel_tools::tool_definitions` and inserted at construction.
         tools.extend(
-            channel_tools::tool_definitions()
+            channel_stream_tools::tool_definitions()
                 .into_iter()
                 .map(|t| CatalogEntry {
                     info: t,
-                    source: Source::Channel,
+                    source: Source::ChannelStream,
                     args: Vec::new(),
                     grants: HashMap::new(),
                 }),
         );
-        // Ensure runtime + channel names don't collide among themselves.
+        // Ensure runtime + channel-stream names don't collide among themselves.
         let mut seen = std::collections::HashSet::new();
         for entry in &tools {
             assert!(
@@ -333,9 +330,9 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
     /// Rebuild the toolset-owned catalog from the live toolset table, listing
     /// only the toolsets this workspace binds, each tool carrying its args and
     /// the workspace's grants for its toolset. A toolset that names a runtime
-    /// or channel tool, or maps an arg to an env the harness stamps on tool
+    /// or channel-stream tool, or maps an arg to an env the harness stamps on tool
     /// jobs, is left out whole and the returned warnings name it. Runtime and
-    /// channel entries are preserved.
+    /// channel-stream entries are preserved.
     pub(crate) fn apply_toolsets(&self, table: &ToolsetConfig) -> Vec<String> {
         let _guard = self
             .apply_lock
@@ -395,7 +392,7 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
     }
 
     /// Advertised tool set narrowed to an agent's declared `tools:` list.
-    /// Runtime and channel tools are always advertised; the list scopes only
+    /// Runtime and channel-stream tools are always advertised; the list scopes only
     /// toolset tools. `None` returns the full snapshot unchanged.
     pub(crate) fn tool_definitions_scoped(
         &self,
@@ -480,11 +477,11 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         grants: &HashMap<String, String>,
         toolset: &mut dyn ToolsetRpc,
         conversation_id: &str,
-        reply_channel: Option<&str>,
+        reply_channel_stream: Option<&str>,
         tool_call_id: &str,
         // The parent turn's cancel token. The `Toolset` arm races it against
         // the frame-stream consume; the `Runtime` arm forwards it into
-        // sub-agent dispatch. The `Channel` arm ignores it — its unary
+        // sub-agent dispatch. The `ChannelStream` arm ignores it — its unary
         // dispatch has no in-flight point to interrupt.
         cancel: &CancellationToken,
     ) -> Result<CallToolResponse, DispatchAbort>
@@ -522,21 +519,21 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
                     self as &dyn ToolDispatcher,
                     &self.registry,
                     conversation_id,
-                    reply_channel,
+                    reply_channel_stream,
                     gateway.as_mut().map(|g| g as &mut dyn RelayRpc),
                     cancel,
                 )
                 .await
             }
-            Source::Channel => {
+            Source::ChannelStream => {
                 let mut gateway = self.relay.clone().ok_or_else(|| {
                     DispatchAbort::Error("relay gateway client not configured".into())
                 })?;
-                channel_tools::dispatch(
+                channel_stream_tools::dispatch(
                     name,
                     input_json,
                     &mut gateway,
-                    reply_channel,
+                    reply_channel_stream,
                     tool_call_id,
                     &self.workspace,
                 )
@@ -663,13 +660,13 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
                 self.dispatch_client_runtime_tool(name, input_json, conversation_id)
                     .await
             }
-            // A channel tool executes on the user's own device via a
+            // A channel-stream tool executes on the user's own device via a
             // `ServerRequest`. Dispatching one FROM that device would be a
             // request looping back at its own sender, so it is refused by name
             // instead of falling through to a controller that would answer with
             // a confusing `unknown tool`.
-            Source::Channel => Err(format!(
-                "{name} is not client-dispatchable: channel tools execute on the client itself"
+            Source::ChannelStream => Err(format!(
+                "{name} is not client-dispatchable: channel-stream tools execute on the client itself"
             )),
         }
     }
@@ -998,7 +995,7 @@ impl<A: ToolsetRpc + Clone + Send + Sync + 'static> ToolDispatcher for ToolRoute
         grants: &HashMap<String, String>,
         toolset: &mut dyn ToolsetRpc,
         conversation_id: &str,
-        reply_channel: Option<&str>,
+        reply_channel_stream: Option<&str>,
         tool_call_id: &str,
         cancel: &CancellationToken,
     ) -> Result<CallToolResponse, DispatchAbort> {
@@ -1009,7 +1006,7 @@ impl<A: ToolsetRpc + Clone + Send + Sync + 'static> ToolDispatcher for ToolRoute
             grants,
             toolset,
             conversation_id,
-            reply_channel,
+            reply_channel_stream,
             tool_call_id,
             cancel,
         )
@@ -1417,9 +1414,9 @@ mod tests {
     }
 
     const RUNTIME_TOOLS: &[&str] = &["read", "dispatch", "list", "Think", "RecentTurns"];
-    const CHANNEL_TOOLS: &[&str] = &["RevealPath", "RequestUserInput", "RequestUserAuth"];
+    const CHANNEL_STREAM_TOOLS: &[&str] = &["RevealPath", "RequestUserInput", "RequestUserAuth"];
 
-    /// Router carrying all three sources: runtime + channel from `empty_router`,
+    /// Router carrying all three sources: runtime + channel-stream from `empty_router`,
     /// plus two toolset tools.
     fn router_with_two_toolset_tools() -> ToolRouter {
         seed(empty_router(), vec![t("Bash"), t("Curl")])
@@ -1433,8 +1430,8 @@ mod tests {
             .collect()
     }
 
-    fn assert_runtime_and_channel_present(names: &[String]) {
-        for want in RUNTIME_TOOLS.iter().chain(CHANNEL_TOOLS.iter()) {
+    fn assert_runtime_and_channel_stream_present(names: &[String]) {
+        for want in RUNTIME_TOOLS.iter().chain(CHANNEL_STREAM_TOOLS.iter()) {
             assert!(
                 names.iter().any(|n| n == want),
                 "expected {want} advertised, got {names:?}"
@@ -1449,23 +1446,23 @@ mod tests {
     }
 
     #[test]
-    fn scoped_intersects_toolset_and_keeps_runtime_and_channel() {
+    fn scoped_intersects_toolset_and_keeps_runtime_and_channel_stream() {
         let router = router_with_two_toolset_tools();
         let list = vec!["Bash".to_string()];
         let names = scoped_names(&router, Some(&list));
         assert!(names.iter().any(|n| n == "Bash"));
         assert!(!names.iter().any(|n| n == "Curl"));
-        assert_runtime_and_channel_present(&names);
+        assert_runtime_and_channel_stream_present(&names);
     }
 
     #[test]
-    fn scoped_empty_list_keeps_runtime_and_channel_only() {
+    fn scoped_empty_list_keeps_runtime_and_channel_stream_only() {
         let router = router_with_two_toolset_tools();
         let list: Vec<String> = vec![];
         let names = scoped_names(&router, Some(&list));
         assert!(!names.iter().any(|n| n == "Bash"));
         assert!(!names.iter().any(|n| n == "Curl"));
-        assert_runtime_and_channel_present(&names);
+        assert_runtime_and_channel_stream_present(&names);
     }
 
     /// The agent tool list scopes only what the model is shown; it is not an
@@ -2501,12 +2498,8 @@ mod tests {
         assert_eq!(infos[0]["description"], "Decide the doctype.");
     }
 
-    // `Channel`-source tools execute on the user's device via a `ServerRequest`.
-    // A client dispatching one would be a request looping back at its own sender,
-    // so the client path rejects it by name instead of falling through to the
-    // toolset, which would answer with a confusing `unknown tool`.
     #[tokio::test]
-    async fn client_dispatch_rejects_a_channel_tool_without_calling_the_toolset() {
+    async fn client_dispatch_rejects_a_channel_stream_tool_without_calling_the_toolset() {
         let dispatch = in_process_dispatch();
         let router: ToolRouter = ToolRouter::new(
             test_instructions(),
@@ -2520,7 +2513,7 @@ mod tests {
         let err = router
             .dispatch_client_tool("RevealPath", r#"{"path":"/x"}"#, "conv")
             .await
-            .expect_err("a Channel-source tool is not client-dispatchable");
+            .expect_err("a ChannelStream-source tool is not client-dispatchable");
         assert!(
             err.contains("not client-dispatchable"),
             "the error names the tool as not client-dispatchable, got {err:?}"
@@ -2528,7 +2521,7 @@ mod tests {
         assert_eq!(
             dispatch.pending_call_count().await,
             0,
-            "a rejected Channel dispatch must not reach the in-process dispatcher"
+            "a rejected ChannelStream dispatch must not reach the in-process dispatcher"
         );
     }
 }

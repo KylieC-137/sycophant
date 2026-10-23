@@ -1225,12 +1225,12 @@ mod tests {
             ),
             (
                 "tools list",
-                "---\ntools:\n  - test-cmd\n  - test-cred\n  - Shell\n---\nbody",
+                "---\ntools:\n  - GetSecret\n  - WebFetch\n  - Shell\n---\nbody",
                 "body",
                 None,
                 Some(vec![
-                    "test-cmd".to_string(),
-                    "test-cred".to_string(),
+                    "GetSecret".to_string(),
+                    "WebFetch".to_string(),
                     "Shell".to_string(),
                 ]),
             ),

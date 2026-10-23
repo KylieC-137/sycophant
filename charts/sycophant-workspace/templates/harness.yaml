@@ -1,9 +1,8 @@
 {{/*
-Per-workspace materialization: emit one ServiceAccount + PersistentVolumeClaim
-+ Deployment for the workspace its provision command installs. The workspace PVC is
-mounted by harness-spawned tool jobs (RW). The harness owns a
-SEPARATE conversation-history PVC (tool jobs never mount it, so the
-untrusted runtime can't forge history). Instructions content (AGENTS.md,
+Per-workspace materialization for the workspace its provision command
+installs. The workspace PVC is mounted by harness-spawned tool jobs (RW).
+The harness owns a SEPARATE conversation-history PVC (tool jobs never mount
+it, so the untrusted runtime can't forge history). Instructions content (AGENTS.md,
 agents, skills) is synced at pod start by an init container from this
 workspace's object-storage folder into an emptyDir the serving container
 mounts read-only and reads in-process — no separate instructions-serving pod,
@@ -24,17 +23,6 @@ first harness boot when audience verification fails.
 {{- $m := .Values.command }}
 {{- $grants := dict }}
 {{- range $k, $v := $m }}{{ if hasPrefix "grant." $k }}{{ $_ := set $grants $k $v }}{{ end }}{{ end }}
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: ws-{{ $name }}-init
-  namespace: {{ $.Release.Namespace }}
-  labels:
-    {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 4 }}
-    sycophant.md/type: workspace-sa
-    sycophant.md/workspace: {{ $name }}
-automountServiceAccountToken: false
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

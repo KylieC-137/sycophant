@@ -75,7 +75,7 @@ pub(crate) fn up(values: &Values) -> Result<(), String> {
 /// succeeds, so a name or tenant the reap refuses never reaches it.
 pub(crate) fn down(name: &str, tenant: &str) -> Result<(), String> {
     let op = Operator::login(&Scope::global()?.oidc_dir())?;
-    command::reap(&op, "workspace", name, tenant)?;
+    command::reap(&op, "workspace", "name", name, tenant)?;
     clear(&folder_url(&tenant_ns(tenant), name))
 }
 

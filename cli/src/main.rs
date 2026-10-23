@@ -29,9 +29,10 @@ fn main() {
             cli::ComponentSub::Up(c) => commands::workspace::up(&c.values),
             cli::ComponentSub::Down(c) => commands::workspace::down(&c.name, &c.tenant),
         },
-        Command::User(cli::UserCmd {
-            sub: cli::UserSub::Up(c),
-        }) => commands::command::up("user", &c.values),
+        Command::User(cli::UserCmd { sub }) => match sub {
+            cli::UserSub::Up(c) => commands::command::up("user", &c.values),
+            cli::UserSub::Down(c) => commands::command::user_down(&c.subject, &c.tenant),
+        },
         Command::Inference(cmd) => component("inference", cmd),
         Command::Channel(cmd) => component("channel", cmd),
     };

@@ -252,7 +252,7 @@ the second install; decide whether to reject such names here instead.
   message: "a reap command name must be reap-workspace-<name> with a DNS-safe name of at most 49 characters"` ) }}
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-user" "prefix" true
-  "command" (include "sycophant.userProvisionCommandName" .) "noun" "user" "action" "bind a framework user"
+  "command" (include "sycophant.userProvisionCommandName" .) "noun" "user" "action" "bind a user"
   "keys" (list "user" "workspaces")
   "keyPattern" `^handle\.[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
   "keyHelp" "handle.<channel>"
@@ -282,6 +282,14 @@ the second install; decide whether to reject such names here instead.
     !has(object.data) || object.data.all(k, !k.startsWith('handle.') ||
     (object.data[k] != '' && object.data[k].matches(r'^[^"\\\p{Cc}\x{2028}\x{2029}]+$')))
   message: "each handle value in a user command must be a non-empty platform user ID with no quote, backslash, or control character"` ) }}
+---
+{{ include "sycophant.commandVap" (dict "ctx" . "name" "command-reap-user" "prefix" true
+  "command" "reap-user" "noun" "reap-user" "action" "remove a user"
+  "keys" (list)
+  "shape" `
+- expression: >-
+    variables.suffix.matches('^[a-f0-9]{10}$')
+  message: "a reap command name must be reap-user-<handle> with a 10-character hex handle"` ) }}
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-toolset" "prefix" true
   "command" (include "sycophant.toolsetProvisionCommandName" .) "noun" "toolset" "action" "install a toolset"
@@ -416,24 +424,17 @@ data is flat strings.
     size(variables.suffix) <= 49
   message: "a reap command name must be reap-inference-<key> with a DNS-safe key of at most 49 characters"` ) }}
 ---
-{{- /*
-One channel per channel provision command: the chart renders its adapter
-`adapter-<name>`. Headscale is now in the tenant chart; the channel chart renders
-only the adapter. Only the app kind exists. Booleans are "true" or "false",
-since command data is flat strings.
-*/}}
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-channel" "prefix" true
   "command" (include "sycophant.channelProvisionCommandName" .) "noun" "channel" "action" "install a channel"
-  "keys" (list "storageClass" "kind" "image" "tag" "pullPolicy" "loginServer" "hostname" "authKeySecret")
+  "keys" (list "storageClass" "image" "tag" "pullPolicy" "loginServer" "hostname" "authKeySecret")
   "shape" `
 - expression: >-
     variables.suffix.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
     size(variables.suffix) <= 50
   message: "a channel command name must be provision-channel-<name> with a DNS-safe name of at most 50 characters, so the release ch-<name> fits helm's 53"
 - expression: >-
-    has(object.data) && object.data.?kind.orValue('') == 'app' &&
-    object.data.?loginServer.orValue('') != ''
-  message: "a channel command must carry 'kind' app and a non-empty 'loginServer'"` ) }}
+    has(object.data) && object.data.?loginServer.orValue('') != ''
+  message: "a channel command must carry a non-empty 'loginServer'"` ) }}
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-reap-channel" "prefix" true
   "command" "reap-channel" "noun" "reap-channel" "action" "remove a channel"

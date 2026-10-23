@@ -1,5 +1,0 @@
-# Pass with a second values file carrying toolset.image (pinned by digest) and
-# toolset.tools (the image's md.sycophant.tools label).
-toolset:
-  name: notion-cli-ro
-  tenant: e2e-test

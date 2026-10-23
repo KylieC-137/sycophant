@@ -100,14 +100,20 @@ pub(crate) fn apply(op: &Operator, kind: &str, manifest: &str) -> Result<(), Str
     wait_job(&format!("provision-{kind}-{}", uid10(&uid)), "provision")
 }
 
-/// Render and write the `reap-<kind>-<name>` command into tenant `tenant` as the
-/// operator and wait for the uninstall Job its uid names.
-pub(crate) fn reap(op: &Operator, kind: &str, name: &str, tenant: &str) -> Result<(), String> {
+/// Render and write the `reap-<kind>-…` command into tenant `tenant` as the
+/// operator, and wait for the uninstall Job its uid names.
+pub(crate) fn reap(
+    op: &Operator,
+    kind: &str,
+    key: &str,
+    value: &str,
+    tenant: &str,
+) -> Result<(), String> {
     let manifest = render(
         &format!("{kind}-reap"),
         &[
             "--set-string",
-            &format!("{kind}.name={name}"),
+            &format!("{kind}.{key}={value}"),
             "--set-string",
             &format!("{kind}.tenant={tenant}"),
         ],
@@ -182,11 +188,11 @@ pub(crate) fn up(kind: &str, values: &Values) -> Result<(), String> {
     let manifest = render(&format!("{kind}-provision"), &args)?;
     let op = Operator::login(&Scope::global()?.oidc_dir())?;
 
-    // The channel adapter needs a headscale pre-auth key to join the tailnet.
-    // Mint it before the provisioner Job runs so the adapter pod can start.
+    // The channel needs a headscale pre-auth key to join the tailnet.
+    // Mint it before the provisioner Job runs so the channel pod can start.
     if kind == "channel" {
         if let Some(ns) = manifest_namespace(&manifest) {
-            mint_adapter_authkey(&ns)?;
+            mint_channel_authkey(&ns)?;
         }
     }
 
@@ -324,7 +330,14 @@ fn merge_values(
 /// its uninstall.
 pub(crate) fn down(kind: &str, name: &str, tenant: &str) -> Result<(), String> {
     let op = Operator::login(&Scope::global()?.oidc_dir())?;
-    reap(&op, kind, name, tenant)
+    reap(&op, kind, "name", name, tenant)
+}
+
+/// `sycoadm user down <subject> --tenant <t>`: write the user's reap command
+/// and wait for its uninstall.
+pub(crate) fn user_down(subject: &str, tenant: &str) -> Result<(), String> {
+    let op = Operator::login(&Scope::global()?.oidc_dir())?;
+    reap(&op, "user", "subject", subject, tenant)
 }
 
 /// Write the suspend command into tenant namespace `ns`. Without a keepalive the
@@ -350,18 +363,18 @@ pub(crate) fn manifest_namespace(manifest: &str) -> Option<String> {
     doc["metadata"]["namespace"].as_str().map(|s| s.to_string())
 }
 
-/// Mint a headscale pre-auth key for the adapter and store it as a Secret.
-fn mint_adapter_authkey(ns: &str) -> Result<(), String> {
+/// Mint a headscale pre-auth key for the channel and store it as a Secret.
+fn mint_channel_authkey(ns: &str) -> Result<(), String> {
     use crate::runner::run_passthrough;
     run_passthrough("sh", &["-c", &format!(
-        "kubectl exec -n {ns} deploy/headscale -- headscale users create adapter 2>/dev/null; \
-         uid=$(kubectl exec -n {ns} deploy/headscale -- headscale users list -o json | jq -r '.[] | select(.name == \"adapter\") | .id'); \
+        "kubectl exec -n {ns} deploy/headscale -- headscale users create channel 2>/dev/null; \
+         uid=$(kubectl exec -n {ns} deploy/headscale -- headscale users list -o json | jq -r '.[] | select(.name == \"channel\") | .id'); \
          kubectl exec -n {ns} deploy/headscale -- headscale preauthkeys create -u \"$uid\" -e 8760h \
            | tr -d '\\n' \
            | kubectl create secret generic relay-tsnet-authkey -n {ns} --from-file=authkey=/dev/stdin --dry-run=client -o yaml \
            | kubectl apply -n {ns} -f - >/dev/null"
-    )]).map_err(|e| format!("failed to mint adapter authkey: {e}"))?;
-    ok("adapter pre-auth key minted");
+    )]).map_err(|e| format!("failed to mint channel authkey: {e}"))?;
+    ok("channel pre-auth key minted");
     Ok(())
 }
 

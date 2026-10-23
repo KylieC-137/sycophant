@@ -28,7 +28,7 @@ pub(crate) enum ServerRequestOutcome {
     Result(String),
     Error { code: i32, message: String },
     TimedOut,
-    UnknownChannel,
+    UnknownChannelStream,
     UnsupportedMethod,
 }
 
@@ -45,10 +45,10 @@ pub(crate) trait ToolsetRpc: Send {
 }
 
 /// RPC surface the LLM loop needs from the relay gateway: pushing
-/// server→client requests over a registered channel.
+/// server→client requests over a registered channel stream.
 #[async_trait::async_trait]
 pub(crate) trait RelayRpc: Send {
-    /// Push a fire-and-forget `ServerRequest` to all channels for the workspace.
+    /// Push a fire-and-forget `ServerRequest` to all channel streams for the workspace.
     async fn send_server_notification(
         &mut self,
         workspace: &str,
@@ -70,10 +70,10 @@ pub(crate) trait RelayRpc: Send {
     /// best-effort `delivered` bool.
     async fn deliver_stream_item(
         &mut self,
-        channel_id: &str,
+        channel_stream_id: &str,
         item: StreamItem,
     ) -> Result<bool, String>;
-    /// Push the assistant reply (ChannelSend) to all workspace channels.
+    /// Push the assistant reply (ChannelStreamSend) to all workspace channel streams.
     async fn deliver_reply(
         &mut self,
         conversation_id: &str,
@@ -90,7 +90,7 @@ pub(crate) trait RelayRpc: Send {
 
 /// Client for the relay gateway's internal listener. Carries the
 /// `harness.relay` SA token; multiplexes Subscribe (inbound user
-/// messages) and the channel server-request methods over one HTTP/2
+/// messages) and the channel-stream server-request methods over one HTTP/2
 /// connection.
 #[derive(Clone)]
 pub(crate) struct RelayClient {
@@ -159,8 +159,8 @@ impl RelayRpc for RelayClient {
             .into_inner();
         if resp.timed_out {
             Ok(ServerRequestOutcome::TimedOut)
-        } else if resp.unknown_channel {
-            Ok(ServerRequestOutcome::UnknownChannel)
+        } else if resp.unknown_channel_stream {
+            Ok(ServerRequestOutcome::UnknownChannelStream)
         } else if resp.unsupported_method {
             Ok(ServerRequestOutcome::UnsupportedMethod)
         } else if let Some(err) = resp.error {
@@ -175,13 +175,13 @@ impl RelayRpc for RelayClient {
 
     async fn deliver_stream_item(
         &mut self,
-        channel_id: &str,
+        channel_stream_id: &str,
         item: StreamItem,
     ) -> Result<bool, String> {
         let resp = self
             .inner
             .deliver_stream_item(DeliverStreamItemRequest {
-                channel_id: channel_id.to_string(),
+                channel_stream_id: channel_stream_id.to_string(),
                 item: Some(item),
             })
             .await
@@ -215,7 +215,7 @@ impl RelayRpc for RelayClient {
         let resp = self
             .inner
             .deliver_turn_state(DeliverTurnStateRequest {
-                channel_id: String::new(),
+                channel_stream_id: String::new(),
                 turn_state: Some(turn_state),
                 subject: subject.to_string(),
             })

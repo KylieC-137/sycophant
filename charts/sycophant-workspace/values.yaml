@@ -42,11 +42,3 @@ harness:
     bucket: sycophant-instructions
     # The init container's `rclone sync` mirrors the prefix into the emptyDir.
     syncImage: rclone/rclone:1.75.1
-
-# workspace-init: per-workspace one-shot Job that seeds the workspace PVC
-# (git init + baseline). Runs the toolset-runtime entrypoint baked into
-# toolset-git.
-workspaceInit:
-  image: toolset-git
-  tag: local
-  pullPolicy: Never

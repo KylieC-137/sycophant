@@ -6,12 +6,12 @@ use std::path::PathBuf;
 
 /// (proto source relative to `crates/`, message, field number, field name)
 const REMOVED_FIELDS: &[(&str, &str, u32, &str)] = &[
-    (COMMON, "ChannelOutbound", 6, "workspace_seq"),
-    (COMMON, "ChannelOutbound", 8, "catch_up_complete"),
-    (COMMON, "ChannelOutbound", 9, "replay_impossible"),
+    (COMMON, "ChannelStreamOutbound", 6, "workspace_seq"),
+    (COMMON, "ChannelStreamOutbound", 8, "catch_up_complete"),
+    (COMMON, "ChannelStreamOutbound", 9, "replay_impossible"),
     (COMMON, "Heartbeat", 1, "workspace_seq"),
     (COMMON, "StreamItem", 1, "workspace_seq"),
-    (COMMON, "ChannelReceiveRequest", 4, "resume_after_seq"),
+    (COMMON, "ChannelStreamReceiveRequest", 4, "resume_after_seq"),
     (COMMON, "SendServerNotificationRequest", 5, "workspace_seq"),
     (
         COMMON,
@@ -185,5 +185,124 @@ fn proto_sources_reserve_every_removed_field_by_number_and_name_and_define_no_re
                 "{file} still defines or references `{removed}` outside a reserved name"
             );
         }
+    }
+}
+
+const TOOLSET: &str = "toolset-proto/proto/toolset/v1/toolset.proto";
+
+/// (proto source, message, field type, field name, field number): the channel
+/// stream wire names, which keep the field numbers their old names held.
+const CHANNEL_STREAM_FIELDS: &[(&str, &str, &str, &str, &str)] = &[
+    (
+        RELAY,
+        "DeliverStreamItemRequest",
+        "string",
+        "channel_stream_id",
+        "1",
+    ),
+    (
+        RELAY,
+        "DeliverTurnStateRequest",
+        "string",
+        "channel_stream_id",
+        "1",
+    ),
+    (
+        RELAY,
+        "DeliverOutboundRequest",
+        "string",
+        "channel_stream_id",
+        "1",
+    ),
+    (
+        COMMON,
+        "ChannelStreamAck",
+        "string",
+        "channel_stream_id",
+        "1",
+    ),
+    (
+        COMMON,
+        "ChannelStreamIngestRequest",
+        "string",
+        "channel_stream_id",
+        "1",
+    ),
+    (
+        COMMON,
+        "ChannelStreamIngestAck",
+        "string",
+        "channel_stream_id",
+        "1",
+    ),
+    (
+        COMMON,
+        "ChannelStreamOutbound",
+        "ChannelStreamAck",
+        "ack",
+        "1",
+    ),
+    (
+        COMMON,
+        "ChannelStreamOutbound",
+        "ChannelStreamSend",
+        "send_message",
+        "2",
+    ),
+    (COMMON, "UserMessage", "string", "reply_channel_stream", "3"),
+    (
+        COMMON,
+        "SendServerRequestAndAwaitResponse",
+        "bool",
+        "unknown_channel_stream",
+        "4",
+    ),
+    (
+        TOOLSET,
+        "TurnRequest",
+        "string",
+        "reply_channel_stream",
+        "6",
+    ),
+];
+
+/// The relay RPCs, written without the `sycophant.common.v1.` package prefix.
+const CHANNEL_STREAM_RPCS: &[&str] = &[
+    "rpc ChannelStreamIngest (ChannelStreamIngestRequest) returns (ChannelStreamIngestAck)",
+    "rpc ChannelStreamReceive (ChannelStreamReceiveRequest) returns (stream ChannelStreamOutbound)",
+];
+
+/// Whether `body` declares `<ty> <name> = <number>` as one of its fields
+/// (an `optional`/`repeated` label and field options are allowed).
+fn declares_field(body: &str, ty: &str, name: &str, number: &str) -> bool {
+    body.split([';', '{', '}']).any(|stmt| {
+        let stmt = stmt.split('[').next().unwrap_or("");
+        let tokens: Vec<&str> = stmt.split_whitespace().collect();
+        let n = tokens.len();
+        n >= 4
+            && tokens[n - 4] == ty
+            && tokens[n - 3] == name
+            && tokens[n - 2] == "="
+            && tokens[n - 1] == number
+    })
+}
+
+#[test]
+fn proto_sources_declare_the_channel_stream_wire_names_with_their_field_numbers() {
+    for (file, message, ty, name, number) in CHANNEL_STREAM_FIELDS {
+        let src = read_proto(file);
+        assert!(
+            declares_field(message_body(&src, message), ty, name, number),
+            "{file}: {message} does not declare `{ty} {name} = {number}`"
+        );
+    }
+
+    let relay = read_proto(RELAY)
+        .replace("sycophant.common.v1.", "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for rpc in CHANNEL_STREAM_RPCS {
+        assert!(relay.contains(rpc), "{RELAY} does not declare `{rpc}`");
     }
 }

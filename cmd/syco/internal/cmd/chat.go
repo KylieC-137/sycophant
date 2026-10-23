@@ -20,8 +20,8 @@ import (
 
 	"github.com/sycophant-md/sycophant/cmd/syco/internal/config"
 	"github.com/sycophant-md/sycophant/cmd/syco/internal/grpcclient"
-	commonpb "github.com/sycophant-md/sycophant/cmd/syco/internal/proto/sycophant/common/v1"
 	relaypb "github.com/sycophant-md/sycophant/cmd/syco/internal/proto/relay/v1"
+	commonpb "github.com/sycophant-md/sycophant/cmd/syco/internal/proto/sycophant/common/v1"
 )
 
 const (
@@ -115,21 +115,20 @@ func newChatCmd() *cobra.Command {
 				}
 			}
 
-			stream, err := client.ChannelReceive(ctx, &commonpb.ChannelReceiveRequest{Workspace: p.Workspace})
+			stream, err := client.ChannelStreamReceive(ctx, &commonpb.ChannelStreamReceiveRequest{Workspace: p.Workspace})
 			if err != nil {
-				return fmt.Errorf("channel receive: %w", err)
+				return fmt.Errorf("channel stream receive: %w", err)
 			}
 
-			// Read the ChannelAck.
-			channelID, err := readAck(stream)
+			channelStreamID, err := readAck(stream)
 			if err != nil {
-				return fmt.Errorf("reading channel ack: %w", err)
+				return fmt.Errorf("reading channel stream ack: %w", err)
 			}
 
 			// Ingest the message (once, on first connect).
-			ingestResp, err := client.ChannelIngest(ctx, &commonpb.ChannelIngestRequest{
-				ChannelId:      channelID,
-				ConversationId: conversationID,
+			ingestResp, err := client.ChannelStreamIngest(ctx, &commonpb.ChannelStreamIngestRequest{
+				ChannelStreamId: channelStreamID,
+				ConversationId:  conversationID,
 				UserMessage: &commonpb.UserMessage{
 					Content: []*commonpb.ContentBlock{
 						{
@@ -142,7 +141,7 @@ func newChatCmd() *cobra.Command {
 				},
 			})
 			if err != nil {
-				return fmt.Errorf("channel ingest: %w", err)
+				return fmt.Errorf("channel stream ingest: %w", err)
 			}
 			conversationID = ingestResp.ConversationId
 			if conversationID != "" {
@@ -193,13 +192,12 @@ func newChatCmd() *cobra.Command {
 				}
 				client = relaypb.NewRelayGatewayClient(conn)
 
-				stream, err = client.ChannelReceive(ctx, &commonpb.ChannelReceiveRequest{Workspace: p.Workspace})
+				stream, err = client.ChannelStreamReceive(ctx, &commonpb.ChannelStreamReceiveRequest{Workspace: p.Workspace})
 				if err != nil {
-					return fmt.Errorf("channel receive on reconnect: %w", err)
+					return fmt.Errorf("channel stream receive on reconnect: %w", err)
 				}
-				// Read and discard the new ChannelAck.
 				if _, err := readAck(stream); err != nil {
-					return fmt.Errorf("reading channel ack on reconnect: %w", err)
+					return fmt.Errorf("reading channel stream ack on reconnect: %w", err)
 				}
 
 				// Frames sent during the drop are gone. The reply now comes
@@ -300,17 +298,16 @@ func replyFromHistory(entries []*commonpb.HistoryEntry) string {
 
 // --- Stream helpers ---
 
-// readAck reads the first frame and expects a ChannelAck.
-func readAck(stream grpc.ServerStreamingClient[commonpb.ChannelOutbound]) (string, error) {
+func readAck(stream grpc.ServerStreamingClient[commonpb.ChannelStreamOutbound]) (string, error) {
 	firstFrame, err := stream.Recv()
 	if err != nil {
 		return "", err
 	}
 	ack := firstFrame.GetAck()
 	if ack == nil {
-		return "", fmt.Errorf("expected ChannelAck as first frame")
+		return "", fmt.Errorf("expected ChannelStreamAck as first frame")
 	}
-	return ack.ChannelId, nil
+	return ack.ChannelStreamId, nil
 }
 
 type loopResult int
@@ -342,7 +339,7 @@ type recvState struct {
 func (rs *recvState) recvLoop(
 	ctx context.Context,
 	client relaypb.RelayGatewayClient,
-	stream grpc.ServerStreamingClient[commonpb.ChannelOutbound],
+	stream grpc.ServerStreamingClient[commonpb.ChannelStreamOutbound],
 ) (loopResult, error) {
 	timer := time.NewTimer(deadConnectionTimeout)
 	defer timer.Stop()
@@ -387,19 +384,17 @@ func (rs *recvState) recvLoop(
 }
 
 type frameOrErr struct {
-	frame *commonpb.ChannelOutbound
+	frame *commonpb.ChannelStreamOutbound
 	err   error
 }
 
-// handleFrame processes a single ChannelOutbound frame. Returns (loopContinue, nil) to
-// continue the loop.
 func (rs *recvState) handleFrame(
 	ctx context.Context,
 	client relaypb.RelayGatewayClient,
-	frame *commonpb.ChannelOutbound,
+	frame *commonpb.ChannelStreamOutbound,
 ) (loopResult, error) {
 	switch c := frame.Command.(type) {
-	case *commonpb.ChannelOutbound_TurnState:
+	case *commonpb.ChannelStreamOutbound_TurnState:
 		if c.TurnState.ConversationId != rs.conversationID {
 			return loopContinue, nil
 		}
@@ -420,7 +415,7 @@ func (rs *recvState) handleFrame(
 			return loopFatal, errTurnCancelled
 		}
 
-	case *commonpb.ChannelOutbound_StreamItem:
+	case *commonpb.ChannelStreamOutbound_StreamItem:
 		item := c.StreamItem
 		if item.ConversationId != rs.conversationID {
 			return loopContinue, nil

@@ -1,35 +1,27 @@
 #!/usr/bin/env bash
 # Single-command end-to-end test for sycophant.
 #
-# Deploys the Helm charts (tenant chart installs headscale, channel chart installs the app adapter),
-# drives the app path over the run's tailnet with the operator's Dex token
-# (syco CLI), optionally builds the Flutter macOS app as a compile check, and
-# runs the Step 6 security assertions. Unattended apart from one sudo prompt
-# for the tailnet join.
+# The mechanical hello world: installs every piece through sycoadm from the
+# example values files under examples/sycoadm, drives the app path over the
+# run's tailnet with the operator's Dex token (syco CLI), and runs the Step 6
+# security assertions. Unattended apart from one sudo prompt for the tailnet
+# join.
 #
 # By default reuses an existing k3d cluster and its loaded images, running only
 # the phases that prove the cluster works. Pass --clean to delete+recreate the
 # cluster and rebuild + load all images from scratch. With no cluster present,
 # the first run bootstraps once regardless of --clean.
 #
-# The app channel's terminus is its own adapter Deployment; headscale runs
-# in the tenant chart. The e2e mints a headscale pre-auth key into the
-# adapter's authKey Secret.
-#
 # Usage:
 #   scripts/e2e.sh [--clean]   (--clean = fresh cluster + full image rebuild)
 #
-# Required env:
-#   OPENROUTER_API_KEY
 # Optional env:
 #   CLUSTER_NAME (default sycophant),
 #   ARCH (default aarch64), DOCKER_ARCH (default arm64), and the SYCO_* inputs
 #   `sycoadm setup` and the tenant commands read (see "sycoadm inputs" below). sycoadm's
 #   config root is SYCO_CONFIG_DIR (default tmp/syco-config), never ~/.config.
 #
-# The bootstrap is `sycoadm setup`, the main tenant is provisioned with `sycoadm
-# tenant up`, and the lifecycle proof drives `sycoadm tenant up/down/remove`. A
-# cluster without the Dex operator login needs one run with --clean.
+# A cluster without the Dex operator login needs one run with --clean.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -37,8 +29,8 @@ readonly REPO_ROOT
 source "$REPO_ROOT/lib/shell.sh"
 CLUSTER_NAME="${CLUSTER_NAME:-sycophant}"
 readonly CLUSTER_NAME
-# The main tenant, as examples/sycoadm/tenants/e2e-test.yaml names it.
-readonly NAMESPACE="tenant-e2e-test"
+# The main tenant, as examples/sycoadm/tenants/hello-world.yaml names it.
+readonly NAMESPACE="tenant-hello-world"
 ARCH="${ARCH:-aarch64}"
 readonly ARCH
 DOCKER_ARCH="${DOCKER_ARCH:-arm64}"
@@ -65,18 +57,13 @@ readonly CLEAN
 # The app path is driven by the operator's person token: a Dex-signed ID
 # token whose subject `sycoadm user up` bound to the workspace list. The relay
 # mints nothing; the operator's live RBAC is the whole authorization.
-readonly HEADSCALE_USER="e2e"
-# The client reaches the relay through the app adapter's tailnet node, at the
-# adapter's MagicDNS hostname. Nothing dials the relay's app port directly.
+#
+# The client reaches the relay through the tailnet channel's node, at the
+# channel's MagicDNS hostname. Nothing dials the relay's app port directly.
 export TAILNET_RELAY_ADDR="relay:9090"
 readonly TAILNET_RELAY_ADDR
 # The gateway serves no reflection: grpcurl reads the service from the protos.
 readonly RELAY_GRPC_PROTO="-import-path $REPO_ROOT/crates/relay-proto/proto -import-path $REPO_ROOT/crates/proto-common/proto -proto relay/v1/relay.proto"
-readonly ADAPTER_AUTHKEY_SECRET="relay-tsnet-authkey"
-# The built-in store's instructions bucket, and the host port the S3 probes
-# reach the store on over `kubectl port-forward`.
-readonly INSTRUCTIONS_BUCKET="sycophant-instructions"
-readonly S3_PF_PORT=9900
 # RCLONE_IMAGE (the harness sync client, a neutral S3 client run against the
 # SeaweedFS s3 gateway) is a tenant workload image loaded in step_1_build. It is
 # a multi-arch index: export one arch to a tar to import.
@@ -86,31 +73,15 @@ readonly RCLONE_IMAGE="rclone/rclone:1.75.1"
 # the operator that a password entry is imminent (the run is otherwise headless
 # until Step 5).
 readonly SUDO_PENDING_SENTINEL="/tmp/sycophant-e2e-sudo-pending"
-# The in-cluster inference model key, examples/sycoadm/inference/local.yaml. Its
-# `server` block makes the chart render the llama.cpp Deployment, its Service and
-# its ingress fence (CNP inf-<key>). Every local model serves on the fixed
-# port 8080.
-readonly INFERENCE_PROFILE="local"
+# The in-cluster inference model key. Its `server` block makes the chart
+# render the llama.cpp Deployment, its Service and its ingress fence (CNP
+# inf-<key>). Every local model serves on the fixed port 8080.
+readonly INFERENCE_PROFILE="qwen3-5-2b"
 readonly INFERENCE_PORT="8080"
-# The remote model the hello-world workspace also lists, reached through a
-# per-call inference job holding the vendor key:
-# examples/sycoadm/inference/deepseek-v4-flash.yaml.
-readonly REMOTE_MODEL="deepseek-v4-flash"
-# Flutter app compile check. Until the app's own OIDC login lands it cannot
-# connect, so the e2e only builds it; the app path is driven from here with
-# the operator's Dex token. macos = build the macOS app; none = skip.
-# The build is skipped by default; set FLUTTER_TARGET=macos to run the
-# compile check.
-FLUTTER_TARGET="${FLUTTER_TARGET:-none}"
-case "$FLUTTER_TARGET" in
-  macos|none) ;;
-  *) printf 'unknown FLUTTER_TARGET: %s (expected macos|none)\n' "$FLUTTER_TARGET" >&2; exit 1 ;;
-esac
-# Exported so the preflight child sees it.
-export FLUTTER_TARGET
-readonly FLUTTER_TARGET
-
-: "${OPENROUTER_API_KEY:?must be set}"
+# The demo secret value `sycoadm tenant secret set demo-ssh-key` stores and the
+# workspace grants as hello-world/demo-key. Single-line: the scrubber redacts
+# single-line values.
+readonly DEMO_SECRET="hello-world-demo-secret-DO-NOT-USE"
 
 # ---- ui helpers ----
 # step, ok, warn are provided by lib/shell.sh (sourced above).
@@ -146,28 +117,19 @@ jwt_claim() {
 # The file must NOT exist inside the pod.
 assert_path_absent() {
   local pod="$1" ns="$2" path="$3" desc="$4"
-  if kubectl exec -n "$ns" "$pod" -- cat "$path" >/dev/null 2>&1; then
+  if kubectl exec -n "$ns" "$pod" -- test -e "$path" >/dev/null 2>&1; then
     warn "${path} exists inside ${pod}: ${desc}"
     exit 1
   fi
 }
 
-# ---- background cleanup (port-forwards, receive streams) ----
+# ---- background cleanup (background sycoadm runs) ----
 declare -a CLEANUP_PIDS=()
-# Set once the headscale forward is up. The cluster outlives the script but
-# the forward does not, so a client still driving the app loses the tailnet
-# the moment we exit — say how to get it back.
-HEADSCALE_FORWARD_STARTED=""
 cleanup() {
   local pid
   for pid in "${CLEANUP_PIDS[@]:-}"; do
     [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
   done
-  if [ -n "$HEADSCALE_FORWARD_STARTED" ]; then
-    printf '\nThe headscale port-forward stopped with this script. To keep using\n' >&2
-    printf 'the app against the running cluster, restore it with:\n' >&2
-    printf '  kubectl port-forward -n %s svc/headscale 8080:8080\n' "$NAMESPACE" >&2
-  fi
 }
 trap cleanup EXIT
 
@@ -178,18 +140,19 @@ trap cleanup EXIT
 # ---- step 0: bootstrap ----
 # `sycoadm setup` does the operator's bootstrap: k3d cluster, gVisor, Cilium,
 # CoreDNS registry wiring, Kyverno, the cluster chart, and Dex with the operator
-# as its one password user. The SYCO_* inputs set above add e2e's Kyverno and
-# reap tuning, and skip its image build (step 1 builds
-# the full e2e set).
+# as its one password user.
+sycoadm_setup() {
+  syco_credentials
+  "$SYCO" setup
+  ok "sycoadm setup: cluster, gVisor, Cilium, Kyverno, cluster chart, Dex, object store"
+}
+
 step_0_bootstrap() {
   step "Step 0: Bootstrap cluster (sycoadm setup)"
 
   k3d cluster delete "$CLUSTER_NAME" 2>/dev/null || true
   rm -f "$SYCO_PASSWORD_FILE"
-  syco_credentials
-
-  "$SYCO" setup
-  ok "sycoadm setup: cluster, gVisor, Cilium, Kyverno, cluster chart, Dex, object store"
+  sycoadm_setup
 }
 
 # Import a single-arch image from a multi-arch index into k3d.
@@ -230,8 +193,9 @@ build_docker_images() {
     rm "${bin}-linux-musl-${DOCKER_ARCH}"
   done
 
-  # The one toolset base image: its entrypoint is the toolset runtime. Every
-  # toolset image below builds FROM it.
+  # The one toolset base image: its entrypoint is the toolset runtime. The
+  # stdlib `toolset` image builds FROM it; `toolset-hello-world` builds FROM
+  # `toolset:local`, so the loop order below matters.
   cp "target/$RUST_TARGET/release/toolset-runtime" "images/toolset-base/toolset-runtime-linux-${DOCKER_ARCH}"
   docker build -q --build-arg "TARGETARCH=$DOCKER_ARCH" -f images/toolset-base/Dockerfile images/toolset-base/ -t toolset-base:local >/dev/null
   rm "images/toolset-base/toolset-runtime-linux-${DOCKER_ARCH}"
@@ -246,7 +210,7 @@ build_docker_images() {
   # md.sycophant.tools label; its toolset provision command is built from that
   # label. Every value must already be a string. A non-string aborts the build.
   local ctx tag label
-  for ctx in images/toolset:toolset images/git:toolset-git examples/sycoadm/toolsets/ssh-credentials:toolset-ssh-credentials; do
+  for ctx in images/toolset:toolset examples/sycoadm/toolsets/hello-world:toolset-hello-world; do
     tag="${ctx#*:}"; ctx="${ctx%%:*}"
     label=$(python3 -c 'import json,sys,yaml; m=yaml.safe_load(open(sys.argv[1])); assert all(isinstance(v,str) for v in m.values()), "non-string value in "+sys.argv[1]; print(json.dumps(m,separators=(",",":")))' "$ctx/tools.yaml")
     docker build -q --build-arg "BASE_IMAGE=toolset-base:local" \
@@ -268,9 +232,9 @@ prepare_inference_assets() {
   local GGUF_PATH="${GGUF_PATH:-${HOME}/.cache/sycophant/weights/Qwen3.5-2B-Q4_K_M.gguf}"
   # The inference container limit must clear the mmap'd model plus its KV cache
   # and runtime, or llama.cpp OOMKills mid-load (exit 137). The model default
-  # lives here; the limit is server.memory in examples/sycoadm/inference/local.yaml.
-  # The two must move together -- assert it now so a model bump that forgets the
-  # limit fails at preflight, not fifteen minutes into the run.
+  # lives here and the limit is the profile's server.memory. The two must move
+  # together -- assert it now so a model bump that forgets the limit fails at
+  # preflight, not fifteen minutes into the run.
   if [ ! -f "$GGUF_PATH" ]; then
     printf '\n\033[1;31m✗ inference model GGUF not found: %s\033[0m\n' "$GGUF_PATH" >&2
     exit 1
@@ -279,10 +243,10 @@ prepare_inference_assets() {
   model_mib=$(( $(wc -c < "$GGUF_PATH") / 1024 / 1024 ))
   floor_mib=$(( model_mib * 14 / 10 ))
   memory_mib="$(python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["inference"]["server"]["memory"])' \
-    "$REPO_ROOT/examples/sycoadm/inference/local.yaml")"
+    "$REPO_ROOT/examples/sycoadm/inference/${INFERENCE_PROFILE}.yaml")"
   memory_mib="${memory_mib%Mi}"
   if [ "$memory_mib" -lt "$floor_mib" ]; then
-    printf '\n\033[1;31m✗ server.memory (%dMiB) is below the floor for %s (%dMiB on disk).\n   llama.cpp mmaps the model + KV + runtime; set server.memory >= %dMi (model x 1.4) in examples/sycoadm/inference/local.yaml.\033[0m\n' \
+    printf '\n\033[1;31m✗ server.memory (%dMiB) is below the floor for %s (%dMiB on disk).\n   llama.cpp mmaps the model + KV + runtime; set server.memory >= %dMi (model x 1.4) in examples/sycoadm/inference/qwen3-5-2b.yaml.\033[0m\n' \
       "$memory_mib" "$(basename "$GGUF_PATH")" "$model_mib" "$floor_mib" >&2
     exit 1
   fi
@@ -294,14 +258,12 @@ prepare_inference_assets() {
 
 load_images_to_k3d() {
   local LLAMA_SERVER_REF="${LLAMA_SERVER_REF:-ghcr.io/ggml-org/llama.cpp:server@sha256:9f84380be42d6285a827629c809387349c3541aa8986f7536547ca33cc8dd47a}"
-  step "Loading images into k3d + pushing toolsets to registry"
+  step "Loading images into k3d"
   local img
-  # toolset-git:local is the workspace-init image the chart defaults to
-  # (pullPolicy Never), so it is imported rather than pulled.
   for img in inference-runtime:local \
              sycophant-harness:local relay-controller:local \
              sycophant-kubectl:local sycophant-provisioner:local \
-             weights:local toolset-git:local; do
+             weights:local; do
     k3d image import "$img" --cluster "$CLUSTER_NAME" >/dev/null
   done
   # Multi-arch index -- export one arch (see import_multiarch_image).
@@ -309,18 +271,6 @@ load_images_to_k3d() {
 
   # Multi-arch index -- export one arch (see import_multiarch_image).
   import_multiarch_image "$RCLONE_IMAGE"
-}
-
-push_toolset_images() {
-  # Toolset images go through the local registry (sycophant-registry:5000
-  # in-cluster) so the tool job pods can pull them. The stdlib toolset rides
-  # the same path.
-  local img
-  for img in toolset toolset-git toolset-ssh-credentials; do
-    docker tag "${img}:local" "localhost:5555/${img}:latest"
-    docker push -q "localhost:5555/${img}:latest" >/dev/null
-  done
-  ok "Images built + loaded"
 }
 
 step_1_build() {
@@ -331,79 +281,24 @@ step_1_build() {
   build_docker_images
   prepare_inference_assets
   load_images_to_k3d
-  push_toolset_images
+  ok "Images built + loaded"
 }
 
-# Write the image override for toolset $1 from local image $2: `image` is the
-# in-cluster registry digest and `tools` the image's md.sycophant.tools label.
-# The host rewrite (localhost:5555 to sycophant-registry:5000) swaps the
-# push-facing host for the name the CoreDNS NodeHosts entry `sycoadm setup` adds
-# resolves; the digest is identical either way.
-write_toolset_image() {
-  local image="localhost:5555/$2:latest" ref tools
-  ref="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image" | grep '^localhost:5555/')"
-  tools="$(docker inspect --format '{{ index .Config.Labels "md.sycophant.tools" }}' "$image")"
-  case "$tools" in
-    "{"*) ;;
-    *) warn "${image} carries no md.sycophant.tools label; rebuild with --clean"; exit 1 ;;
-  esac
-  mkdir -p "$VALUES_DIR"
-  printf '{"toolset": {"image": "%s", "tools": %s}}\n' \
-    "${ref/localhost:5555/sycophant-registry:5000}" "$tools" > "$VALUES_DIR/toolset-$1-image.yaml"
-}
-
-# Seed what the tenant reads but no provision command installs: the vendor
-# model key and the ssh-credentials fixtures.
+# Seed what the tenant reads but no provision command installs: the demo
+# secret the workspace grants.
 seed_tenant() {
-  kubectl create secret generic sycophant-llm-openrouter -n "$NAMESPACE" \
-    --from-literal=sycophant-llm-openrouter="$OPENROUTER_API_KEY" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-
-  kubectl apply -f "$REPO_ROOT/examples/sycoadm/toolsets/ssh-credentials/fixtures/" -n "$NAMESPACE" >/dev/null
-  ok "Secrets and toolset fixtures applied"
+  printf '%s' "$DEMO_SECRET" | "$SYCO" tenant secret set demo-ssh-key --ns "$NAMESPACE"
+  ok "Demo secret demo-ssh-key set"
 }
 
 # ---- step 3: deploy ----
-
-deploy_cluster_chart() {
-  # PSA-restricted ns -- the same manifest `sycoadm setup` applies.
-  kubectl apply -f "$REPO_ROOT/charts/sycophant-cluster/system-ns.yaml" >/dev/null
-
-  # A killed prior run can leave this release wedged in a pending-*/failed state,
-  # which blocks the next install with "another operation in progress". The
-  # cluster chart holds no state worth preserving on a reuse run, so clear a
-  # non-deployed release before reinstalling. (Mirror of the tenant block below.)
-  if helm list -n sycophant-system --pending -q 2>/dev/null | grep -qx sycophant \
-     || helm list -n sycophant-system --failed -q 2>/dev/null | grep -qx sycophant; then
-    warn "cluster release 'sycophant' wedged (pending/failed) — uninstalling before reinstall"
-    helm uninstall sycophant -n sycophant-system --wait --timeout=2m >/dev/null 2>&1 || true
-  fi
-  # `sycoadm setup` installed the cluster chart on a fresh cluster; a reuse run
-  # re-applies this checkout's chart with the same Dex trust (issuer, audience,
-  # and the CA setup generated) and e2e reap tuning, so chart render and live
-  # apiserver config agree.
-  helm upgrade --install sycophant "$REPO_ROOT/charts/sycophant-cluster/" \
-    -n sycophant-system \
-    --set-string "idp.issuer=$APISERVER_OIDC_ISSUER" \
-    --set-string "idp.audience=$APISERVER_OIDC_AUDIENCE" \
-    --set-file "idp.certificateAuthority=$SYCO_DEX_CA" \
-    -f "$SYCO_CLUSTER_VALUES" \
-    --wait >/dev/null
-  ok "Cluster chart installed"
-
-  # Same wedged-release guard as the cluster chart above.
-  if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
-    kubectl delete configmap -n "$NAMESPACE" \
-      -l 'owner=helm,status in (pending-install,pending-upgrade,pending-rollback,failed)' \
-      --ignore-not-found >/dev/null
-  fi
-}
 
 deploy_tenant() {
   # The operator's path: `sycoadm tenant up -f` applies the tenant provision
   # command under the operator's Dex login and waits on its installer Job. The
   # provision runs in the background while this step seeds the namespace the
   # reactor generates.
-  "$SYCO" tenant up -f "$REPO_ROOT/examples/sycoadm/tenants/e2e-test.yaml" &
+  "$SYCO" tenant up -f "$REPO_ROOT/examples/sycoadm/tenants/hello-world.yaml" &
   local up_pid=$!
   CLEANUP_PIDS+=("$up_pid")
 
@@ -425,29 +320,18 @@ deploy_tenant() {
 }
 
 deploy_inference_models() {
-  # Each model is its own provision command, applied once the tenant is up and
-  # the vendor key is seeded. The harness watches the model ConfigMaps, so no
-  # restart.
-  local model
-  for model in "$REMOTE_MODEL" "$INFERENCE_PROFILE"; do
-    "$SYCO" inference up -f "$REPO_ROOT/examples/sycoadm/inference/${model}.yaml"
-  done
-  ok "sycoadm inference up: ${REMOTE_MODEL} and ${INFERENCE_PROFILE} model provision commands installed"
+  # The model is its own provision command, applied once the tenant is up. The
+  # harness watches the model ConfigMaps, so no restart.
+  "$SYCO" inference up -f "$REPO_ROOT/examples/sycoadm/inference/${INFERENCE_PROFILE}.yaml"
+  ok "sycoadm inference up: ${INFERENCE_PROFILE} model provision command installed"
 }
 
 deploy_toolsets() {
-  # Each toolset is its own provision command: its example values, then an
-  # override carrying the image digest and the image's tool label. The harness
-  # watches the toolset ConfigMaps, so no restart. The examples' keepalive keeps
-  # the stdlib and grant-bearing pods alive for the later exec assertions.
-  local ts name img
-  for ts in stdlib:toolset workspace-ro:toolset-git ssh-credentials:toolset-ssh-credentials; do
-    IFS=: read -r name img <<<"$ts"
-    write_toolset_image "$name" "$img"
-    "$SYCO" toolset up -f "$REPO_ROOT/examples/sycoadm/toolsets/${name}/values.yaml" \
-      -f "$VALUES_DIR/toolset-${name}-image.yaml"
-  done
-  ok "sycoadm toolset up: stdlib, workspace-ro and ssh-credentials toolset provision commands installed"
+  # The toolset is its own provision command. The harness watches the toolset
+  # ConfigMaps, so no restart. The example's keepalive keeps the grantless and
+  # granted pods alive for the later exec assertions.
+  "$SYCO" toolset up -f "$REPO_ROOT/examples/sycoadm/toolsets/hello-world/values.yaml"
+  ok "sycoadm toolset up: hello-world toolset provision command installed"
 }
 
 deploy_workspace_and_user() {
@@ -459,55 +343,22 @@ deploy_workspace_and_user() {
 }
 
 deploy_channel() {
-  # The app channel is one provision command, after the base: its adapter needs
-  # a pre-auth key minted from the tenant's own headscale.
-  "$SYCO" channel up -f "$REPO_ROOT/examples/sycoadm/channels/app.yaml"
-  ok "sycoadm channel up: app channel installed (headscale from tenant chart)"
-  step_3_headscale_authkey
+  # The tailnet channel is one provision command, after the base: `sycoadm
+  # channel up` mints its pre-auth key from the tenant's own headscale.
+  "$SYCO" channel up -f "$REPO_ROOT/examples/sycoadm/channels/tailnet.yaml"
+  ok "sycoadm channel up: tailnet channel installed (headscale from tenant chart)"
+  wait_for "tailnet channel Available" 180 \
+    "kubectl wait --for=condition=Available --timeout=5s -n '$NAMESPACE' deploy/ch-tailnet"
+  ok "Tailnet channel Available"
 }
 
 step_3_deploy() {
   step "Step 3: Deploy charts"
-  deploy_cluster_chart
   deploy_tenant
   deploy_inference_models
   deploy_toolsets
   deploy_workspace_and_user
   deploy_channel
-}
-
-# Create the headscale user (idempotent), look up its id, create a preauth key,
-# and print the key to stdout. $NAMESPACE and $HEADSCALE_USER from outer scope.
-headscale_create_preauthkey() {
-  kubectl exec -n "$NAMESPACE" deploy/headscale -- \
-    headscale users create "$HEADSCALE_USER" >/dev/null 2>&1 || true
-  local user_id
-  user_id="$(kubectl exec -n "$NAMESPACE" deploy/headscale -- \
-    headscale users list -o json | jq -r ".[] | select(.name==\"$HEADSCALE_USER\") | .id")"
-  [ -n "$user_id" ] || { warn "headscale user $HEADSCALE_USER has no id"; return 1; }
-  kubectl exec -n "$NAMESPACE" deploy/headscale -- \
-    headscale preauthkeys create -u "$user_id" -e 24h | tail -1 | tr -d '\r\n'
-}
-
-# Stand the app adapter's tailnet identity up: create the headscale user,
-# mint a pre-auth key, and hand it to the adapter through its authKey Secret.
-# headscale 0.28+ requires a numeric user id for `-u`, hence the lookup.
-step_3_headscale_authkey() {
-  step "Minting a headscale pre-auth key for the app adapter"
-  wait_for "headscale Available" 180 \
-    "kubectl wait --for=condition=Available --timeout=5s -n '$NAMESPACE' deploy/headscale"
-
-  # The key never reaches a printf/echo: it goes straight from the mint
-  # command into kubectl's stdin.
-  headscale_create_preauthkey \
-    | kubectl create secret generic "$ADAPTER_AUTHKEY_SECRET" -n "$NAMESPACE" \
-        --from-file=authkey=/dev/stdin --dry-run=client -o yaml \
-    | kubectl apply -n "$NAMESPACE" -f - >/dev/null
-  ok "Pre-auth key stored in Secret ${ADAPTER_AUTHKEY_SECRET}"
-
-  wait_for "app adapter Available" 180 \
-    "kubectl wait --for=condition=Available --timeout=5s -n '$NAMESPACE' deploy/adapter-app"
-  ok "App adapter Available"
 }
 
 # ---- step 4: verify chart ----
@@ -521,50 +372,9 @@ step_4_verify() {
   kubectl wait -n "$NAMESPACE" --for=condition=Available --timeout=600s \
     "deployment/inf-${INFERENCE_PROFILE}" >/dev/null
   ok "in-cluster inference server (${INFERENCE_PROFILE}) Available"
-
-  # Workspace-init Job must COMPLETE: it binds the workspace PVC (first
-  # consumer under WaitForFirstConsumer) and establishes the git baseline
-  # for every workspace. helm --wait gates on PVC Bound, not Job completion,
-  # so a failed git baseline would otherwise pass silently — assert it here.
-  if kubectl wait -n "$NAMESPACE" --for=condition=complete --timeout=120s \
-       job -l app.kubernetes.io/component=workspace-init,app.kubernetes.io/name=hello-world >/dev/null 2>&1; then
-    ok "hello-world workspace-init Job complete (PVC bound + git baseline)"
-  else
-    warn "hello-world workspace-init Job did not complete"
-    kubectl get job,pod -n "$NAMESPACE" -l app.kubernetes.io/component=workspace-init 2>&1 | sed 's/^/    /' >&2
-    return 1
-  fi
 }
 
 # ---- step 5: app path ----
-# Forwards headscale's HTTP API, so the operator can point the host's
-# Tailscale at the in-cluster control plane and reach the app adapter over
-# the tailnet. This is the only forward the run stands up: the relay's app
-# port stays unreachable from the host, so a client can only arrive through
-# the adapter, which is the path the assertions are meant to cover.
-#
-# Self-healing loop: kubectl port-forward binds to one pod's stream and dies
-# on pod replacement (rollout, eviction, crash). The loop reconnects to the
-# deployment's current pod automatically. Disable errexit inside the subshell
-# so a non-zero kubectl exit doesn't kill the loop. The trap ensures the
-# kubectl child dies with the subshell — without it the kubectl process would
-# be orphaned and survive script teardown.
-step_5_headscale_port_forward() {
-  ( set +e
-    trap - ERR
-    kpid=""
-    trap '[ -n "$kpid" ] && kill "$kpid" 2>/dev/null; exit' TERM INT EXIT
-    while true; do
-      kubectl port-forward -n "$NAMESPACE" svc/headscale 8080:8080 --address 0.0.0.0 \
-        >/dev/null 2>&1 &
-      kpid=$!
-      wait "$kpid"
-      sleep 2
-    done ) &
-  CLEANUP_PIDS+=($!)
-  HEADSCALE_FORWARD_STARTED=1
-}
-
 # One relay RPC over the tailnet with a person token. The request body is
 # read from stdin; extra grpcurl flags follow the method.
 relay_call() {
@@ -577,8 +387,36 @@ relay_call() {
 
 # Conversations this run creates. Step 6 inspects exactly these, so records
 # left on the conversation PVC by an earlier run cannot satisfy it.
+# E2E_TOOL_CONV is the ShowKernel turn, E2E_FETCH_CONV the WebFetch turn, and
+# E2E_CHAT_CONV the granted GetSecret turn.
 E2E_TOOL_CONV=""
+E2E_FETCH_CONV=""
 E2E_CHAT_CONV=""
+
+# tool_chat <config-dir> <tool> <prompt> [chat args...]
+# One syco chat turn that must call <tool>. Prints only the conversation ID
+# syco chat reports on stderr; every log line goes to stderr.
+tool_chat() {
+  local dir="$1" tool="$2" prompt="$3"; shift 3
+  local out err conv
+  err="$(mktemp)"
+  if ! out="$(SYCO_CONFIG_DIR="$dir" "$REPO_ROOT/target/syco" chat "$prompt" "$@" 2>"$err")"; then
+    warn "syco chat (${tool}) exited non-zero: ${out} $(cat "$err")"
+    rm -f "$err"
+    return 1
+  fi
+  conv="$(sed -n 's/^conversation: //p' "$err" | head -1)"
+  rm -f "$err"
+  if ! printf '%s\n' "$out" | grep -F "⚙ ${tool} (started)" >/dev/null; then
+    warn "syco chat did not call ${tool}: ${out}"
+    return 1
+  fi
+  if [ -z "$conv" ]; then
+    warn "syco chat (${tool}) did not print a conversation ID to stderr"
+    return 1
+  fi
+  printf '%s' "$conv"
+}
 
 # The app path with the operator's person token, over the same tailnet
 # forward the app uses. The relay TokenReviews the token, resolves the bound
@@ -631,18 +469,33 @@ TOML
   rm -rf "$denied_cfg"
   ok "Ungranted workspace denied over the app path"
 
-  # Last, so the stdlib toolset pod it starts is freshly used when Step 6
-  # probes it: keepalive pods exit after 10 minutes idle.
-  local chat_out chat_err
-  chat_err="$(mktemp)"
-  chat_out="$(SYCO_CONFIG_DIR="$SYCO_APP_TMP" \
-    "$REPO_ROOT/target/syco" chat "Run: dmesg | head -1" 2>"$chat_err")" \
-    || { warn "syco chat (tool call) exited non-zero: ${chat_out} $(cat "$chat_err")"; rm -f "$chat_err"; return 1; }
-  E2E_TOOL_CONV="$(sed -n 's/^conversation: //p' "$chat_err" | head -1)"
-  rm -f "$chat_err"
-  [ -n "$E2E_TOOL_CONV" ] \
-    || { warn "syco chat did not print a conversation ID to stderr"; return 1; }
-  ok "Tool call ran via syco chat over the app path (${E2E_TOOL_CONV})"
+  # Last, so the grantless hello-world toolset pod they start is freshly used
+  # when Step 6 probes it: keepalive pods exit after 10 minutes idle.
+  #
+  # Nothing binds the workspace data volume before the first tool call: on a
+  # fresh cluster it is still unbound here. A missing claim counts as unbound.
+  if [ "$CLEAN" = "1" ]; then
+    local pvc_phase
+    pvc_phase="$(kubectl get pvc ws-hello-world-data -n "$NAMESPACE" \
+      -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    if [ "$pvc_phase" = "Bound" ]; then
+      warn "ws-hello-world-data is Bound before the first tool call"
+      return 1
+    fi
+    ok "ws-hello-world-data unbound before the first tool call (${pvc_phase:-absent})"
+  fi
+
+  if ! E2E_TOOL_CONV="$(tool_chat "$SYCO_APP_TMP" ShowKernel \
+      "Use the ShowKernel tool and show me its output.")"; then
+    return 1
+  fi
+  ok "ShowKernel ran via syco chat over the app path (${E2E_TOOL_CONV})"
+
+  if ! E2E_FETCH_CONV="$(tool_chat "$SYCO_APP_TMP" WebFetch \
+      "Use the WebFetch tool to fetch https://example.com and show me the result.")"; then
+    return 1
+  fi
+  ok "WebFetch ran via syco chat over the app path (${E2E_FETCH_CONV})"
 }
 
 # End-to-end login + chat via the Go `syco` CLI binary: write a throwaway
@@ -684,22 +537,13 @@ step_5b_syco_cli_chat() {
   ok "Bound ${APISERVER_OIDC_ISSUER}#${sub} to hello-world"
 
   # ── chat ──
-  local chat_out chat_err
-  chat_err="$(mktemp)"
-  chat_out="$(SYCO_CONFIG_DIR="$SYCO_TMP" \
-    "$REPO_ROOT/target/syco" chat "Use the test-cmd tool." \
-    --grant ssh-credentials/demo-key 2>"$chat_err")" \
-    || { warn "syco chat exited non-zero: ${chat_out} $(cat "$chat_err")"; rm -f "$chat_err"; return 1; }
-
-  printf '%s\n' "$chat_out" | grep -q 'test-cmd' \
-    || { warn "syco chat output did not contain a test-cmd tool call line: ${chat_out}"; rm -f "$chat_err"; return 1; }
-
-  # syco chat prints "conversation: <id>" to stderr on success.
-  E2E_CHAT_CONV="$(sed -n 's/^conversation: //p' "$chat_err" | head -1)"
-  rm -f "$chat_err"
-  [ -n "$E2E_CHAT_CONV" ] \
-    || { warn "syco chat did not print a conversation ID to stderr"; return 1; }
-  ok "syco chat completed with test-cmd tool call (${E2E_CHAT_CONV})"
+  # The granted turn: GetSecret reads demo-ssh-key through the demo-key grant.
+  if ! E2E_CHAT_CONV="$(tool_chat "$SYCO_TMP" GetSecret \
+      "Use the GetSecret tool to read the secret named demo-ssh-key." \
+      --grant hello-world/demo-key)"; then
+    return 1
+  fi
+  ok "syco chat completed with a GetSecret tool call (${E2E_CHAT_CONV})"
 
   # ── conversation-ID resume ──
   # Every leg runs from its own config dir under SYCO_TMP holding copies of
@@ -847,70 +691,25 @@ step_5b_syco_cli_chat() {
   ok "One-shot --continue into the killed one-shot's conversation exited 0 with non-empty stdout"
 }
 
-# Re-register the operator's Mac against THIS run's headscale. Every Step 0
-# rebuilds the cluster, so headscale starts with an empty node DB while the Mac
-# still holds the previous run's tailnet identity; `tailscale up` against the
-# same login-server then silently keeps the now-unregistered node and the app's
-# tailnet join hangs against a relay it can't reach. Force-reauth fixes it every
-# run so the join stops being a manual dance.
-#
-# The pre-auth key goes mint -> 0600 file -> `--auth-key=file:`, never a printf
-# or argv, so it stays out of `ps` (same discipline as the adapter authkey).
-# A sentinel is written immediately before the sudo prompt for the monitor.
+# Join this host to this run's tailnet.
 tailnet_join_macos() {
-  command -v tailscale >/dev/null 2>&1 \
-    || { warn "tailscale CLI not found; join the tailnet manually first"; return 1; }
-
-  local keyfile
-  keyfile="$(mktemp)"
-  chmod 600 "$keyfile"
-  headscale_create_preauthkey > "$keyfile"
-
   # Sentinel first, then the banner, then the prompt — so the monitor fires
   # before sudo blocks on input.
   : > "$SUDO_PENDING_SENTINEL"
   printf '\n\033[1;33m🔑 SUDO INCOMING: the tailnet join needs your macOS password next.\033[0m\n' >&2
-  sudo -v                                   # one prompt; caches for the two calls below
-  sudo tailscale logout >/dev/null 2>&1 || true
-  # --reset: prior runs may have left non-default prefs (e.g. --accept-routes);
-  # `tailscale up` refuses to change settings otherwise. Reset to defaults and
-  # apply only the flags below (peer-to-peer relay access needs no subnet routes).
-  sudo tailscale up --reset --login-server=http://localhost:8080 \
-    --auth-key="file:$keyfile" --force-reauth
-  local rc=$?
-  rm -f "$keyfile" "$SUDO_PENDING_SENTINEL"
-  [ "$rc" -eq 0 ] || { warn "tailscale up failed (rc=$rc); join manually and retry"; return 1; }
-
-  # Confirm the fresh headscale now sees this Mac online (relay + Mac = 2). `-w`
-  # so 'offline' does not match 'online'.
-  # shellcheck disable=SC2016 # single-quoted on purpose: wait_for evals it.
-  wait_for "Mac joined the fresh tailnet" 60 \
-    '[ "$(kubectl exec -n '"$NAMESPACE"' deploy/headscale -- headscale nodes list 2>/dev/null | grep -cw online)" -ge 2 ]'
-  ok "Mac joined the tailnet (re-registered against this run'\''s headscale)"
+  local rc=0
+  "$SYCO" connect --tenant hello-world || rc=$?
+  rm -f "$SUDO_PENDING_SENTINEL"
+  if [ "$rc" -ne 0 ]; then
+    warn "sycoadm connect failed (rc=$rc); join manually and retry"
+    return 1
+  fi
+  ok "Host joined the tailnet (sycoadm connect, re-registered against this run's headscale)"
 }
 
-# Build the macOS app as a compile check. It is not launched: until its
-# own OIDC login lands it cannot connect.
-step_5_flutter_build() {
-  step "Building Flutter macOS app (compile check)"
-  # CODE_SIGNING_ALLOWED=NO: build unsigned. arm64 applies a linker ad-hoc
-  # signature; no Apple team or provisioning profile needed. Never re-enable
-  # signing for the e2e.
-  ( cd "$REPO_ROOT/client" && FLUTTER_XCODE_CODE_SIGNING_ALLOWED=NO flutter build macos --debug ) >/tmp/sycophant-flutter-build.log 2>&1 \
-    || { warn "flutter build macos --debug failed; see /tmp/sycophant-flutter-build.log"; return 1; }
-  ok "macOS app built"
-}
-
-step_5_flutter() {
+step_5_channel() {
   step "Step 5: App path"
 
-  # The compile check runs first: anything slow between the last stdlib call
-  # and Step 6 risks the toolset pod Step 6 probes idling out.
-  if [ "$FLUTTER_TARGET" = "macos" ]; then
-    step_5_flutter_build || return 1
-  fi
-
-  step_5_headscale_port_forward
   # The app path is reached over the fresh tailnet, so this host joins it
   # first on every run.
   tailnet_join_macos || return 1
@@ -932,7 +731,7 @@ step_5_flutter() {
 assert_gvisor_isolation() {
   local task_pod="$1"
   kubectl wait -n "$NAMESPACE" --for=condition=Ready --timeout=60s "pod/$task_pod" >/dev/null
-  ok "stdlib toolset pod Ready ($task_pod)"
+  ok "hello-world toolset pod Ready ($task_pod)"
 
   local first_line
   first_line="$(kubectl exec -n "$NAMESPACE" "$task_pod" -- dmesg 2>/dev/null | head -1)"
@@ -955,41 +754,99 @@ attach_ephemeral_scrubber() {
 
 discover_conversation_dirs() {
   local tb_pod="$1" scrub_c="$2" conv_root="$3"
-  # Both of this run's conversations must be on the PVC before any scan of
-  # it counts: an empty directory would pass every absence check below.
-  local chat_dir="" tool_dir=""
+  # Every one of this run's conversations must be on the PVC before any scan
+  # of it counts: an empty directory would pass every absence check below.
+  local chat_dir="" tool_dir="" fetch_dir=""
   for _ in $(seq 1 15); do
     chat_dir="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
       find "$conv_root" -maxdepth 2 -type d -name "$E2E_CHAT_CONV" 2>/dev/null | head -1)" || true
     tool_dir="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
       find "$conv_root" -maxdepth 2 -type d -name "$E2E_TOOL_CONV" 2>/dev/null | head -1)" || true
+    fetch_dir="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
+      find "$conv_root" -maxdepth 2 -type d -name "$E2E_FETCH_CONV" 2>/dev/null | head -1)" || true
     # The ephemeral container may not be running yet; under set -e the
     # assignments above are guarded so this loop can retry.
-    [ -n "$chat_dir" ] && [ -n "$tool_dir" ] && break
+    if [ -n "$chat_dir" ] && [ -n "$tool_dir" ] && [ -n "$fetch_dir" ]; then
+      break
+    fi
     sleep 2
   done
-  [ -n "$chat_dir" ] && [ -n "$tool_dir" ] \
-    || { warn "this run's conversations are not on the PVC (chat=${chat_dir:-none} tool=${tool_dir:-none})"; return 1; }
-  printf '%s\n%s\n' "$chat_dir" "$tool_dir"
+  if [ -z "$chat_dir" ] || [ -z "$tool_dir" ] || [ -z "$fetch_dir" ]; then
+    warn "this run's conversations are not on the PVC (chat=${chat_dir:-none} tool=${tool_dir:-none} fetch=${fetch_dir:-none})"
+    return 1
+  fi
+  printf '%s\n%s\n%s\n' "$chat_dir" "$tool_dir" "$fetch_dir"
+}
+
+# tool_result_texts <log-file> <tool>: a JSON array of the text of every <tool>
+# result in the conversation log at <log-file> (one JSON record per line).
+tool_result_texts() {
+  jq -s --arg t "$2" '
+    [.[] | select(.role == "assistant") | .tool_calls[]? | select(.name == $t) | .id] as $ids
+    | [.[] | select(.role == "tool" and ((.tool_call_id // "") as $i | $ids | index($i)) != null)
+           | [.content[]?.block.Text.text // empty] | join("")]' "$1"
+}
+
+# conversation_has_result <tb_pod> <scrub_c> <conv-dir> <tool> <jq-test> <log-file>
+# Copies the conversation log out to <log-file> and holds when some <tool>
+# result passes <jq-test> (a jq filter over the result text). wait_for polls it:
+# the harness appends the log as the turn runs.
+conversation_has_result() {
+  local tb_pod="$1" scrub_c="$2" dir="$3" tool="$4" test="$5" log="$6"
+  kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
+    cat "$dir/conversation.json" > "$log" 2>/dev/null || return 1
+  tool_result_texts "$log" "$tool" | jq -e "any(.[]; $test)" >/dev/null
+}
+
+assert_tool_results() {
+  local tb_pod="$1" scrub_c="$2" tool_dir="$3" fetch_dir="$4"
+  local log; log="$(mktemp)"
+  trap 'rm -f "'"$log"'"; trap - RETURN' RETURN
+
+  # The grantless toolset pod runs on gVisor: its kernel log opens with the
+  # gVisor banner.
+  if wait_for "ShowKernel result holds the gVisor banner" 60 \
+       "conversation_has_result '$tb_pod' '$scrub_c' '$tool_dir' ShowKernel 'contains(\"Starting gVisor\")' '$log'"; then
+    ok "ShowKernel result reports a gVisor kernel"
+  else
+    warn "ShowKernel result did not hold 'Starting gVisor': $(tool_result_texts "$log" ShowKernel 2>/dev/null || true)"
+    return 1
+  fi
+
+  # The grantless toolset has no egress hole: the fetch never gets a response.
+  if wait_for "WebFetch result is a network error" 60 \
+       "conversation_has_result '$tb_pod' '$scrub_c' '$fetch_dir' WebFetch 'startswith(\"WebFetch: network error:\")' '$log'"; then
+    ok "WebFetch of https://example.com failed with a network error (egress closed)"
+  else
+    warn "WebFetch result did not start with 'WebFetch: network error:': $(tool_result_texts "$log" WebFetch 2>/dev/null || true)"
+    return 1
+  fi
 }
 
 assert_scrubbing() {
   local tb_pod="$1" scrub_c="$2" conv_root="$3" chat_dir="$4"
-  # The granted demo key: its raw bytes must never appear in the
-  # conversation log, and the redaction marker must — together proving the
-  # credential file was read end-to-end by the granted tool call and
-  # scrubbed on the way out of the pod.
-  local grant_raw grant_marker
-  grant_raw="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
-    sh -c "grep -rc 'FAKE-ED25519-PRIVATE-KEY' '$conv_root' 2>/dev/null | grep -v ':0\$' | wc -l" 2>/dev/null)"
-  grant_marker="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
-    sh -c "grep -rl 'REDACTED:demo-ssh-key' '$chat_dir' 2>/dev/null | wc -l" 2>/dev/null)"
-  grant_raw="${grant_raw//[[:space:]]/}"; grant_raw="${grant_raw:-1}"
-  grant_marker="${grant_marker//[[:space:]]/}"; grant_marker="${grant_marker:-0}"
-  if [ "$grant_raw" -eq 0 ] && [ "$grant_marker" -ge 1 ]; then
-    ok "Grant credential read + scrubbed (marker in this run's chat turn, raw bytes nowhere)"
+  # The granted demo secret: the redaction marker must appear in this run's
+  # GetSecret turn and the raw value nowhere under the conversation root —
+  # together proving the granted tool call read the secret end-to-end and the
+  # value was scrubbed on the way out of the pod.
+  if wait_for "redaction marker in this run's GetSecret turn" 60 \
+       "kubectl exec -n '$NAMESPACE' '$tb_pod' -c '$scrub_c' -- grep -rlF '[REDACTED:demo-ssh-key]' '$chat_dir' >/dev/null 2>&1"; then
+    ok "GetSecret turn holds [REDACTED:demo-ssh-key]"
   else
-    warn "grant credential evidence wrong: raw_files=$grant_raw marker_files=$grant_marker"
+    warn "this run's GetSecret turn holds no [REDACTED:demo-ssh-key] marker"
+    return 1
+  fi
+
+  # grep -l exits 1 when no file matches; the scan reports its own status so a
+  # failed scan cannot pass as "no match".
+  local scan
+  # shellcheck disable=SC2016 # single-quoted on purpose: the pod's sh expands it.
+  scan="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
+    sh -c 'grep -rlF "$1" "$2"; echo "rc=$?"' sh "$DEMO_SECRET" "$conv_root" 2>/dev/null || true)"
+  if [ "$(printf '%s\n' "$scan" | tail -1)" = "rc=1" ]; then
+    ok "The demo secret value is in no file under the conversation root"
+  else
+    warn "demo secret scan of the conversation root failed or found files: ${scan:-no output}"
     return 1
   fi
 }
@@ -998,18 +855,19 @@ assert_egress_containment() {
   local task_pod="$1"
   if kubectl exec -n "$NAMESPACE" "$task_pod" -- \
        wget -qO- --timeout=3 https://httpbin.org/ip >/dev/null 2>&1; then
-    warn "stdlib toolset pod reached httpbin.org — NetworkPolicy egress NOT enforced"
+    warn "hello-world toolset pod reached httpbin.org — NetworkPolicy egress NOT enforced"
     return 1
   else
-    ok "NetworkPolicy blocks stdlib toolset egress"
+    ok "NetworkPolicy blocks hello-world toolset egress"
   fi
 
-  # L7 DNS allowlist holds: stdlib must NOT resolve arbitrary names (the DNS-tunnel
-  # exfil guard — proves baseline + per-toolset CNP compose without L4-shadows-L7).
+  # L7 DNS allowlist holds: the toolset must NOT resolve arbitrary names (the
+  # DNS-tunnel exfil guard — proves baseline + per-toolset CNP compose without
+  # L4-shadows-L7).
   # Best-effort: skip cleanly if the toolset image lacks nslookup.
   if kubectl exec -n "$NAMESPACE" "$task_pod" -- sh -c 'command -v nslookup' >/dev/null 2>&1; then
     if kubectl exec -n "$NAMESPACE" "$task_pod" -- nslookup example.com >/dev/null 2>&1; then
-      warn "stdlib resolved example.com — L7 DNS allowlist NOT enforced"
+      warn "hello-world toolset resolved example.com — L7 DNS allowlist NOT enforced"
       return 1
     else
       ok "L7 DNS allowlist blocks arbitrary name resolution"
@@ -1021,11 +879,27 @@ assert_egress_containment() {
 
 assert_credential_isolation() {
   local task_pod="$1"
-  # The stdlib toolset is bound bare, so this call resolved no grant. The
-  # convention credential target must therefore be empty: a grant a call never
-  # selected must not reach the pod.
+  # Positive control first: the granted pod holds the demo key at the grant's
+  # path, so a broken grant mount cannot pass the absence checks vacuously.
+  local granted_selector="app.kubernetes.io/component=capability-job,sycophant.md/workspace=hello-world,sycophant.md/toolset=hello-world,sycophant.md/grant=demo-key"
+  local granted_pod
+  if ! wait_for "granted hello-world toolset pod for demo-key" 90 \
+       "kubectl get pod -n '$NAMESPACE' -l '$granted_selector' -o name 2>/dev/null | grep . >/dev/null"; then
+    return 1
+  fi
+  granted_pod="$(kubectl get pod -n "$NAMESPACE" -l "$granted_selector" \
+    -o jsonpath='{.items[0].metadata.name}')"
+  if ! kubectl exec -n "$NAMESPACE" "$granted_pod" -- test -f /home/agent/.ssh/id_ed25519 >/dev/null 2>&1; then
+    warn "granted pod has no demo key at /home/agent/.ssh/id_ed25519 (${granted_pod})"
+    return 1
+  fi
+  ok "Granted pod holds the demo key (${granted_pod})"
+
+  # The grantless pod resolved no grant: neither the grant's path nor the
+  # convention credential target may exist in it.
+  assert_path_absent "$task_pod" "$NAMESPACE" /home/agent/.ssh/id_ed25519 "grant leak"
   assert_path_absent "$task_pod" "$NAMESPACE" /run/secrets/grant/credential "credential leak"
-  ok "Credential isolation (no grant credential in a grantless toolset pod)"
+  ok "Credential isolation (no grant credential in the grantless toolset pod)"
 }
 
 dispatch_security_substeps() {
@@ -1034,7 +908,7 @@ dispatch_security_substeps() {
   # rest and masks unrelated properties.
   local -a checks=(
     step_6_relay_sheds_tsnet
-    step_6_adapter_port_fence
+    step_6_channel_port_fence
     step_6_inference_fence
     step_6_identity_hot_reload
   )
@@ -1051,14 +925,16 @@ dispatch_security_substeps() {
 step_6_security() {
   step "Step 6: Security assertions"
 
-  [ -n "$E2E_TOOL_CONV" ] && [ -n "$E2E_CHAT_CONV" ] \
-    || { warn "Step 5 recorded no conversations to inspect"; return 1; }
+  if [ -z "$E2E_TOOL_CONV" ] || [ -z "$E2E_FETCH_CONV" ] || [ -z "$E2E_CHAT_CONV" ]; then
+    warn "Step 5 recorded no conversations to inspect"
+    return 1
+  fi
 
-  # The harness creates the stdlib toolset pod on the first stdlib call; 90s
-  # covers the ARM64 gVisor cold-start slow path.
-  local toolset_selector="app.kubernetes.io/component=capability-job,sycophant.md/workspace=hello-world,sycophant.md/toolset=stdlib"
+  # The harness creates the grantless hello-world toolset pod on the first
+  # grantless call; 90s covers the ARM64 gVisor cold-start slow path.
+  local toolset_selector="app.kubernetes.io/component=capability-job,sycophant.md/workspace=hello-world,sycophant.md/toolset=hello-world,!sycophant.md/grant"
   local task_pod
-  wait_for "stdlib toolset pod for hello-world" 90 \
+  wait_for "grantless hello-world toolset pod" 90 \
     "kubectl get pod -n '$NAMESPACE' -l '$toolset_selector' -o name 2>/dev/null | grep -q ."
   task_pod="$(kubectl get pod -n "$NAMESPACE" \
                 -l "$toolset_selector" \
@@ -1079,9 +955,9 @@ step_6_security() {
   attach_ephemeral_scrubber "$NAMESPACE" "$tb_pod" "$scrub_c"
 
   local conv_root=/proc/1/root/var/lib/harness/conversations
-  local dirs chat_dir
+  local dirs chat_dir tool_dir fetch_dir
   dirs="$(discover_conversation_dirs "$tb_pod" "$scrub_c" "$conv_root")"
-  read -r chat_dir <<< "$dirs"
+  { read -r chat_dir; read -r tool_dir; read -r fetch_dir; } <<< "$dirs"
 
   local event_logs
   if ! event_logs="$(kubectl exec -n "$NAMESPACE" "$tb_pod" -c "$scrub_c" -- \
@@ -1095,13 +971,14 @@ step_6_security() {
   fi
   ok "The conversation volume holds no event_log.jsonl file"
 
+  assert_tool_results "$tb_pod" "$scrub_c" "$tool_dir" "$fetch_dir"
   assert_scrubbing "$tb_pod" "$scrub_c" "$conv_root" "$chat_dir"
   assert_egress_containment "$task_pod"
   assert_credential_isolation "$task_pod"
   dispatch_security_substeps
 }
 
-# The tailnet terminus lives on the app adapter, not the relay. A tailscale
+# The tailnet terminus lives on the tailnet channel, not the relay. A tailscale
 # container back in the relay pod would widen the relay's per-pod egress and
 # let loopback bypass both the tailnet and the CNP.
 step_6_relay_sheds_tsnet() {
@@ -1143,28 +1020,28 @@ l4_probe() {
 # An accept/deny pair. A deny-only probe passes on a fence that
 # refuses everything, so both halves are required: the labelled pod must
 # reach 9092 and the unlabelled one must not.
-step_6_adapter_port_fence() {
-  step "Adapter-port fence (9092)"
+step_6_channel_port_fence() {
+  step "Channel-port fence (9092)"
   local target="relay-controller.${NAMESPACE}.svc.cluster.local"
 
-  if l4_probe adapter-probe-allow "$target" 9092 "app.kubernetes.io/part-of=sycophant,app.kubernetes.io/component=adapter,sycophant.md/adapter-class=principal" gvisor; then
-    ok "principal-labelled pod reaches the adapter port"
+  if l4_probe channel-probe-allow "$target" 9092 "app.kubernetes.io/part-of=sycophant,app.kubernetes.io/component=channel,sycophant.md/channel-class=principal" gvisor; then
+    ok "principal-labelled pod reaches the channel port"
   else
-    warn "principal-labelled pod could NOT reach the adapter port — the fence admits nothing"
-    kubectl logs adapter-probe-allow -n "$NAMESPACE" 2>&1 | tail -5 || true
-    kubectl delete pod adapter-probe-allow adapter-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
+    warn "principal-labelled pod could NOT reach the channel port — the fence admits nothing"
+    kubectl logs channel-probe-allow -n "$NAMESPACE" 2>&1 | tail -5 || true
+    kubectl delete pod channel-probe-allow channel-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
     return 1
   fi
 
-  if l4_probe adapter-probe-deny "$target" 9092 "app.kubernetes.io/part-of=sycophant,app.kubernetes.io/component=adapter" gvisor; then
-    warn "a pod without adapter-class=principal reached the adapter port — the fence is open"
-    kubectl delete pod adapter-probe-allow adapter-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
+  if l4_probe channel-probe-deny "$target" 9092 "app.kubernetes.io/part-of=sycophant,app.kubernetes.io/component=channel" gvisor; then
+    warn "a pod without channel-class=principal reached the channel port — the fence is open"
+    kubectl delete pod channel-probe-allow channel-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
     return 1
   else
-    ok "pod without adapter-class=principal is refused on the adapter port"
+    ok "pod without channel-class=principal is refused on the channel port"
   fi
 
-  kubectl delete pod adapter-probe-allow adapter-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
+  kubectl delete pod channel-probe-allow channel-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
 }
 
 # The in-cluster inference Service, fenced two ways.
@@ -1172,7 +1049,7 @@ step_6_adapter_port_fence() {
 # L3/L4: its ingress admits only pods carrying the profile's toolset label, so a
 # labelled probe connects and an unlabelled one is refused. Both halves are
 # required — a deny-only probe passes on a fence that admits nothing — so this is
-# the same accept/deny pair as the adapter fence.
+# the same accept/deny pair as the channel fence.
 #
 # L7: from a pod that DOES carry the label (L3/L4 already open), the Cilium HTTP
 # allowlist answers /metrics and /slots with 403 and lets a completion through
@@ -1296,15 +1173,25 @@ step_6_identity_hot_reload() {
     return 1
   fi
 
-  # Remove the binding by deleting the user's release, exactly as the
-  # operator would re-run `sycoadm user up` without the workspace: the identity
-  # ConfigMap and the reach RoleBindings go together. The relay's next
-  # answer must be empty.
-  local release_name
-  release_name="$(handle_of "${APISERVER_OIDC_ISSUER}#${probe_sub}")"
+  # Remove the binding the operator's way, `sycoadm user down`: the user's
+  # release goes, and the identity ConfigMap and the reach RoleBindings with
+  # it. The relay's next answer must be empty.
+  local probe_subject="${APISERVER_OIDC_ISSUER}#${probe_sub}" release_name
+  release_name="user-$(handle_of "$probe_subject")"
   # The provision installers keep release records in ConfigMaps.
-  HELM_DRIVER=configmap helm uninstall "user-${release_name}" -n "$NAMESPACE" >/dev/null 2>&1 \
-    || { warn "could not remove the probe user's release user-${release_name}"; return 1; }
+  if ! HELM_DRIVER=configmap helm status "$release_name" -n "$NAMESPACE" >/dev/null 2>&1; then
+    warn "the probe user's release ${release_name} is not installed"
+    return 1
+  fi
+  if ! "$SYCO" user down "$probe_subject" --tenant hello-world; then
+    warn "sycoadm user down failed for the hot-reload probe"
+    return 1
+  fi
+  if HELM_DRIVER=configmap helm status "$release_name" -n "$NAMESPACE" >/dev/null 2>&1; then
+    warn "the probe user's release ${release_name} is still installed after sycoadm user down"
+    return 1
+  fi
+  ok "sycoadm user down removed the probe user's release ${release_name}"
   # A dropped tailnet or a crashed relay must not count as revoked: the
   # answer must be a successful list without hello-world, or a denial.
   # shellcheck disable=SC2016 # single-quoted on purpose: wait_for evals it.
@@ -1363,27 +1250,13 @@ step_7_upgrade_cli() {
   fi
 }
 
-# ---- OIDC write-path proof ----
-# A token from a generic (non-Dex) issuer fixture mints a store credential that
-# writes, and the store reaches that issuer and nothing else.
-#
-# OIDC_WRITE_ROLE_ARN  the roles[] entry the fixture token assumes; the rendered
-#                      -s3.iam.config roleMapping maps this issuer to it.
-# The issuer carries :8080 so the iss claim, the discovery jwks_uri, the JWKS
-# fetch, the fixture Service, and the egress port all resolve to one port.
-readonly OIDC_WRITE_ROLE_ARN="${OIDC_WRITE_ROLE_ARN:-arn:aws:iam::role/instructions-writer}"
-readonly OIDC_FIXTURE_AUDIENCE="${OIDC_FIXTURE_AUDIENCE:-sycophant-objectstore}"
-readonly OIDC_FIXTURE_SUBJECT="${OIDC_FIXTURE_SUBJECT:-e2e-writer}"
-readonly OIDC_FIXTURE_ISSUER="http://oidc-fixture.sycophant-system.svc.cluster.local:8080"
-
 # Apiserver-trusted issuer for the per-identity cluster-identity proof: the
-# bundled Dex. A separate trust root from the object-store issuer above: the
-# apiserver only accepts an https issuer, and k3s runs kube-apiserver in the
-# node netns with no CoreDNS, so Dex is published on a pinned NodePort the
-# apiserver reaches at the node loopback. The self-signed serving cert and the
-# rendered AuthenticationConfiguration are generated at boot into
-# tmp/oidc-apiserver and mounted into the apiserver; the same cert is handed to
-# Dex as its TLS listener, so both ends share one CA.
+# bundled Dex. The apiserver only accepts an https issuer, and k3s runs
+# kube-apiserver in the node netns with no CoreDNS, so Dex is published on a
+# pinned NodePort the apiserver reaches at the node loopback. The self-signed
+# serving cert and the rendered AuthenticationConfiguration are generated at
+# boot into tmp/oidc-apiserver and mounted into the apiserver; the same cert is
+# handed to Dex as its TLS listener, so both ends share one CA.
 readonly APISERVER_OIDC_NS="sycophant-system"
 readonly APISERVER_OIDC_NODEPORT=30443
 readonly APISERVER_OIDC_ISSUER="https://127.0.0.1:${APISERVER_OIDC_NODEPORT}/dex"
@@ -1415,15 +1288,13 @@ export SYCO_CONFIG_DIR="${SYCO_CONFIG_DIR:-$REPO_ROOT/tmp/syco-config}"
 readonly SYCO_PASSWORD_FILE="$REPO_ROOT/tmp/e2e-operator-password"
 # The public Dex CA `sycoadm setup` generated and the apiserver trusts.
 readonly SYCO_DEX_CA="$SYCO_CONFIG_DIR/oidc/ca.crt"
-# The toolset image overrides e2e writes beside the example values.
-readonly VALUES_DIR="$SYCO_CONFIG_DIR/values"
 export SYCO_EMAIL="${SYCO_EMAIL:-e2e-operator@sycophant.local}"
 # Step 1 builds and loads the e2e image set itself.
 export SYCO_SKIP_BUILD="${SYCO_SKIP_BUILD:-1}"
 # The Cilium agent image comes from the host Docker cache, not a run-time pull.
 export SYCO_CILIUM_PRELOAD="${SYCO_CILIUM_PRELOAD:-1}"
-export SYCO_KYVERNO_VALUES="${SYCO_KYVERNO_VALUES:-$REPO_ROOT/docs/e2e/kyverno-values.yaml}"
-export SYCO_CLUSTER_VALUES="${SYCO_CLUSTER_VALUES:-$REPO_ROOT/docs/e2e/cluster-values.yaml}"
+export SYCO_KYVERNO_VALUES="${SYCO_KYVERNO_VALUES:-$REPO_ROOT/scripts/fixtures/kyverno-values.yaml}"
+export SYCO_CLUSTER_VALUES="${SYCO_CLUSTER_VALUES:-$REPO_ROOT/scripts/fixtures/cluster-values.yaml}"
 
 # Export SYCO_PASSWORD: the caller's, else the persisted one, else a new one.
 syco_credentials() {
@@ -1435,17 +1306,6 @@ syco_credentials() {
     SYCO_PASSWORD="$(cat "$SYCO_PASSWORD_FILE")"
   fi
   export SYCO_PASSWORD
-}
-
-b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
-
-# Write the JWKS ($4) and discovery document ($5) for issuer $3 whose RS256
-# signing key is the PEM private key $1, published under kid $2.
-write_issuer_docs() {
-  local n
-  n="$(openssl rsa -in "$1" -noout -modulus | sed 's/^Modulus=//' | xxd -r -p | b64url)"
-  printf '{"keys":[{"kty":"RSA","use":"sig","alg":"RS256","kid":"%s","n":"%s","e":"AQAB"}]}\n' "$2" "$n" > "$4"
-  printf '{"issuer":"%s","jwks_uri":"%s/.well-known/jwks.json"}\n' "$3" "$3" > "$5"
 }
 
 # Build a kubeconfig at $1 whose sole context (named $2) presents bearer token
@@ -1463,216 +1323,6 @@ kubeconfig_with_token() {
   KUBECONFIG="$kc" kubectl config set-credentials "$name" --token="$token" >/dev/null
   KUBECONFIG="$kc" kubectl config set-context "$name" --cluster=e2e --user="$name" >/dev/null
   KUBECONFIG="$kc" kubectl config use-context "$name" >/dev/null
-}
-
-# Mint a compact RS256 JWT: header (kid $1) + payload (iss $2, sub $3, aud $4,
-# iat now, exp now+600s), signed by the PEM private key $5. Emits the token on
-# stdout.
-mint_rs256_jwt() {
-  local kid="$1" iss="$2" sub="$3" aud="$4" keyfile="$5"
-  local now exp header payload signing_input sig
-  now="$(date +%s)"; exp="$(( now + 600 ))"
-  header="$(printf '{"alg":"RS256","typ":"JWT","kid":"%s"}' "$kid" | b64url)"
-  payload="$(printf '{"iss":"%s","sub":"%s","aud":"%s","iat":%s,"exp":%s}' \
-    "$iss" "$sub" "$aud" "$now" "$exp" | b64url)"
-  signing_input="${header}.${payload}"
-  sig="$(printf '%s' "$signing_input" | openssl dgst -sha256 -sign "$keyfile" | b64url)"
-  printf '%s.%s' "$signing_input" "$sig"
-}
-
-oidc_setup_fixture() {
-  local work="$1"
-  # --- fixture keypair + discovery + JWKS ---
-  openssl genrsa -out "$work/key.pem" 2048 >/dev/null 2>&1
-  openssl rsa -in "$work/key.pem" -pubout -out "$work/pub.pem" >/dev/null 2>&1
-  local kid="e2e-fixture-key"
-  write_issuer_docs "$work/key.pem" "$kid" "$OIDC_FIXTURE_ISSUER" \
-    "$work/jwks.json" "$work/openid-configuration.json"
-
-  # Serve both documents from a ConfigMap through the pinned static-file server.
-  kubectl create configmap oidc-fixture -n sycophant-system \
-    --from-file=openid-configuration="$work/openid-configuration.json" \
-    --from-file=jwks.json="$work/jwks.json" \
-    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-  # The fixture Deployment + Service (label app.kubernetes.io/name: oidc-fixture,
-  # port 8080) serves the ConfigMap at /.well-known/. Reuse it if already applied;
-  # otherwise this file is the contract for it.
-  kubectl apply -n sycophant-system -f "$REPO_ROOT/scripts/fixtures/oidc-issuer.yaml" >/dev/null
-  # Each run regenerates the keypair, so the served JWKS changes. Stamp a
-  # checksum of the fixture ConfigMap onto the pod template: an unchanged content
-  # is a no-op, a changed one rolls the fixture so it serves the new JWKS. This
-  # replaces an unconditional rollout restart with a change-gated roll.
-  local cfg_sum; cfg_sum="$(cat "$work/openid-configuration.json" "$work/jwks.json" | shasum -a 256 | cut -d' ' -f1)"
-  kubectl patch deploy/oidc-fixture -n sycophant-system --type=merge \
-    -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"checksum/config\":\"${cfg_sum}\"}}}}}" >/dev/null
-  wait_for "oidc fixture ready" 120 \
-    "kubectl get deploy oidc-fixture -n sycophant-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null | grep -qx 1"
-}
-
-oidc_install_store() {
-  # --- install the store pointed at the fixture, egress in-cluster ---
-  local oidc_values; oidc_values="$(mktemp)"
-  export OIDC_FIXTURE_ISSUER OIDC_FIXTURE_AUDIENCE
-  envsubst '${OIDC_FIXTURE_ISSUER} ${OIDC_FIXTURE_AUDIENCE}' \
-    < "$REPO_ROOT/scripts/fixtures/oidc-values.yaml.tpl" > "$oidc_values"
-  helm upgrade --install sycophant-objectstore "$REPO_ROOT/charts/sycophant-objectstore" \
-    -n sycophant-system -f "$oidc_values" --wait >/dev/null
-  kubectl rollout status deploy/seaweedfs -n sycophant-system --timeout=120s >/dev/null
-}
-
-oidc_mint_token() {
-  local work="$1"
-  local kid="e2e-fixture-key"
-  # --- mint an RS256 JWT signed by the fixture key ---
-  mint_rs256_jwt "$kid" "$OIDC_FIXTURE_ISSUER" "$OIDC_FIXTURE_SUBJECT" \
-    "$OIDC_FIXTURE_AUDIENCE" "$work/key.pem"
-}
-
-oidc_verify_s3_access() {
-  local work="$1" jwt="$2"
-  # --- reach the s3 gateway over the port-forward ---
-  kubectl port-forward -n sycophant-system svc/seaweedfs "${S3_PF_PORT}:8333" >/dev/null 2>&1 &
-  local pf_pid=$!
-  trap 'kill '"$pf_pid"' 2>/dev/null || true; rm -rf "$work"; trap - RETURN' RETURN
-  local endpoint="http://127.0.0.1:${S3_PF_PORT}"
-  wait_for "s3 gateway reachable" 60 "curl -s -o /dev/null '${endpoint}'"
-
-  # The token, presented to STS AssumeRoleWithWebIdentity, mints creds.
-  local sts_out
-  sts_out="$(aws sts assume-role-with-web-identity \
-    --role-arn "$OIDC_WRITE_ROLE_ARN" \
-    --role-session-name e2e-oidc-write \
-    --web-identity-token "$jwt" \
-    --endpoint-url "$endpoint" \
-    --output json 2>"$work/sts.err")" || {
-      warn "AssumeRoleWithWebIdentity did not return"; cat "$work/sts.err" >&2; exit 1; }
-  local ak sk st
-  ak="$(printf '%s' "$sts_out" | python3 -c 'import sys,json;print(json.load(sys.stdin)["Credentials"]["AccessKeyId"])')"
-  sk="$(printf '%s' "$sts_out" | python3 -c 'import sys,json;print(json.load(sys.stdin)["Credentials"]["SecretAccessKey"])')"
-  st="$(printf '%s' "$sts_out" | python3 -c 'import sys,json;print(json.load(sys.stdin)["Credentials"]["SessionToken"])')"
-  [ -n "$ak" ] && [ -n "$sk" ] && [ -n "$st" ] || { warn "STS returned no temporary credentials"; exit 1; }
-  ok "STS minted a short-lived credential from the fixture token"
-
-  # The minted credential writes to the store.
-  local obj; obj="$work/proof.txt"; echo "oidc-write-proof" > "$obj"
-  AWS_ACCESS_KEY_ID="$ak" AWS_SECRET_ACCESS_KEY="$sk" AWS_SESSION_TOKEN="$st" \
-    aws s3 mb "s3://${INSTRUCTIONS_BUCKET}" --endpoint-url "$endpoint" >/dev/null 2>&1 || true
-  AWS_ACCESS_KEY_ID="$ak" AWS_SECRET_ACCESS_KEY="$sk" AWS_SESSION_TOKEN="$st" \
-    aws s3 cp "$obj" "s3://${INSTRUCTIONS_BUCKET}/e2e/oidc-write-proof.txt" --endpoint-url "$endpoint" >/dev/null 2>"$work/put.err" || {
-      warn "write with the minted credential was rejected"; cat "$work/put.err" >&2; exit 1; }
-  ok "the minted credential wrote to ${INSTRUCTIONS_BUCKET}"
-
-  # The store reaches the issuer and no other external destination.
-  # Positive reach: the STS call above succeeded, which required the store to
-  # fetch the fixture JWKS to verify the token — proof the issuer peer is open.
-  # Negative control: exec in the REAL store container, not a kubectl-debug
-  # ephemeral container — the debugger bypasses the pod's Cilium egress and gives
-  # a false 'reachable'. DNS is allowed so example.org resolves; the egress lock
-  # drops the TCP, so wget times out (non-zero exit).
-  if kubectl exec -n sycophant-system deploy/seaweedfs -c seaweedfs -- \
-    wget -T6 -t1 -qO- http://example.org >/dev/null 2>&1; then
-    warn "store reached a non-issuer external host (example.org) — egress lock open"; exit 1
-  fi
-  ok "store egress to a non-issuer external host is denied"
-  ok "OIDC write-path proof passed"
-}
-
-# sts_assume_role <endpoint> <role-arn> <token-file> <out> <err>: STS
-# AssumeRoleWithWebIdentity. Non-zero when the store refuses the exchange.
-sts_assume_role() {
-  env AWS_REGION="${AWS_REGION:-us-east-1}" aws sts assume-role-with-web-identity \
-    --role-arn "$2" --role-session-name e2e-refusal-probe \
-    --web-identity-token "$(cat "$3")" --endpoint-url "$1" --output json > "$4" 2> "$5"
-}
-
-# sts_refusal <err>: the failed exchange was refused by STS itself, not lost to
-# a dropped port-forward or a missing tool.
-sts_refusal() {
-  grep -q 'An error occurred (' "$1" && grep -q 'AssumeRoleWithWebIdentity operation' "$1"
-}
-
-# On the store configured with the fixture issuer (so the writer
-# role exists), the read role refuses a fixture-signed token claiming a
-# workspace's sub, and the writer role and the direct bearer S3 path refuse a
-# workspace's own cluster token. A cluster token naming the read role is the
-# positive control. Reads the fixture key from $1 and writes nothing there:
-# its port-forward and temp dir are its own and are released on return, so
-# S3_PF_PORT is free again for oidc_verify_s3_access.
-oidc_verify_cluster_token_refusals() {
-  local work="$1"
-  local d; d="$(mktemp -d)"
-  kubectl port-forward -n sycophant-system svc/seaweedfs "${S3_PF_PORT}:8333" > "$d/pf.log" 2>&1 &
-  local pf_pid=$!
-  trap 'kill '"$pf_pid"' 2>/dev/null || true; wait '"$pf_pid"' 2>/dev/null || true; rm -rf '"$d"'; trap - RETURN' RETURN
-  local endpoint="http://127.0.0.1:${S3_PF_PORT}"
-  if ! wait_for "s3 gateway reachable" 60 "curl -s -o /dev/null '${endpoint}'"; then
-    return 1
-  fi
-  local sub; sub="$(instructions_sub "$NAMESPACE" hello-world)"
-  if ! kubectl create token ws-hello-world -n "$NAMESPACE" --audience sycophant-objectstore --duration 10m > "$d/cluster.jwt"; then
-    warn "minting ws-hello-world's sycophant-objectstore token failed"
-    return 1
-  fi
-
-  if ! sts_assume_role "$endpoint" "$INSTRUCTIONS_READ_ROLE_ARN" "$d/cluster.jwt" "$d/read.json" "$d/read.err"; then
-    warn "positive control: STS refused ws-hello-world's cluster token for the read role: $(cat "$d/read.err")"
-    return 1
-  fi
-  ok "a workspace's cluster token is exchanged for the read role"
-
-  if ! mint_rs256_jwt e2e-fixture-key "$OIDC_FIXTURE_ISSUER" "$sub" "$OIDC_FIXTURE_AUDIENCE" "$work/key.pem" > "$d/fixture.jwt"; then
-    warn "minting the fixture-issuer token failed"
-    return 1
-  fi
-  if sts_assume_role "$endpoint" "$INSTRUCTIONS_READ_ROLE_ARN" "$d/fixture.jwt" "$d/fixture.json" "$d/fixture.err"; then
-    warn "the read role accepted a token from the fixture issuer claiming sub ${sub}"
-    return 1
-  fi
-  if ! sts_refusal "$d/fixture.err"; then
-    warn "the fixture-token exchange failed without an STS refusal: $(head -c 300 "$d/fixture.err")"
-    return 1
-  fi
-  ok "the read role refuses another trusted issuer's token that claims a workspace's sub"
-
-  if sts_assume_role "$endpoint" "$OIDC_WRITE_ROLE_ARN" "$d/cluster.jwt" "$d/write.json" "$d/write.err"; then
-    warn "the writer role accepted a workspace's cluster token"
-    return 1
-  fi
-  if ! sts_refusal "$d/write.err"; then
-    warn "the writer-role exchange failed without an STS refusal: $(head -c 300 "$d/write.err")"
-    return 1
-  fi
-  # The token sent straight to the S3 API must be refused (401 or 403),
-  # whether or not the object exists.
-  local token code req
-  token="$(cat "$d/cluster.jwt")"
-  for req in "PUT bearer-probe.md" "GET AGENTS.md"; do
-    if ! code="$(curl -s -g -o /dev/null -w '%{http_code}' -X "${req%% *}" -H "Authorization: Bearer ${token}" \
-      "${endpoint}/${INSTRUCTIONS_BUCKET}/${sub}/${req#* }")"; then
-      warn "the bearer S3 ${req%% *} did not reach the gateway"
-      return 1
-    fi
-    case "$code" in
-      401|403) ;;
-      *) warn "a bearer S3 ${req%% *} with a workspace's cluster token answered ${code}, want 401 or 403"; return 1 ;;
-    esac
-  done
-  ok "the writer role and the bearer S3 path refuse a workspace's cluster token"
-}
-
-verify_oidc_write_path() {
-  step "OIDC write-path proof"
-  command -v python3 >/dev/null 2>&1 || { warn "python3 required for the OIDC proof"; exit 1; }
-
-  local work; work="$(mktemp -d)"
-  trap 'rm -rf "$work"; trap - RETURN' RETURN
-
-  oidc_setup_fixture "$work"
-  oidc_install_store
-  # Before oidc_verify_s3_access: its RETURN trap removes $work, key.pem included.
-  oidc_verify_cluster_token_refusals "$work"
-  local jwt; jwt="$(oidc_mint_token "$work")"
-  oidc_verify_s3_access "$work" "$jwt"
 }
 
 # Sign a JWT with Dex's active signing key so it validates against Dex's JWKS.
@@ -1808,14 +1458,7 @@ verify_user_isolation() {
 # it, and the filer's recursive delete keeps a deleted file out of the new
 # pod. The pod is read back
 # through an ephemeral container; no folder is read over S3.
-readonly INSTRUCTIONS_READ_ROLE_ARN="arn:aws:iam::role/workspace-instructions-read"
 readonly INSTRUCTIONS_PROBE_WS="instructions-probe"
-
-# The token subject of workspace $2's service account in namespace $1; the
-# store keys the workspace's folder by it.
-instructions_sub() {
-  printf 'system:serviceaccount:%s:ws-%s' "$1" "$2"
-}
 
 # Sorted "sha256  relpath" lines for the regular files under directory $1.
 tree_manifest() {
@@ -1918,7 +1561,7 @@ harness_pod_identity() {
 # (AGENTS.md and agents/poet.md, a file in a subdirectory) in its pod: the
 # real filer kept the stdin PUT's bytes and the init container received them.
 instructions_baseline() {
-  local example="$REPO_ROOT/examples/sycoadm/instructions/simple" want
+  local example="$REPO_ROOT/examples/sycoadm/instructions/hello-world" want
   if [ ! -f "$example/agents/poet.md" ]; then
     warn "the example tree has no file in a subdirectory (agents/poet.md)"
     return 1
@@ -1942,7 +1585,7 @@ instructions_rerun() {
   local want before after
 
   local tree="$d/tree"
-  cp -R "$REPO_ROOT/examples/sycoadm/instructions/simple" "$tree"
+  cp -R "$REPO_ROOT/examples/sycoadm/instructions/hello-world" "$tree"
   env WORKSPACE_NAME="$ws" WORKSPACE_TENANT="$tenant" INSTRUCTIONS_DIR="$tree" \
     envsubst '${WORKSPACE_NAME} ${WORKSPACE_TENANT} ${INSTRUCTIONS_DIR}' \
     < "$REPO_ROOT/tests/fixtures/instructions/workspace.yaml" > "$d/probe.yaml"
@@ -2040,7 +1683,7 @@ lifecycle_tenant_up() {
   local operator_identity="${APISERVER_OIDC_ISSUER}#${LIFECYCLE_OPERATOR_SUB}"
   local owner_hash
   owner_hash="$(printf '%s' "$operator_identity" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-16)"
-  local tenant_values=(-f "$REPO_ROOT/examples/sycoadm/tenants/e2e-test.yaml"
+  local tenant_values=(-f "$REPO_ROOT/examples/sycoadm/tenants/hello-world.yaml"
     --set "tenant.name=$LIFECYCLE_TENANT_TOKEN" --set tenant.capacity=512Mi
     --set "tenant.owner=$operator_identity" --set "tenant.ownerHash=$owner_hash")
 
@@ -2086,7 +1729,7 @@ lifecycle_verify_running() {
   # relay-controller is Available, so it is serving before the workspace
   # provision command and merges the new grants live.
   wait_for "relay-controller served the new workspace grants live" 60 \
-    "kubectl logs -n '$LIFECYCLE_TENANT_NS' -l app.kubernetes.io/name=relay-controller --tail=80 2>/dev/null | grep -E 'toolset-grants delivery applied.*\"configmaps\":[1-9]' -q"
+    "kubectl logs -n '$LIFECYCLE_TENANT_NS' -l app.kubernetes.io/name=relay-controller --tail=80 2>/dev/null | grep -E 'toolset-grants delivery applied.*\"configmaps\":[1-9]' >/dev/null"
   ok "relay-controller merged the workspace grants without a pod roll"
 
   # One toolset, one provision command. The harness merges the per-toolset
@@ -2098,7 +1741,7 @@ lifecycle_verify_running() {
   "$SYCO" toolset up -f "$work/toolset-${ts}.yaml"
 
   wait_for "harness merged toolset ${ts} by watch" 120 \
-    "kubectl logs deploy/ws-${LIFECYCLE_WORKSPACE} -n ${LIFECYCLE_TENANT_NS} -c harness --tail=200 2>/dev/null | grep -E 'toolset delivery applied.*\"configmaps\":1,' -q"
+    "kubectl logs deploy/ws-${LIFECYCLE_WORKSPACE} -n ${LIFECYCLE_TENANT_NS} -c harness --tail=200 2>/dev/null | grep -E 'toolset delivery applied.*\"configmaps\":1,' >/dev/null"
   local harness_after; harness_after="$(harness_identity)"
   [ "$harness_before" = "$harness_after" ] \
     || { warn "harness pod or Deployment generation changed on toolset add (${harness_before} -> ${harness_after})"; exit 1; }
@@ -2172,6 +1815,8 @@ main() {
     env CLEAN=0 "$REPO_ROOT/scripts/preflight.sh"
     kubectl config use-context "k3d-$CLUSTER_NAME" >/dev/null 2>&1 \
       || { warn "could not switch kube-context to k3d-$CLUSTER_NAME — the k3d cluster exists but its kubeconfig context is missing; recreate with --clean"; exit 1; }
+    step "Reuse run — sycoadm setup re-applies this checkout's cluster chart before the tenant deploy"
+    sycoadm_setup
   else
     warn "No cluster '$CLUSTER_NAME' — bootstrapping once (later runs without --clean reuse it)"
     # First boot bootstraps and cross-compiles the images, so it needs the full
@@ -2187,10 +1832,9 @@ main() {
   verify_instructions_delivery
   verify_tenant_lifecycle
   step_4_verify
-  step_5_flutter
+  step_5_channel
   step_6_security
   step_7_upgrade_cli
-  verify_oidc_write_path
   if [ "$_step_start" -gt 0 ]; then
     printf '\033[1;34m    ⏱  previous step took %ds\033[0m\n' "$(( SECONDS - _step_start ))"
   fi

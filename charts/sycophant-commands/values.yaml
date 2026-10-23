@@ -18,9 +18,9 @@
 #                           # cpu, singleNodeException, chatTemplate
 
 # toolset:
-#   name: git
+#   name: hello-world
 #   tenant: acme
-#   image: ghcr.io/sycophant-md/git@sha256:...
+#   image: ghcr.io/sycophant-md/toolset-hello-world@sha256:...
 #   keepalive: false
 #   deadlineSeconds: 300
 #   env: {}                 # NAME: value
@@ -33,7 +33,7 @@
 #   models: []
 #   storage: 5Gi
 #   grants: {}              # <toolset>: {<grant>: {secret, path, egress}}
-#   instructions: ../instructions/simple  # read by sycoadm only, never rendered:
+#   instructions: ../instructions/hello-world  # read by sycoadm only, never rendered:
 #                           # the instructions directory, relative to this file
 #   instructionsHash: ""    # set by sycoadm only (--set-string), from the
 #                           # instructions files; rides the command as instructions-hash
@@ -45,9 +45,8 @@
 #   handles: {}              # <channel>: that platform's user ID, e.g. slack: U0123ABCDEF
 
 # channel:
-#   name: app
+#   name: tailnet
 #   tenant: acme
-#   kind: app               # only app today
 #   loginServer: http://headscale:8080
 #   image: tailscale/tailscale
 #   tag: stable

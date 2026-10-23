@@ -18,8 +18,8 @@ readonly SELF_PID
 # Order matters: kill wrappers BEFORE kubectl children so the wrapper
 # doesn't respawn the child mid-sweep.
 patterns=(
-  "while true.*kubectl.*port-forward.*(headscale|e2e-test)"
-  "kubectl.*port-forward.*(headscale|e2e-test)"
+  "while true.*kubectl.*port-forward.*(headscale|hello-world)"
+  "kubectl.*port-forward.*(headscale|hello-world)"
   "${REPO_ROOT}/target/(debug|release)/deps/"
 )
 readonly -a patterns

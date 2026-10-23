@@ -4,12 +4,11 @@
 //! live in the per-workspace harness, reached via the
 //! `HarnessClientPool`. The gateway owns the *live* surface:
 //!
-//! - `channels` — server-minted channel_id → outbound mpsc + per-channel
-//!   turn phase + pending server-requests + advertised methods.
+//! - `channel_streams` — server-minted channel_stream_id → outbound mpsc.
 //! - `last_turn_state` — per-conversation last recorded phase, backing the
 //!   `GetTurnState` poll.
 //! - `SubscriberRegistry` — per-workspace broadcast bus the harness's
-//!   `Subscribe` stream drains; `ChannelIngest` notifies it. Standalone
+//!   `Subscribe` stream drains; `ChannelStreamIngest` notifies it. Standalone
 //!   because the gateway has no per-workspace conversation state to
 //!   attach it to.
 
@@ -18,8 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use proto_common::{
-    channel_outbound, ChannelOutbound, ClientResponseError, Heartbeat, ServerRequest, TurnState,
-    TurnStateEvent, UserMessage,
+    channel_stream_outbound, ChannelStreamOutbound, ClientResponseError, Heartbeat, ServerRequest,
+    TurnState, TurnStateEvent, UserMessage,
 };
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 use tokio::task::AbortHandle;
@@ -38,49 +37,49 @@ pub enum ServerRequestOutcome {
 /// reaching the client OR after dispatching but before a response.
 #[derive(Debug)]
 pub enum ServerRequestError {
-    UnknownChannel,
+    UnknownChannelStream,
     UnsupportedMethod,
     SendFailed,
     Timeout,
     Disconnected,
 }
 
-/// Who opened a channel. ChannelIngest admits only the same caller: a
-/// person channel only its own subject, an adapter channel only that
-/// adapter. An adapter channel also keeps the sender handle it was opened
+/// Who opened a channel stream. ChannelStreamIngest admits only the same caller: a
+/// person-opened stream only its own subject, a channel-opened stream only that
+/// channel. A channel-opened stream also keeps the sender handle it was opened
 /// for, so every message re-resolves that handle against the live identity
-/// table and a removed handle binding cuts an open channel.
+/// table and a removed handle binding cuts an open channel stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ChannelOpener {
+pub enum ChannelStreamOpener {
     Person,
-    Adapter { channel: String, sender: String },
+    Channel { channel: String, sender: String },
 }
 
-/// Server-side state for one registered channel. Created via
-/// `mint_channel`; lifetime tied to the originating ChannelReceive
+/// Server-side state for one registered channel stream. Created via
+/// `mint_channel_stream`; lifetime tied to the originating ChannelStreamReceive
 /// response stream.
-pub struct ChannelEntry {
-    /// How the channel was opened; see [`ChannelOpener`].
-    pub opener: ChannelOpener,
-    /// The subject that minted this channel. ChannelIngest callers
+pub struct ChannelStreamEntry {
+    /// How the channel stream was opened; see [`ChannelStreamOpener`].
+    pub opener: ChannelStreamOpener,
+    /// The subject that minted this channel stream. ChannelStreamIngest callers
     /// must verify against this binding (PermissionDenied on mismatch),
-    /// so two subjects in one workspace cannot reach each other's channels.
+    /// so two subjects in one workspace cannot reach each other's channel streams.
     pub subject: String,
     /// The workspace the minting subject names. The harness link checks
     /// against this, because the harness knows workspaces and not subjects.
     pub workspace: String,
-    pub tx: mpsc::Sender<ChannelOutbound>,
-    /// Cluster-owned turn phase for the channel. `set_and_broadcast_turn_state`
+    pub tx: mpsc::Sender<ChannelStreamOutbound>,
+    /// Cluster-owned turn phase for the channel stream. `set_and_broadcast_turn_state`
     /// updates this and enqueues a frame under the same lock acquisition so
-    /// replay on fresh ChannelReceive cannot race a live transition.
+    /// replay on fresh ChannelStreamReceive cannot race a live transition.
     pub current_state: Mutex<TurnState>,
-    /// Client-advertised tool methods this channel can render. Updated
-    /// on every `ChannelIngest` (last-sender-wins). The controller
+    /// Client-advertised tool methods this channel stream can render. Updated
+    /// on every `ChannelStreamIngest` (last-sender-wins). The controller
     /// refuses to dispatch a `ServerRequest` whose method is not in
     /// this set.
     pub supported_methods: Mutex<HashSet<String>>,
-    /// Abort handle for the per-channel heartbeat task. `None` until
-    /// `spawn_heartbeat` runs for the channel.
+    /// Abort handle for the per-stream heartbeat task. `None` until
+    /// `spawn_heartbeat` runs for the channel stream.
     pub heartbeat_handle: Mutex<Option<AbortHandle>>,
 }
 
@@ -96,7 +95,7 @@ pub struct TurnStateRecord {
 }
 
 /// Per-workspace broadcast bus. The harness opens a `Subscribe`
-/// stream per workspace and drains the matching sender; `ChannelIngest`
+/// stream per workspace and drains the matching sender; `ChannelStreamIngest`
 /// pushes inbound `UserMessage`s onto it. Capacity 16.
 #[derive(Default)]
 pub struct SubscriberRegistry {
@@ -137,8 +136,8 @@ impl SubscriberRegistry {
 }
 
 pub struct GatewayState {
-    /// channel_id (UUID, server-minted) → ChannelEntry.
-    channels: RwLock<HashMap<String, ChannelEntry>>,
+    /// channel_stream_id (UUID, server-minted) → ChannelStreamEntry.
+    channel_streams: RwLock<HashMap<String, ChannelStreamEntry>>,
     /// (subject, conversation_id) → last recorded turn phase. Keyed by
     /// the caller's verified subject so a `GetTurnState` poll can only read
     /// its own phase; conversation_id alone is a bare UUID and would
@@ -172,12 +171,11 @@ pub struct GatewayState {
     idp_issuer: String,
     idp_audience: String,
     idp_certificate_authority: String,
-    /// Workspace-wide pending server requests keyed by (workspace, request_id).
-    /// Moved from per-channel to workspace-wide so a `ClientResponse` from any
-    /// workspace channel resolves the awaiter.
+    /// Keyed by (workspace, request_id) so a `ClientResponse` from any of the
+    /// workspace's channel streams resolves the awaiter.
     pending_server_requests:
         RwLock<HashMap<(String, String), oneshot::Sender<ServerRequestOutcome>>>,
-    /// Heartbeat interval. Each channel receives an empty `Heartbeat` frame
+    /// Heartbeat interval. Each channel stream receives an empty `Heartbeat` frame
     /// at this interval. `Duration::ZERO` disables heartbeats.
     heartbeat_interval: Duration,
 }
@@ -186,7 +184,7 @@ impl GatewayState {
     pub fn new(kube_client: Option<kube::Client>, namespace: String) -> Self {
         let harness_clients = HarnessClientPool::new(&namespace);
         Self {
-            channels: RwLock::new(HashMap::new()),
+            channel_streams: RwLock::new(HashMap::new()),
             last_turn_state: RwLock::new(HashMap::new()),
             subscribers: SubscriberRegistry::new(),
             identity: Arc::new(RwLock::new(IdentityTable::default())),
@@ -315,22 +313,22 @@ impl GatewayState {
         self.subscribers.notify(workspace, message).await;
     }
 
-    /// Mint a fresh channel_id (UUID), bind it to the minting subject
+    /// Mint a fresh channel_stream_id (UUID), bind it to the minting subject
     /// and that subject's workspace, and store the tx for outbound routing.
-    /// Returns the channel_id; the caller is responsible for echoing it
-    /// back to the adapter as the first frame of the outbound stream
-    /// (ChannelAck).
-    pub async fn mint_channel(
+    /// Returns the channel_stream_id; the caller is responsible for echoing it
+    /// back to the client as the first frame of the outbound stream
+    /// (ChannelStreamAck).
+    pub async fn mint_channel_stream(
         &self,
-        opener: ChannelOpener,
+        opener: ChannelStreamOpener,
         subject: String,
         workspace: String,
-        tx: mpsc::Sender<ChannelOutbound>,
+        tx: mpsc::Sender<ChannelStreamOutbound>,
     ) -> String {
         let id = uuid::Uuid::new_v4().to_string();
-        self.channels.write().await.insert(
+        self.channel_streams.write().await.insert(
             id.clone(),
-            ChannelEntry {
+            ChannelStreamEntry {
                 opener,
                 subject,
                 workspace,
@@ -343,22 +341,25 @@ impl GatewayState {
         id
     }
 
-    pub async fn unregister_channel(&self, channel_id: &str) {
-        if let Some(entry) = self.channels.write().await.remove(channel_id) {
-            // Cancel the per-channel heartbeat task if running.
+    pub async fn unregister_channel_stream(&self, channel_stream_id: &str) {
+        if let Some(entry) = self.channel_streams.write().await.remove(channel_stream_id) {
+            // Cancel the per-stream heartbeat task if running.
             if let Some(handle) = entry.heartbeat_handle.lock().await.take() {
                 handle.abort();
             }
         }
     }
 
-    /// Fan out a frame to all channels in `workspace`. Returns the number
-    /// of channels the frame was delivered to (sends that succeeded).
-    pub async fn send_to_workspace(&self, workspace: &str, msg: ChannelOutbound) -> usize {
-        let channels = self.channels.read().await;
+    /// Fan out a frame to all channel streams in `workspace`. Returns the number
+    /// of channel streams the frame was delivered to (sends that succeeded).
+    pub async fn send_to_workspace(&self, workspace: &str, msg: ChannelStreamOutbound) -> usize {
+        let channel_streams = self.channel_streams.read().await;
         let mut delivered = 0;
-        for (channel_id, entry) in channels.iter().filter(|(_, e)| e.workspace == workspace) {
-            tracing::info!(workspace = %workspace, channel_id = %channel_id, "send_to_workspace: channel");
+        for (channel_stream_id, entry) in channel_streams
+            .iter()
+            .filter(|(_, e)| e.workspace == workspace)
+        {
+            tracing::info!(workspace = %workspace, channel_stream_id = %channel_stream_id, "send_to_workspace: channel stream");
             if entry.tx.send(msg.clone()).await.is_ok() {
                 delivered += 1;
             }
@@ -366,17 +367,17 @@ impl GatewayState {
         delivered
     }
 
-    /// Spawn a per-channel heartbeat task. The task sends an empty
+    /// Spawn a per-stream heartbeat task. The task sends an empty
     /// `Heartbeat` frame every configured heartbeat interval. Stores the
-    /// abort handle on the channel entry so `unregister_channel` cancels
+    /// abort handle on the channel stream entry so `unregister_channel_stream` cancels
     /// it. No-op when the interval is zero.
-    pub async fn spawn_heartbeat(&self, channel_id: &str) {
+    pub async fn spawn_heartbeat(&self, channel_stream_id: &str) {
         let interval = self.heartbeat_interval;
         if interval.is_zero() {
             return;
         }
-        let channels = self.channels.read().await;
-        let Some(entry) = channels.get(channel_id) else {
+        let channel_streams = self.channel_streams.read().await;
+        let Some(entry) = channel_streams.get(channel_stream_id) else {
             return;
         };
         let tx = entry.tx.clone();
@@ -385,8 +386,8 @@ impl GatewayState {
             ticker.tick().await; // First tick is immediate, skip it.
             loop {
                 ticker.tick().await;
-                let msg = ChannelOutbound {
-                    command: Some(channel_outbound::Command::Heartbeat(Heartbeat {})),
+                let msg = ChannelStreamOutbound {
+                    command: Some(channel_stream_outbound::Command::Heartbeat(Heartbeat {})),
                 };
                 if tx.send(msg).await.is_err() {
                     break;
@@ -397,49 +398,57 @@ impl GatewayState {
         *entry.heartbeat_handle.lock().await = Some(abort_handle);
     }
 
-    /// Return who opened a channel_id and the `(subject, workspace)` it is
-    /// bound to, in one read, or None if unknown. ChannelIngest admits only
+    /// Return who opened a channel_stream_id and the `(subject, workspace)` it is
+    /// bound to, in one read, or None if unknown. ChannelStreamIngest admits only
     /// the caller that opened it. A caller that needs more than one field must
-    /// not take two locks: the channel can be unregistered between them,
-    /// leaving the second lookup empty while the first said the channel was
+    /// not take two locks: the channel stream can be unregistered between them,
+    /// leaving the second lookup empty while the first said the channel stream was
     /// live.
-    pub async fn channel_binding(
+    pub async fn channel_stream_binding(
         &self,
-        channel_id: &str,
-    ) -> Option<(ChannelOpener, String, String)> {
-        self.channels.read().await.get(channel_id).map(|entry| {
-            (
-                entry.opener.clone(),
-                entry.subject.clone(),
-                entry.workspace.clone(),
-            )
-        })
+        channel_stream_id: &str,
+    ) -> Option<(ChannelStreamOpener, String, String)> {
+        self.channel_streams
+            .read()
+            .await
+            .get(channel_stream_id)
+            .map(|entry| {
+                (
+                    entry.opener.clone(),
+                    entry.subject.clone(),
+                    entry.workspace.clone(),
+                )
+            })
     }
 
-    pub async fn send_to_channel(&self, channel_id: &str, msg: ChannelOutbound) -> bool {
-        let channels = self.channels.read().await;
-        if let Some(entry) = channels.get(channel_id) {
+    pub async fn send_to_channel_stream(
+        &self,
+        channel_stream_id: &str,
+        msg: ChannelStreamOutbound,
+    ) -> bool {
+        let channel_streams = self.channel_streams.read().await;
+        if let Some(entry) = channel_streams.get(channel_stream_id) {
             entry.tx.send(msg).await.is_ok()
         } else {
             false
         }
     }
 
-    /// Update the channel's turn phase AND enqueue a matching
-    /// `TurnStateEvent` on its outbound mpsc, both under the per-channel
+    /// Update the channel stream's turn phase AND enqueue a matching
+    /// `TurnStateEvent` on its outbound mpsc, both under the per-stream
     /// `current_state` mutex. The lock acquisition serialises live
     /// transitions against replay-on-reconnect reads, so a client never
-    /// sees a stale state after a fresh ChannelReceive's replay frame.
-    /// Returns false if the channel is no longer registered.
+    /// sees a stale state after a fresh ChannelStreamReceive's replay frame.
+    /// Returns false if the channel stream is no longer registered.
     pub async fn set_and_broadcast_turn_state(
         &self,
-        channel_id: &str,
+        channel_stream_id: &str,
         subject: &str,
         conversation_id: &str,
         state: TurnState,
     ) -> bool {
-        // Record before the channel lookup so the per-conversation phase is
-        // captured even when the channel has gone away (client disconnected
+        // Record before the channel stream lookup so the per-conversation phase is
+        // captured even when the channel stream has gone away (client disconnected
         // mid-turn) — the client recovers it via GetTurnState on reconnect.
         self.record_turn_state(
             subject,
@@ -451,18 +460,20 @@ impl GatewayState {
             },
         )
         .await;
-        let channels = self.channels.read().await;
-        let Some(entry) = channels.get(channel_id) else {
+        let channel_streams = self.channel_streams.read().await;
+        let Some(entry) = channel_streams.get(channel_stream_id) else {
             return false;
         };
         let mut guard = entry.current_state.lock().await;
         *guard = state;
-        let msg = ChannelOutbound {
-            command: Some(channel_outbound::Command::TurnState(TurnStateEvent {
-                state: state as i32,
-                conversation_id: conversation_id.to_string(),
-                ..Default::default()
-            })),
+        let msg = ChannelStreamOutbound {
+            command: Some(channel_stream_outbound::Command::TurnState(
+                TurnStateEvent {
+                    state: state as i32,
+                    conversation_id: conversation_id.to_string(),
+                    ..Default::default()
+                },
+            )),
         };
         entry.tx.send(msg).await.is_ok()
     }
@@ -470,7 +481,7 @@ impl GatewayState {
     /// Record the latest turn phase for a conversation so a later
     /// `GetTurnState` poll can recover it. Most-recent transition wins
     /// (unconditional overwrite). Empty `conversation_id` is ignored —
-    /// channel-wide replay frames carry no conversation context and must
+    /// stream-wide replay frames carry no conversation context and must
     /// not pollute the per-conversation map.
     pub async fn record_turn_state(
         &self,
@@ -503,34 +514,40 @@ impl GatewayState {
             .cloned()
     }
 
-    /// Replay the channel's current turn phase as a `TurnStateEvent`
-    /// without modifying it. Used by `ChannelReceive` after the initial
-    /// `ChannelAck` so fresh streams (reconnects, second-device opens)
+    /// Replay the channel stream's current turn phase as a `TurnStateEvent`
+    /// without modifying it. Used by `ChannelStreamReceive` after the initial
+    /// `ChannelStreamAck` so fresh streams (reconnects, second-device opens)
     /// land in the correct visual state immediately. Emits an empty
-    /// `conversation_id` — the channel's current_state is a per-channel
+    /// `conversation_id` — the stream's current_state is a per-stream
     /// summary, not per-conversation.
-    pub async fn replay_turn_state(&self, channel_id: &str) -> bool {
-        let channels = self.channels.read().await;
-        let Some(entry) = channels.get(channel_id) else {
+    pub async fn replay_turn_state(&self, channel_stream_id: &str) -> bool {
+        let channel_streams = self.channel_streams.read().await;
+        let Some(entry) = channel_streams.get(channel_stream_id) else {
             return false;
         };
         let guard = entry.current_state.lock().await;
-        let msg = ChannelOutbound {
-            command: Some(channel_outbound::Command::TurnState(TurnStateEvent {
-                state: *guard as i32,
-                ..Default::default()
-            })),
+        let msg = ChannelStreamOutbound {
+            command: Some(channel_stream_outbound::Command::TurnState(
+                TurnStateEvent {
+                    state: *guard as i32,
+                    ..Default::default()
+                },
+            )),
         };
         entry.tx.send(msg).await.is_ok()
     }
 
-    /// Replace the channel's advertised supported_methods set. Called by
-    /// `channel_ingest` on every inbound request because the client may
+    /// Replace the channel stream's advertised supported_methods set. Called by
+    /// `channel_stream_ingest` on every inbound request because the client may
     /// change devices (each device declares its own renderer set).
-    /// Returns false if the channel is no longer registered.
-    pub async fn update_supported_methods(&self, channel_id: &str, methods: Vec<String>) -> bool {
-        let channels = self.channels.read().await;
-        let Some(entry) = channels.get(channel_id) else {
+    /// Returns false if the channel stream is no longer registered.
+    pub async fn update_supported_methods(
+        &self,
+        channel_stream_id: &str,
+        methods: Vec<String>,
+    ) -> bool {
+        let channel_streams = self.channel_streams.read().await;
+        let Some(entry) = channel_streams.get(channel_stream_id) else {
             return false;
         };
         let mut guard = entry.supported_methods.lock().await;
@@ -557,7 +574,7 @@ impl GatewayState {
         sender.send(outcome).is_ok()
     }
 
-    /// Fire-and-forget notification to all channels in `workspace` that
+    /// Fire-and-forget notification to all channel streams in `workspace` that
     /// support `method`. Empty `request_id` on the wire signals to the
     /// client that no response is expected.
     pub async fn send_server_notification(
@@ -566,25 +583,27 @@ impl GatewayState {
         method: &str,
         params_json: String,
     ) -> Result<(), ServerRequestError> {
-        let channels = self.channels.read().await;
-        let workspace_channels: Vec<_> = channels
+        let channel_streams = self.channel_streams.read().await;
+        let workspace_channel_streams: Vec<_> = channel_streams
             .values()
             .filter(|e| e.workspace == workspace)
             .collect();
-        if workspace_channels.is_empty() {
-            return Err(ServerRequestError::UnknownChannel);
+        if workspace_channel_streams.is_empty() {
+            return Err(ServerRequestError::UnknownChannelStream);
         }
         let mut any_sent = false;
-        for entry in workspace_channels {
+        for entry in workspace_channel_streams {
             if !entry.supported_methods.lock().await.contains(method) {
                 continue;
             }
-            let msg = ChannelOutbound {
-                command: Some(channel_outbound::Command::ServerRequest(ServerRequest {
-                    request_id: String::new(),
-                    method: method.to_string(),
-                    params_json: params_json.clone(),
-                })),
+            let msg = ChannelStreamOutbound {
+                command: Some(channel_stream_outbound::Command::ServerRequest(
+                    ServerRequest {
+                        request_id: String::new(),
+                        method: method.to_string(),
+                        params_json: params_json.clone(),
+                    },
+                )),
             };
             if entry.tx.send(msg).await.is_ok() {
                 any_sent = true;
@@ -596,10 +615,10 @@ impl GatewayState {
         Ok(())
     }
 
-    /// Dispatch a server-initiated request to the first channel in
+    /// Dispatch a server-initiated request to the first channel stream in
     /// `workspace` that supports `method`, and await the matching
     /// `ClientResponse`. The pending-request registry is workspace-wide
-    /// so a response from any channel in the workspace resolves it.
+    /// so a response from any channel stream in the workspace resolves it.
     ///
     /// Timeout cleanup is best-effort: on `Err(Timeout)` we remove the
     /// pending slot so a late `ClientResponse` doesn't leak memory. A
@@ -615,18 +634,18 @@ impl GatewayState {
     ) -> Result<ServerRequestOutcome, ServerRequestError> {
         let (tx_oneshot, rx_oneshot) = oneshot::channel();
         {
-            let channels = self.channels.read().await;
-            let workspace_channels: Vec<_> = channels
+            let channel_streams = self.channel_streams.read().await;
+            let workspace_channel_streams: Vec<_> = channel_streams
                 .values()
                 .filter(|e| e.workspace == workspace)
                 .collect();
-            if workspace_channels.is_empty() {
-                return Err(ServerRequestError::UnknownChannel);
+            if workspace_channel_streams.is_empty() {
+                return Err(ServerRequestError::UnknownChannelStream);
             }
-            // Check that at least one channel supports the method.
+            // Check that at least one channel stream supports the method.
             let any_supports = {
                 let mut found = false;
-                for entry in &workspace_channels {
+                for entry in &workspace_channel_streams {
                     if entry.supported_methods.lock().await.contains(method) {
                         found = true;
                         break;
@@ -642,16 +661,18 @@ impl GatewayState {
                 .write()
                 .await
                 .insert((workspace.to_string(), request_id.to_string()), tx_oneshot);
-            // Fan out the ServerRequest to ALL workspace channels.
-            let msg = ChannelOutbound {
-                command: Some(channel_outbound::Command::ServerRequest(ServerRequest {
-                    request_id: request_id.to_string(),
-                    method: method.to_string(),
-                    params_json,
-                })),
+            // Fan out the ServerRequest to ALL workspace channel streams.
+            let msg = ChannelStreamOutbound {
+                command: Some(channel_stream_outbound::Command::ServerRequest(
+                    ServerRequest {
+                        request_id: request_id.to_string(),
+                        method: method.to_string(),
+                        params_json,
+                    },
+                )),
             };
             let mut any_sent = false;
-            for entry in &workspace_channels {
+            for entry in &workspace_channel_streams {
                 if entry.tx.send(msg.clone()).await.is_ok() {
                     any_sent = true;
                 }
@@ -689,15 +710,20 @@ pub(crate) mod test_support {
         Arc::new(GatewayState::new(None, "default".into()))
     }
 
-    /// Mint a person-opened channel for `subject` on `workspace`.
+    /// Mint a person-opened channel stream for `subject` on `workspace`.
     pub(crate) async fn mint_person(
         state: &GatewayState,
         subject: &str,
         workspace: &str,
-        tx: mpsc::Sender<ChannelOutbound>,
+        tx: mpsc::Sender<ChannelStreamOutbound>,
     ) -> String {
         state
-            .mint_channel(ChannelOpener::Person, subject.into(), workspace.into(), tx)
+            .mint_channel_stream(
+                ChannelStreamOpener::Person,
+                subject.into(),
+                workspace.into(),
+                tx,
+            )
             .await
     }
 }
@@ -707,36 +733,38 @@ mod tests {
     use super::test_support::{make_state, mint_person};
     use super::*;
 
-    fn extract_turn_state_event(msg: &ChannelOutbound) -> Option<&TurnStateEvent> {
+    fn extract_turn_state_event(msg: &ChannelStreamOutbound) -> Option<&TurnStateEvent> {
         match &msg.command {
-            Some(channel_outbound::Command::TurnState(e)) => Some(e),
+            Some(channel_stream_outbound::Command::TurnState(e)) => Some(e),
             _ => None,
         }
     }
 
     #[tokio::test]
-    async fn mint_channel_returns_unique_ids() {
+    async fn mint_channel_stream_returns_unique_ids() {
         let state = make_state();
         let (tx, _rx) = mpsc::channel(1);
         let a = mint_person(&state, "subject-ws", "ws", tx.clone()).await;
         let b = mint_person(&state, "subject-ws", "ws", tx).await;
-        assert_ne!(a, b, "each mint must produce a distinct channel_id");
+        assert_ne!(a, b, "each mint must produce a distinct channel_stream_id");
     }
 
     #[tokio::test]
-    async fn send_to_channel_does_not_leak_to_other_channel() {
+    async fn send_to_channel_stream_does_not_leak_to_another_channel_stream() {
         let state = make_state();
         let (tx_a, mut rx_a) = mpsc::channel(4);
         let (tx_b, mut rx_b) = mpsc::channel(4);
         let a = mint_person(&state, "subject-ws", "ws", tx_a).await;
         let _b = mint_person(&state, "subject-ws", "ws", tx_b).await;
         state
-            .send_to_channel(
+            .send_to_channel_stream(
                 &a,
-                ChannelOutbound {
-                    command: Some(channel_outbound::Command::Ack(proto_common::ChannelAck {
-                        channel_id: a.clone(),
-                    })),
+                ChannelStreamOutbound {
+                    command: Some(channel_stream_outbound::Command::Ack(
+                        proto_common::ChannelStreamAck {
+                            channel_stream_id: a.clone(),
+                        },
+                    )),
                 },
             )
             .await;
@@ -746,12 +774,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unregister_channel_removes() {
+    async fn unregister_channel_stream_removes() {
         let state = make_state();
         let (tx, _rx) = mpsc::channel(1);
         let id = mint_person(&state, "subject-ws", "ws", tx).await;
-        state.unregister_channel(&id).await;
-        assert!(state.channel_binding(&id).await.is_none());
+        state.unregister_channel_stream(&id).await;
+        assert!(state.channel_stream_binding(&id).await.is_none());
     }
 
     #[tokio::test]
@@ -776,15 +804,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_and_broadcast_to_a_gone_channel_records_but_reports_unsent() {
-        // The per-conversation record must survive a disconnected channel
+    async fn set_and_broadcast_to_a_gone_channel_stream_records_but_reports_unsent() {
+        // The per-conversation record must survive a disconnected channel stream
         // so the reconnect poll recovers the phase.
         let state = make_state();
         assert!(
             !state
                 .set_and_broadcast_turn_state("ghost", "ws", "ws.conv-y", TurnState::Working)
                 .await,
-            "an unknown channel reports not broadcast"
+            "an unknown channel stream reports not broadcast"
         );
         let rec = state.turn_state_record("ws", "ws.conv-y").await.unwrap();
         assert_eq!(rec.state, TurnState::Working);
@@ -818,7 +846,7 @@ mod tests {
                 UserMessage {
                     content: vec![],
                     sender: "only-alpha".into(),
-                    reply_channel: None,
+                    reply_channel_stream: None,
                     conversation_id: "alpha.c".into(),
                     grants: vec![],
                 },
@@ -841,7 +869,7 @@ mod tests {
                 UserMessage {
                     content: vec![],
                     sender: "x".into(),
-                    reply_channel: None,
+                    reply_channel_stream: None,
                     conversation_id: String::new(),
                     grants: vec![],
                 },
@@ -863,7 +891,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_supported_methods_unknown_channel_is_false() {
+    async fn update_supported_methods_unknown_channel_stream_is_false() {
         let state = make_state();
         assert!(
             !state
@@ -873,7 +901,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_server_notification_fans_out_to_every_supporting_channel() {
+    async fn send_server_notification_fans_out_to_every_supporting_channel_stream() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(4);
         let (tx_b, mut rx_b) = mpsc::channel(4);
@@ -891,11 +919,11 @@ mod tests {
             .unwrap();
         assert!(
             rx_b.recv().await.is_some(),
-            "every supporting workspace channel must receive"
+            "every supporting workspace channel stream must receive"
         );
         let msg = rx.recv().await.unwrap();
         match msg.command {
-            Some(channel_outbound::Command::ServerRequest(sr)) => {
+            Some(channel_stream_outbound::Command::ServerRequest(sr)) => {
                 assert_eq!(sr.method, "RevealPath");
                 assert!(
                     sr.request_id.is_empty(),
@@ -997,16 +1025,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_to_workspace_fans_out_to_all_live_channels() {
+    async fn send_to_workspace_fans_out_to_all_live_channel_streams() {
         let state = make_state();
         let (tx_a, mut rx_a) = mpsc::channel(4);
         let (tx_b, mut rx_b) = mpsc::channel(4);
         let _a = mint_person(&state, "subject-ws", "ws", tx_a).await;
         let _b = mint_person(&state, "subject-ws", "ws", tx_b).await;
-        let msg = ChannelOutbound {
-            command: Some(channel_outbound::Command::Ack(proto_common::ChannelAck {
-                channel_id: "test".into(),
-            })),
+        let msg = ChannelStreamOutbound {
+            command: Some(channel_stream_outbound::Command::Ack(
+                proto_common::ChannelStreamAck {
+                    channel_stream_id: "test".into(),
+                },
+            )),
         };
         let delivered = state.send_to_workspace("ws", msg).await;
         assert_eq!(delivered, 2);

@@ -78,7 +78,6 @@ metadata:
     sycophant.md/command: "true"
     app.kubernetes.io/part-of: sycophant
 data:
-  kind: app
   loginServer: http://headscale:8080
 
 ---
@@ -103,4 +102,48 @@ metadata:
     sycophant.md/command: "true"
     app.kubernetes.io/part-of: sycophant
 data:
-  kind: app
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: reap-user-306b623ce6
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: reap-user-306b623ce
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: reap-user-306b623ce63
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: reap-user-306B623CE6
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: reap-user-306b623cgz
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: "true"
+    app.kubernetes.io/part-of: sycophant

@@ -6,3 +6,6 @@ namespaceSelector:
   - name: tenant-acme
     labels:
       app.kubernetes.io/part-of: sycophant-tenant
+  - name: tenant-hello-world
+    labels:
+      app.kubernetes.io/part-of: sycophant-tenant

@@ -30,8 +30,8 @@ const (
 	RelayGateway_GetConversationHistory_FullMethodName = "/relay.v1.RelayGateway/GetConversationHistory"
 	RelayGateway_GetTurnState_FullMethodName           = "/relay.v1.RelayGateway/GetTurnState"
 	RelayGateway_CancelTurn_FullMethodName             = "/relay.v1.RelayGateway/CancelTurn"
-	RelayGateway_ChannelIngest_FullMethodName          = "/relay.v1.RelayGateway/ChannelIngest"
-	RelayGateway_ChannelReceive_FullMethodName         = "/relay.v1.RelayGateway/ChannelReceive"
+	RelayGateway_ChannelStreamIngest_FullMethodName    = "/relay.v1.RelayGateway/ChannelStreamIngest"
+	RelayGateway_ChannelStreamReceive_FullMethodName   = "/relay.v1.RelayGateway/ChannelStreamReceive"
 	RelayGateway_WatchTools_FullMethodName             = "/relay.v1.RelayGateway/WatchTools"
 	RelayGateway_DispatchTool_FullMethodName           = "/relay.v1.RelayGateway/DispatchTool"
 	RelayGateway_AwaitToolResult_FullMethodName        = "/relay.v1.RelayGateway/AwaitToolResult"
@@ -52,8 +52,8 @@ type RelayGatewayClient interface {
 	GetConversationHistory(ctx context.Context, in *v1.GetConversationHistoryRequest, opts ...grpc.CallOption) (*v1.GetConversationHistoryResponse, error)
 	GetTurnState(ctx context.Context, in *v1.GetTurnStateRequest, opts ...grpc.CallOption) (*v1.TurnStateEvent, error)
 	CancelTurn(ctx context.Context, in *v1.CancelTurnRequest, opts ...grpc.CallOption) (*v1.CancelTurnResponse, error)
-	ChannelIngest(ctx context.Context, in *v1.ChannelIngestRequest, opts ...grpc.CallOption) (*v1.ChannelIngestAck, error)
-	ChannelReceive(ctx context.Context, in *v1.ChannelReceiveRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ChannelOutbound], error)
+	ChannelStreamIngest(ctx context.Context, in *v1.ChannelStreamIngestRequest, opts ...grpc.CallOption) (*v1.ChannelStreamIngestAck, error)
+	ChannelStreamReceive(ctx context.Context, in *v1.ChannelStreamReceiveRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ChannelStreamOutbound], error)
 	WatchTools(ctx context.Context, in *v1.WatchToolsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ToolListUpdate], error)
 	// --- Client-driven tool-call lifecycle (dispatch / await / cancel) ---
 	//
@@ -174,23 +174,23 @@ func (c *relayGatewayClient) CancelTurn(ctx context.Context, in *v1.CancelTurnRe
 	return out, nil
 }
 
-func (c *relayGatewayClient) ChannelIngest(ctx context.Context, in *v1.ChannelIngestRequest, opts ...grpc.CallOption) (*v1.ChannelIngestAck, error) {
+func (c *relayGatewayClient) ChannelStreamIngest(ctx context.Context, in *v1.ChannelStreamIngestRequest, opts ...grpc.CallOption) (*v1.ChannelStreamIngestAck, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(v1.ChannelIngestAck)
-	err := c.cc.Invoke(ctx, RelayGateway_ChannelIngest_FullMethodName, in, out, cOpts...)
+	out := new(v1.ChannelStreamIngestAck)
+	err := c.cc.Invoke(ctx, RelayGateway_ChannelStreamIngest_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *relayGatewayClient) ChannelReceive(ctx context.Context, in *v1.ChannelReceiveRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ChannelOutbound], error) {
+func (c *relayGatewayClient) ChannelStreamReceive(ctx context.Context, in *v1.ChannelStreamReceiveRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ChannelStreamOutbound], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &RelayGateway_ServiceDesc.Streams[0], RelayGateway_ChannelReceive_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &RelayGateway_ServiceDesc.Streams[0], RelayGateway_ChannelStreamReceive_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &grpc.GenericClientStream[v1.ChannelReceiveRequest, v1.ChannelOutbound]{ClientStream: stream}
+	x := &grpc.GenericClientStream[v1.ChannelStreamReceiveRequest, v1.ChannelStreamOutbound]{ClientStream: stream}
 	if err := x.ClientStream.SendMsg(in); err != nil {
 		return nil, err
 	}
@@ -201,7 +201,7 @@ func (c *relayGatewayClient) ChannelReceive(ctx context.Context, in *v1.ChannelR
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type RelayGateway_ChannelReceiveClient = grpc.ServerStreamingClient[v1.ChannelOutbound]
+type RelayGateway_ChannelStreamReceiveClient = grpc.ServerStreamingClient[v1.ChannelStreamOutbound]
 
 func (c *relayGatewayClient) WatchTools(ctx context.Context, in *v1.WatchToolsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ToolListUpdate], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -275,8 +275,8 @@ type RelayGatewayServer interface {
 	GetConversationHistory(context.Context, *v1.GetConversationHistoryRequest) (*v1.GetConversationHistoryResponse, error)
 	GetTurnState(context.Context, *v1.GetTurnStateRequest) (*v1.TurnStateEvent, error)
 	CancelTurn(context.Context, *v1.CancelTurnRequest) (*v1.CancelTurnResponse, error)
-	ChannelIngest(context.Context, *v1.ChannelIngestRequest) (*v1.ChannelIngestAck, error)
-	ChannelReceive(*v1.ChannelReceiveRequest, grpc.ServerStreamingServer[v1.ChannelOutbound]) error
+	ChannelStreamIngest(context.Context, *v1.ChannelStreamIngestRequest) (*v1.ChannelStreamIngestAck, error)
+	ChannelStreamReceive(*v1.ChannelStreamReceiveRequest, grpc.ServerStreamingServer[v1.ChannelStreamOutbound]) error
 	WatchTools(*v1.WatchToolsRequest, grpc.ServerStreamingServer[v1.ToolListUpdate]) error
 	// --- Client-driven tool-call lifecycle (dispatch / await / cancel) ---
 	//
@@ -327,11 +327,11 @@ func (UnimplementedRelayGatewayServer) GetTurnState(context.Context, *v1.GetTurn
 func (UnimplementedRelayGatewayServer) CancelTurn(context.Context, *v1.CancelTurnRequest) (*v1.CancelTurnResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CancelTurn not implemented")
 }
-func (UnimplementedRelayGatewayServer) ChannelIngest(context.Context, *v1.ChannelIngestRequest) (*v1.ChannelIngestAck, error) {
-	return nil, status.Error(codes.Unimplemented, "method ChannelIngest not implemented")
+func (UnimplementedRelayGatewayServer) ChannelStreamIngest(context.Context, *v1.ChannelStreamIngestRequest) (*v1.ChannelStreamIngestAck, error) {
+	return nil, status.Error(codes.Unimplemented, "method ChannelStreamIngest not implemented")
 }
-func (UnimplementedRelayGatewayServer) ChannelReceive(*v1.ChannelReceiveRequest, grpc.ServerStreamingServer[v1.ChannelOutbound]) error {
-	return status.Error(codes.Unimplemented, "method ChannelReceive not implemented")
+func (UnimplementedRelayGatewayServer) ChannelStreamReceive(*v1.ChannelStreamReceiveRequest, grpc.ServerStreamingServer[v1.ChannelStreamOutbound]) error {
+	return status.Error(codes.Unimplemented, "method ChannelStreamReceive not implemented")
 }
 func (UnimplementedRelayGatewayServer) WatchTools(*v1.WatchToolsRequest, grpc.ServerStreamingServer[v1.ToolListUpdate]) error {
 	return status.Error(codes.Unimplemented, "method WatchTools not implemented")
@@ -546,34 +546,34 @@ func _RelayGateway_CancelTurn_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
-func _RelayGateway_ChannelIngest_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(v1.ChannelIngestRequest)
+func _RelayGateway_ChannelStreamIngest_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(v1.ChannelStreamIngestRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(RelayGatewayServer).ChannelIngest(ctx, in)
+		return srv.(RelayGatewayServer).ChannelStreamIngest(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: RelayGateway_ChannelIngest_FullMethodName,
+		FullMethod: RelayGateway_ChannelStreamIngest_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(RelayGatewayServer).ChannelIngest(ctx, req.(*v1.ChannelIngestRequest))
+		return srv.(RelayGatewayServer).ChannelStreamIngest(ctx, req.(*v1.ChannelStreamIngestRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _RelayGateway_ChannelReceive_Handler(srv interface{}, stream grpc.ServerStream) error {
-	m := new(v1.ChannelReceiveRequest)
+func _RelayGateway_ChannelStreamReceive_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(v1.ChannelStreamReceiveRequest)
 	if err := stream.RecvMsg(m); err != nil {
 		return err
 	}
-	return srv.(RelayGatewayServer).ChannelReceive(m, &grpc.GenericServerStream[v1.ChannelReceiveRequest, v1.ChannelOutbound]{ServerStream: stream})
+	return srv.(RelayGatewayServer).ChannelStreamReceive(m, &grpc.GenericServerStream[v1.ChannelStreamReceiveRequest, v1.ChannelStreamOutbound]{ServerStream: stream})
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type RelayGateway_ChannelReceiveServer = grpc.ServerStreamingServer[v1.ChannelOutbound]
+type RelayGateway_ChannelStreamReceiveServer = grpc.ServerStreamingServer[v1.ChannelStreamOutbound]
 
 func _RelayGateway_WatchTools_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(v1.WatchToolsRequest)
@@ -681,8 +681,8 @@ var RelayGateway_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _RelayGateway_CancelTurn_Handler,
 		},
 		{
-			MethodName: "ChannelIngest",
-			Handler:    _RelayGateway_ChannelIngest_Handler,
+			MethodName: "ChannelStreamIngest",
+			Handler:    _RelayGateway_ChannelStreamIngest_Handler,
 		},
 		{
 			MethodName: "DispatchTool",
@@ -695,8 +695,8 @@ var RelayGateway_ServiceDesc = grpc.ServiceDesc{
 	},
 	Streams: []grpc.StreamDesc{
 		{
-			StreamName:    "ChannelReceive",
-			Handler:       _RelayGateway_ChannelReceive_Handler,
+			StreamName:    "ChannelStreamReceive",
+			Handler:       _RelayGateway_ChannelStreamReceive_Handler,
 			ServerStreams: true,
 		},
 		{
@@ -735,7 +735,7 @@ type RelayInternalClient interface {
 	DeliverTurnState(ctx context.Context, in *DeliverTurnStateRequest, opts ...grpc.CallOption) (*DeliverTurnStateResponse, error)
 	// Harness pushes one streamed activity frame produced during a turn.
 	// Unary-per-frame; the gateway wraps the StreamItem verbatim into a
-	// ChannelOutbound and relays it unchanged (no payload inspection).
+	// ChannelStreamOutbound and relays it unchanged (no payload inspection).
 	DeliverStreamItem(ctx context.Context, in *DeliverStreamItemRequest, opts ...grpc.CallOption) (*DeliverStreamItemResponse, error)
 }
 
@@ -829,7 +829,7 @@ type RelayInternalServer interface {
 	DeliverTurnState(context.Context, *DeliverTurnStateRequest) (*DeliverTurnStateResponse, error)
 	// Harness pushes one streamed activity frame produced during a turn.
 	// Unary-per-frame; the gateway wraps the StreamItem verbatim into a
-	// ChannelOutbound and relays it unchanged (no payload inspection).
+	// ChannelStreamOutbound and relays it unchanged (no payload inspection).
 	DeliverStreamItem(context.Context, *DeliverStreamItemRequest) (*DeliverStreamItemResponse, error)
 	mustEmbedUnimplementedRelayInternalServer()
 }

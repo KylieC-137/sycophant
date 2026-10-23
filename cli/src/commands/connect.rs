@@ -1,6 +1,6 @@
 //! `sycoadm connect --tenant <name>` — join the host to the tenant's headscale
-//! tailnet. Mirrors the e2e's `tailnet_join_macos()` logic: port-forward
-//! headscale, mint a pre-auth key, run `sudo tailscale up`, and verify the join.
+//! tailnet: port-forward headscale, mint a pre-auth key, and run
+//! `sudo tailscale up`.
 
 use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
@@ -114,18 +114,12 @@ fn do_tailnet_join(ns: &str) -> Result<(), String> {
     // keyfile is dropped here (TempFile removes on drop)
     drop(keyfile);
 
-    // Give headscale a moment to register the new node.
-    sleep(Duration::from_secs(5));
-
-    // 8. Verify the join — headscale sees 2+ online nodes
-    verify_join(ns)?;
-
     eprintln!("\n\x1b[1;32m==> Connected.\x1b[0m This host has joined the tenant tailnet.");
     Ok(())
 }
 
 /// Create a headscale user (idempotent) and mint a pre-auth key, returning
-/// the raw key string. Mirrors `headscale_create_preauthkey()` from e2e.sh.
+/// the raw key string.
 fn create_preauthkey(ns: &str) -> Result<String, String> {
     // Create user (ignore errors — already exists is fine)
     let _ = run_output(
@@ -203,7 +197,7 @@ fn create_preauthkey(ns: &str) -> Result<String, String> {
 }
 
 /// Start a self-healing background kubectl port-forward to headscale.
-/// Runs in a shell loop that restarts on failure, matching the e2e pattern.
+/// Runs in a shell loop that restarts on failure.
 fn start_port_forward(ns: &str, port_map: &str) -> Result<Child, String> {
     Command::new("sh")
         .args([
@@ -216,29 +210,4 @@ fn start_port_forward(ns: &str, port_map: &str) -> Result<Child, String> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("failed to start port-forward: {e}"))
-}
-
-/// Verify that headscale sees this host as an online node.
-fn verify_join(ns: &str) -> Result<(), String> {
-    wait_for("host joined the tailnet", 120, || {
-        let out = run_output(
-            "kubectl",
-            &[
-                "exec",
-                "-n",
-                ns,
-                "deploy/headscale",
-                "--",
-                "headscale",
-                "nodes",
-                "list",
-                "-o",
-                "json",
-            ],
-        )
-        .unwrap_or_default();
-        // Parse JSON output; count nodes with "online": true.
-        // Avoids ANSI color codes that break text grep.
-        out.contains("\"online\":true") || out.contains("\"online\": true")
-    })
 }

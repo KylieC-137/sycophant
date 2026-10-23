@@ -1,7 +1,7 @@
 {{- if include "sycophant.renderKyverno" . }}
-# Stamps runtimeClassName=gvisor on capability-job and adapter pods.
+# Stamps runtimeClassName=gvisor on capability-job and channel pods.
 # Tool jobs execute LLM-selected, operator-supplied tool code -- the
-# load-bearing case for the syscall sandbox. Adapters terminate a foreign
+# load-bearing case for the syscall sandbox. Channel pods terminate a foreign
 # protocol and parse whatever the outside world sends them, so they carry
 # the same sandbox. One value covers every channel; this list does not grow
 # per channel. The harness and relay pods run trusted
@@ -31,7 +31,7 @@ spec:
           values: [sycophant]
         - key: app.kubernetes.io/component
           operator: In
-          values: [adapter, capability-job]
+          values: [channel, capability-job]
     resourceRules:
       - apiGroups: [""]
         apiVersions: ["v1"]

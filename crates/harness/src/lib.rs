@@ -1,5 +1,5 @@
 mod agent;
-mod channel_tools;
+mod channel_stream_tools;
 mod clients;
 mod config;
 mod dispatch;

@@ -1,7 +1,0 @@
-# toolset.image is pushed to the in-cluster registry automatically by
-# `sycoadm toolset up`; the tools label is read from the image.
-toolset:
-  name: ssh-credentials
-  tenant: e2e-test
-  image: toolset-ssh-credentials:local
-  keepalive: true

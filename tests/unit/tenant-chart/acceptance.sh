@@ -13,7 +13,7 @@ LOCAL='{"format":"openai","model":"liquid/lfm2.5-8b-a1b","server.image":"llama-s
 REMOTE='{"format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","image":"inference-runtime:local","secret":"llm-openrouter"}'
 TOOLSET='{"image":"ghcr.io/sycophant-md/git@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","keepalive":"false","tool.git-status.description":"Show the working tree status.","tool.git-commit.description":"Commit staged changes.","tool.git-commit.arg.message.type":"string","tool.git-commit.arg.message.required":"true","tool.git-commit.arg.message.env":"MESSAGE"}'
 WORKSPACE='{"toolsets":"git,ssh","models":"a,b","storage":"5Gi","grant.ssh.demo.secret":"demo-key","grant.ssh.demo.path":"/home/agent/.ssh/id","grant.ssh.demo.egress":"github.com","grant.ssh.local.secret":"local-key","grant.ssh.local.path":"/home/agent/.ssh/local","instructions-hash":"abababababababababababababababababababababababababababababababab"}'
-CHANNEL='{"kind":"app","loginServer":"http://headscale:8080"}'
+CHANNEL='{"loginServer":"http://headscale:8080"}'
 SUBJECT="https://issuer.example#alice"
 HASH="$(printf '%s' "$SUBJECT" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)"
 # Offline there is no cluster, so a listed workspace never exists: the user
@@ -61,6 +61,50 @@ for m in override:'{"server.weightsPath":"/opt/m.gguf","server.contextBudget":"8
          single-false:'{"server.singleNodeException":"false"}'; do
   render "local-${m%%:*}" inference --set name=local --set-json "command=$(printf '%s' "$LOCAL" | jq -c ". + ${m#*:}")"
 done
+
+# The channel the walkthrough runs, and the cluster chart whose rules fence it.
+render channel-tailnet channel --set name=tailnet --set-json "command=$CHANNEL"
+helm template c "$ROOT/charts/sycophant-cluster" -n kyverno --api-versions policies.kyverno.io/v1/ValidatingPolicy \
+    > "$WORK/cluster.yaml" 2> "$WORK/cluster.err"
+echo $? > "$WORK/cluster.rc"
+
+# The pod-hardening VAP against the tailnet channel pod: once as rendered, and
+# once with its runtimeClassName removed.
+python3 - "$WORK" <<'PY'
+import os, sys, yaml
+work = sys.argv[1]
+case = os.path.join(work, "channel-hardening")
+os.makedirs(case)
+load = lambda f: [d for d in yaml.safe_load_all(open(os.path.join(work, f))) if d]
+vap = [d for d in load("cluster.yaml") if d["kind"] == "ValidatingAdmissionPolicy"
+       and d["metadata"]["name"] == "cluster-gvisor-pod-policy"]
+dep = [d for d in load("channel-tailnet.yaml") if d["kind"] == "Deployment" and d["metadata"]["name"] == "ch-tailnet"]
+if not vap or not dep:
+    sys.exit(0)
+binding = {"apiVersion": "admissionregistration.k8s.io/v1", "kind": "ValidatingAdmissionPolicyBinding",
+           "metadata": {"name": "tenant-acme-sycophant-pod-binding"},
+           "spec": {"policyName": "cluster-gvisor-pod-policy", "validationActions": ["Deny"]}}
+yaml.safe_dump_all(vap + [binding], open(os.path.join(case, "policy.yaml"), "w"))
+tpl = dep[0]["spec"]["template"]
+pods = []
+for name, strip in (("ch-tailnet-as-rendered", False), ("ch-tailnet-no-runtime-class", True)):
+    spec = dict(tpl["spec"])
+    if strip:
+        spec.pop("runtimeClassName", None)
+    pods.append({"apiVersion": "v1", "kind": "Pod", "spec": spec,
+                 "metadata": {"name": name, "namespace": "tenant-acme", "labels": tpl["metadata"]["labels"]}})
+yaml.safe_dump_all(pods, open(os.path.join(case, "pods.yaml"), "w"))
+yaml.safe_dump({"apiVersion": "cli.kyverno.io/v1alpha1", "kind": "Test",
+                "metadata": {"name": "channel-hardening"}, "policies": ["policy.yaml"], "resources": ["pods.yaml"],
+                "results": [{"policy": "cluster-gvisor-pod-policy", "isValidatingAdmissionPolicy": True, "kind": "Pod",
+                             "result": r, "resources": [f"tenant-acme/{n}"]}
+                            for n, r in (("ch-tailnet-as-rendered", "pass"), ("ch-tailnet-no-runtime-class", "fail"))]},
+               open(os.path.join(case, "kyverno-test.yaml"), "w"))
+PY
+if [ -f "$WORK/channel-hardening/kyverno-test.yaml" ]; then
+  kyverno test "$WORK/channel-hardening" -o json --detailed-results --remove-color 2>/dev/null \
+    | sed -n '/^\[/,/^\]/p' | jq -s 'add // []' > "$WORK/channel-hardening.json"
+fi
 
 python3 - "$WORK" "$REMOTE" "$TOOLSET" "$WORKSPACE" "$SUBJECT" "$HASH" <<'PY'
 import json, os, re, sys, yaml
@@ -145,8 +189,6 @@ def relay_rules(docs):
     d = get(docs, "CiliumNetworkPolicy", "relay-ingress")
     return (d or {}).get("spec", {}).get("ingress") or []
 
-# relay-ingress alone fences the relay, and its rule set is exactly: the
-# transport adapter on 9091, harness on 9090, principal adapters on 9092.
 def relay_fence(docs):
     relay = pod(get(docs, "Deployment", "relay-controller"))["metadata"]["labels"]
     fences = [d["metadata"]["name"] for d in cnps(docs)
@@ -157,15 +199,15 @@ def relay_fence(docs):
     got = sorted(key(([e.get("matchLabels") for e in r.get("fromEndpoints") or []],
                       [p for t in r.get("toPorts") or [] for p in t.get("ports") or []]))
                  for r in relay_rules(docs))
-    adapter = lambda cls: {"app.kubernetes.io/component": "adapter", "sycophant.md/adapter-class": cls,
+    channel = lambda cls: {"app.kubernetes.io/component": "channel", "sycophant.md/channel-class": cls,
                            "app.kubernetes.io/part-of": "sycophant"}
     want = sorted(key(r) for r in [
-        ([adapter("transport")], [{"port": "9091", "protocol": "TCP"}]),
+        ([channel("transport")], [{"port": "9091", "protocol": "TCP"}]),
         ([{"app.kubernetes.io/component": "harness", "app.kubernetes.io/part-of": "sycophant"}], [{"port": "9090", "protocol": "TCP"}]),
-        ([adapter("principal")], [{"port": "9092", "protocol": "TCP"}]),
+        ([channel("principal")], [{"port": "9092", "protocol": "TCP"}]),
     ])
     return None if got == want else f"want {want}, got {got}"
-check("relay-ingress alone fences the relay: transport adapter on 9091, harness on 9090, principal adapters on 9092", "bare", relay_fence)
+check("relay-ingress alone fences the relay: transport channel on 9091, harness on 9090, principal channels on 9092", "bare", relay_fence)
 
 def listeners(docs):
     relay = get(docs, "Deployment", "relay-controller")
@@ -188,11 +230,11 @@ check("every relay listener is published, admitted and dialed",
       else (None, next(e for d, e in parts if d is None)),
       listeners)
 
-def adapter_shape(docs):
+def channel_shape(docs):
     deps = [d for d in docs if d["kind"] == "Deployment"
-            and pod(d)["metadata"]["labels"].get("app.kubernetes.io/component") == "adapter"]
+            and pod(d)["metadata"]["labels"].get("app.kubernetes.io/component") == "channel"]
     if len(deps) != 1:
-        return f"want one adapter Deployment, got {objects(deps)}"
+        return f"want one channel Deployment, got {objects(deps)}"
     d = deps[0]
     spec = pod(d)["spec"]
     env = {e["name"]: e.get("value") for c in spec["containers"] for e in c.get("env") or []}
@@ -206,22 +248,28 @@ def adapter_shape(docs):
         any("persistentVolumeClaim" in v for v in spec.get("volumes") or []) and "persistentVolumeClaim",
     ]
     return [p for p in problems if p] or None
-check("app adapter pod is a hardened singleton", "channel", adapter_shape)
+check("app channel pod is a hardened singleton", "channel", channel_shape)
 
-def adapter_class(docs):
-    d = get(docs, "Deployment", "adapter-app")
+def channel_class(docs):
+    d = get(docs, "Deployment", "ch-app")
     labels = pod(d)["metadata"]["labels"]
-    if (labels.get("sycophant.md/adapter-class"), labels.get("sycophant.md/channel")) != ("transport", "app"):
-        return f"adapter labels {labels}"
+    if (labels.get("sycophant.md/channel-class"), labels.get("sycophant.md/channel")) != ("transport", "app"):
+        return f"channel labels {labels}"
     pols = [p for p in cnps(docs) if selects(p["spec"]["endpointSelector"].get("matchLabels"), labels)]
     if not pols or any(not p["spec"].get("egress") or p["spec"].get("ingress")
                        or "all" in json.dumps([r.get("toEntities") for r in p["spec"]["egress"]]) for p in pols):
-        return f"want only fail-closed egress policies selecting the adapter, got {[p['spec'] for p in pols]}"
+        return f"want only fail-closed egress policies selecting the channel, got {[p['spec'] for p in pols]}"
     every = [p for out in ("channel", "bare", "wsbase") for p in load(out)[0]
              if p["kind"] in ("CiliumNetworkPolicy", "NetworkPolicy")]
-    keyed = [p["metadata"]["name"] for p in every if "sycophant.md/channel" in json.dumps(p["spec"])]
+    def selector_keys(spec):
+        sels = [spec.get("endpointSelector"), spec.get("podSelector")]
+        sels += [e for r in (spec.get("egress") or []) + (spec.get("ingress") or [])
+                 for e in (r.get("toEndpoints") or []) + (r.get("fromEndpoints") or [])]
+        return {k for s in sels if s for k in list((s.get("matchLabels") or {}))
+                + [x.get("key") for x in s.get("matchExpressions") or []]}
+    keyed = [p["metadata"]["name"] for p in every if "sycophant.md/channel" in selector_keys(p["spec"])]
     return keyed and f"policies keyed on the channel label: {keyed}"
-check("app adapter is transport class and policies key on the class", "channel", adapter_class)
+check("app channel is transport class and policies key on the class", "channel", channel_class)
 
 def headscale(_):
     def hosts(out):
@@ -248,13 +296,6 @@ def magic_dns(_):
     got = {o: value(o) for o in ("headscale", "no-magic")}
     return None if got == {"headscale": True, "no-magic": False} else f"magic_dns {got}"
 check("headscale magic_dns defaults on and turns off with \"false\"", ([], None), magic_dns)
-
-def workspace_init_unselected(docs):
-    sel = [d["metadata"]["name"] for d in docs
-           if (d["kind"] == "CiliumNetworkPolicy" and (d["spec"].get("endpointSelector") or {}).get("matchLabels", {}).get("app.kubernetes.io/component") == "workspace-init")
-           or (d["kind"] == "NetworkPolicy" and (d["spec"].get("podSelector") or {}).get("matchLabels", {}).get("app.kubernetes.io/component") == "workspace-init")]
-    return sel and f"policies select workspace-init: {sel}"
-check("no policy selects the workspace-init pod", "wsbase", workspace_init_unselected)
 
 def harness_reaches_inference(docs):
     p = get(docs, "CiliumNetworkPolicy", "ws-one-egress")
@@ -383,21 +424,21 @@ check("a workspace command stamps its instructions-hash on the pod template", "w
 
 WORKSPACE_OBJECTS = sorted([
     "CiliumNetworkPolicy/ws-one-egress", "CiliumNetworkPolicy/ws-one-grant-ssh-demo", "CiliumNetworkPolicy/ws-one-job-ingress",
-    "ConfigMap/ws-one-capability-grants", "ConfigMap/ws-one-relay-grants", "Deployment/ws-one", "Job/ws-one-init",
+    "ConfigMap/ws-one-capability-grants", "ConfigMap/ws-one-relay-grants", "Deployment/ws-one",
     "PersistentVolumeClaim/ws-one-conversation", "PersistentVolumeClaim/ws-one-data", "Role/ws-one", "Role/ws-one-reach", "RoleBinding/ws-one",
     "Service/ws-one", "Service/ws-one-capability",
-    "ServiceAccount/ws-one", "ServiceAccount/ws-one-init", "ServiceAccount/ws-one-unprivileged"])
+    "ServiceAccount/ws-one", "ServiceAccount/ws-one-unprivileged"])
 
 def workspace_references(docs):
     if objects(docs) != WORKSPACE_OBJECTS:
         return f"want {WORKSPACE_OBJECTS}, got {objects(docs)}"
-    harness, init = pod(get(docs, "Deployment", "ws-one"))["spec"], pod(get(docs, "Job", "ws-one-init"))["spec"]
+    harness = pod(get(docs, "Deployment", "ws-one"))["spec"]
     rb = get(docs, "RoleBinding", "ws-one")
-    got = (harness.get("serviceAccountName"), init.get("serviceAccountName"),
-           sorted(v["persistentVolumeClaim"]["claimName"] for s in (harness, init) for v in s.get("volumes") or [] if "persistentVolumeClaim" in v),
+    got = (harness.get("serviceAccountName"),
+           sorted(v["persistentVolumeClaim"]["claimName"] for v in harness.get("volumes") or [] if "persistentVolumeClaim" in v),
            rb["roleRef"]["name"], [s["name"] for s in rb.get("subjects") or []],
            {e["name"]: e.get("value") for c in harness["containers"] for e in c.get("env") or []}.get("CAPABILITY_SERVICE_NAME"))
-    want = ("ws-one", "ws-one-init", ["ws-one-conversation", "ws-one-data"], "ws-one", ["ws-one"], "ws-one-capability")
+    want = ("ws-one", ["ws-one-conversation"], "ws-one", ["ws-one"], "ws-one-capability")
     return None if got == want else f"want {want}, got {got}"
 check("a workspace renders every object under its release name and references them by those names", "workspace", workspace_references)
 
@@ -786,6 +827,45 @@ def sync_token_only(docs):
     hostpaths = [v["name"] for d in docs if d["kind"] in ("Deployment", "Job") for v in pod(d)["spec"].get("volumes") or [] if "hostPath" in v]
     return hostpaths and f"hostPath volumes rendered: {hostpaths}"
 check("only instructions-sync holds the store token; no static keys and no hostPath", "wsbase", sync_token_only)
+
+def channel_needs_gvisor(_):
+    path = f"{work}/channel-hardening.json"
+    if not os.path.exists(path):
+        return "no kyverno case: want Deployment ch-tailnet in the tailnet channel render and cluster-gvisor-pod-policy in the cluster render"
+    rows = {r.get("RESOURCE", "").rsplit("/", 1)[-1]: r for r in json.load(open(path))}
+    as_rendered, stripped = rows.get("ch-tailnet-as-rendered"), rows.get("ch-tailnet-no-runtime-class")
+    problems = [
+        (not as_rendered or as_rendered.get("RESULT") != "Pass")
+        and f"the rendered ch-tailnet pod must be admitted: {as_rendered}",
+        (not stripped or stripped.get("RESULT") != "Pass" or "gvisor" not in (stripped.get("Message") or ""))
+        and f"ch-tailnet without runtimeClassName must be refused naming gvisor: {stripped}",
+    ]
+    return [p for p in problems if p] or None
+check("the pod-hardening VAP refuses the tailnet channel pod without runtimeClassName", ([], None), channel_needs_gvisor)
+
+def channel_identity_secret(_):
+    channel, channel_err = load("channel-tailnet")
+    cluster, cluster_err = load("cluster")
+    if channel is None or cluster is None:
+        return f"render failed: {channel_err or cluster_err}"
+    def names(rules):
+        return sorted({n for r in rules or [] for n in r.get("resourceNames") or []})
+    dep = get(channel, "Deployment", "ch-tailnet")
+    env = {e["name"]: e.get("value") for c in pod(dep)["spec"]["containers"] for e in c.get("env") or []} if dep else {}
+    roles = [d for d in channel if d["kind"] == "Role" and names(d.get("rules"))]
+    allow = [d for d in cluster if d["kind"] == "ValidatingAdmissionPolicy"
+             and d["metadata"]["name"].endswith("secret-name-allowlist")]
+    exprs = " ".join(v.get("expression", "") for d in allow for v in d["spec"].get("validations") or [])
+    places = {
+        "channel Role resourceNames": [n for d in roles for n in names(d["rules"])],
+        "TS_KUBE_SECRET": [env.get("TS_KUBE_SECRET")],
+        "Secret-name allowlist VAP": re.findall(r"object\.metadata\.name == '([^']*)'", exprs),
+        "provision-write ClusterRole": names((get(cluster, "ClusterRole", "provision-write") or {}).get("rules")),
+        "Kyverno controller RBAC": names((get(cluster, "ClusterRole", "kyverno:sycophant:provision") or {}).get("rules")),
+    }
+    wrong = {k: v for k, v in places.items() if "tailnet-identity" not in v}
+    return wrong and f"want tailnet-identity, got {wrong}"
+check("the channel identity Secret is tailnet-identity in all five places", ([], None), channel_identity_secret)
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

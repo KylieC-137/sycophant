@@ -219,12 +219,12 @@ func TestHistoryLastForWorkspace(t *testing.T) {
 
 // --grant toolset/grant parses into (toolset, grant) pair.
 func TestParseGrant(t *testing.T) {
-	toolset, grant, err := config.ParseGrant("ssh-credentials/demo-key")
+	toolset, grant, err := config.ParseGrant("hello-world/demo-key")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if toolset != "ssh-credentials" {
-		t.Errorf("expected toolset 'ssh-credentials', got %q", toolset)
+	if toolset != "hello-world" {
+		t.Errorf("expected toolset 'hello-world', got %q", toolset)
 	}
 	if grant != "demo-key" {
 		t.Errorf("expected grant 'demo-key', got %q", grant)

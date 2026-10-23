@@ -56,12 +56,6 @@ results:
     kind: ConfigMap
     result: fail
     resources:
-      - tenant-acme/provision-channel-yes
-  - policy: command-provision-channel
-    isValidatingAdmissionPolicy: true
-    kind: ConfigMap
-    result: fail
-    resources:
       - tenant-acme/provision-channel-kind
   - policy: command-provision-channel
     isValidatingAdmissionPolicy: true
@@ -69,21 +63,18 @@ results:
     result: fail
     resources:
       - tenant-acme/provision-channel-nologin
-  - policy: command-provision-channel
+  - policy: command-reap-user
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: pass
+    resources:
+      - tenant-acme/reap-user-306b623ce6
+  - policy: command-reap-user
     isValidatingAdmissionPolicy: true
     kind: ConfigMap
     result: fail
     resources:
-      - tenant-acme/provision-channel-magicdns
-  - policy: command-provision-channel
-    isValidatingAdmissionPolicy: true
-    kind: ConfigMap
-    result: fail
-    resources:
-      - tenant-acme/provision-channel-noserverurl
-  - policy: command-provision-channel
-    isValidatingAdmissionPolicy: true
-    kind: ConfigMap
-    result: fail
-    resources:
-      - tenant-acme/provision-channel-noacmeemail
+      - tenant-acme/reap-user-306b623ce
+      - tenant-acme/reap-user-306b623ce63
+      - tenant-acme/reap-user-306B623CE6
+      - tenant-acme/reap-user-306b623cgz

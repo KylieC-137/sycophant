@@ -1,0 +1,40 @@
+{{- $channel := .Values.name }}
+---
+# Tailnet node identity for the tailnet channel (fixed name: see channel.yaml).
+# Bound to the channel's own ServiceAccount, never the relay's: the relay holds
+# no Secrets RBAC, and only the channel keeps its tailnet identity.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ch-{{ $channel }}-identity
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: channel
+    sycophant.md/channel: {{ $channel | quote }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [tailnet-identity]
+    verbs: [get, update, patch]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ch-{{ $channel }}-identity
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "sycophant.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: channel
+    sycophant.md/channel: {{ $channel | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ch-{{ $channel }}-identity
+subjects:
+  - kind: ServiceAccount
+    name: ch-{{ $channel }}
+    namespace: {{ $.Release.Namespace }}

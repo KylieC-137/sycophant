@@ -15,8 +15,8 @@ import (
 
 	"github.com/sycophant-md/sycophant/cmd/syco/internal/config"
 	"github.com/sycophant-md/sycophant/cmd/syco/internal/grpcclient"
-	commonpb "github.com/sycophant-md/sycophant/cmd/syco/internal/proto/sycophant/common/v1"
 	relaypb "github.com/sycophant-md/sycophant/cmd/syco/internal/proto/relay/v1"
+	commonpb "github.com/sycophant-md/sycophant/cmd/syco/internal/proto/sycophant/common/v1"
 )
 
 // runTUI launches the interactive Bubble Tea TUI for multi-turn chat.
@@ -67,7 +67,7 @@ func openTUIModel(
 	if id == "" {
 		return m, nil
 	}
-	msg, err := connectChannel(token, p.Server, p.Workspace, nil)
+	msg, err := connectChannelStream(token, p.Server, p.Workspace, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -105,22 +105,22 @@ var (
 // --- Messages ---
 
 type frameMsg struct {
-	frame *commonpb.ChannelOutbound
+	frame *commonpb.ChannelStreamOutbound
 }
 
 type streamErrMsg struct {
 	err error
-	// ingest marks a failed ChannelIngest rather than a broken stream.
+	// ingest marks a failed ChannelStreamIngest rather than a broken stream.
 	ingest bool
 }
 
-// connectedMsg carries an open channel and, when conversationID is set, the
+// connectedMsg carries an open channel stream and, when conversationID is set, the
 // conversation read through it.
 type connectedMsg struct {
-	conn      *grpc.ClientConn
-	client    relaypb.RelayGatewayClient
-	stream    grpc.ServerStreamingClient[commonpb.ChannelOutbound]
-	channelID string
+	conn            *grpc.ClientConn
+	client          relaypb.RelayGatewayClient
+	stream          grpc.ServerStreamingClient[commonpb.ChannelStreamOutbound]
+	channelStreamID string
 
 	conversationID string
 	history        []*commonpb.HistoryEntry
@@ -169,11 +169,11 @@ type tuiModel struct {
 	grants       []*commonpb.GrantSelection
 
 	// Connection state.
-	conn      *grpc.ClientConn
-	client    relaypb.RelayGatewayClient
-	stream    grpc.ServerStreamingClient[commonpb.ChannelOutbound]
-	channelID string
-	connected bool
+	conn            *grpc.ClientConn
+	client          relaypb.RelayGatewayClient
+	stream          grpc.ServerStreamingClient[commonpb.ChannelStreamOutbound]
+	channelStreamID string
+	connected       bool
 
 	// Conversation state.
 	conversationID string
@@ -304,9 +304,9 @@ func (m *tuiModel) listWorkspacesCmd() tea.Cmd {
 	}
 }
 
-// connectChannel dials the relay (or reuses conn), opens ChannelReceive for
+// connectChannelStream dials the relay (or reuses conn), opens ChannelStreamReceive for
 // the workspace and reads the ack.
-func connectChannel(token, server, workspace string, conn *grpc.ClientConn) (connectedMsg, error) {
+func connectChannelStream(token, server, workspace string, conn *grpc.ClientConn) (connectedMsg, error) {
 	ctx := grpcclient.WithToken(context.Background(), token)
 	if conn == nil {
 		var err error
@@ -316,21 +316,21 @@ func connectChannel(token, server, workspace string, conn *grpc.ClientConn) (con
 		}
 	}
 	client := relaypb.NewRelayGatewayClient(conn)
-	stream, err := client.ChannelReceive(ctx, &commonpb.ChannelReceiveRequest{Workspace: workspace})
+	stream, err := client.ChannelStreamReceive(ctx, &commonpb.ChannelStreamReceiveRequest{Workspace: workspace})
 	if err != nil {
 		conn.Close()
-		return connectedMsg{}, fmt.Errorf("channel receive: %w", err)
+		return connectedMsg{}, fmt.Errorf("channel stream receive: %w", err)
 	}
-	channelID, err := readAck(stream)
+	channelStreamID, err := readAck(stream)
 	if err != nil {
 		conn.Close()
-		return connectedMsg{}, fmt.Errorf("reading channel ack: %w", err)
+		return connectedMsg{}, fmt.Errorf("reading channel stream ack: %w", err)
 	}
-	return connectedMsg{conn: conn, client: client, stream: stream, channelID: channelID}, nil
+	return connectedMsg{conn: conn, client: client, stream: stream, channelStreamID: channelStreamID}, nil
 }
 
 // openConversation reads a conversation's whole history and then its turn
-// state through the open channel.
+// state through the open channel stream.
 func (c *connectedMsg) openConversation(token, workspace, conversationID string) error {
 	ctx := grpcclient.WithToken(context.Background(), token)
 	history, err := loadHistory(ctx, c.client, conversationID, workspace)
@@ -353,7 +353,7 @@ func (m *tuiModel) connectCmd() tea.Cmd {
 	conn := m.conn
 	id := m.namedConversation()
 	return func() tea.Msg {
-		msg, err := connectChannel(token, server, workspace, conn)
+		msg, err := connectChannelStream(token, server, workspace, conn)
 		if err != nil {
 			return connErrMsg{err: err}
 		}
@@ -379,12 +379,12 @@ func (m *tuiModel) recvCmd() tea.Cmd {
 }
 
 func (m *tuiModel) ingestCmd(message string) tea.Cmd {
-	client, channelID, conversationID, grants, token := m.client, m.channelID, m.conversationID, m.grants, m.token
+	client, channelStreamID, conversationID, grants, token := m.client, m.channelStreamID, m.conversationID, m.grants, m.token
 	return func() tea.Msg {
 		ctx := grpcclient.WithToken(context.Background(), token)
-		resp, err := client.ChannelIngest(ctx, &commonpb.ChannelIngestRequest{
-			ChannelId:      channelID,
-			ConversationId: conversationID,
+		resp, err := client.ChannelStreamIngest(ctx, &commonpb.ChannelStreamIngestRequest{
+			ChannelStreamId: channelStreamID,
+			ConversationId:  conversationID,
 			UserMessage: &commonpb.UserMessage{
 				Content: []*commonpb.ContentBlock{
 					{
@@ -397,7 +397,7 @@ func (m *tuiModel) ingestCmd(message string) tea.Cmd {
 			},
 		})
 		if err != nil {
-			return streamErrMsg{err: fmt.Errorf("channel ingest: %w", err), ingest: true}
+			return streamErrMsg{err: fmt.Errorf("channel stream ingest: %w", err), ingest: true}
 		}
 		return ingestAckMsg{conversationID: resp.ConversationId}
 	}
@@ -416,7 +416,7 @@ func (m *tuiModel) doReconnect() tea.Cmd {
 		if old != nil {
 			old.Close()
 		}
-		msg, err := connectChannel(token, server, workspace, nil)
+		msg, err := connectChannelStream(token, server, workspace, nil)
 		if err != nil {
 			return connErrMsg{err: fmt.Errorf("reconnecting: %w", err)}
 		}
@@ -430,13 +430,13 @@ func (m *tuiModel) doReconnect() tea.Cmd {
 	}
 }
 
-// applyConnected adopts an open channel. An opened conversation replaces
+// applyConnected adopts an open channel stream. An opened conversation replaces
 // the transcript with its history and sets the running state.
 func (m *tuiModel) applyConnected(msg connectedMsg) {
 	m.conn = msg.conn
 	m.client = msg.client
 	m.stream = msg.stream
-	m.channelID = msg.channelID
+	m.channelStreamID = msg.channelStreamID
 	m.connected = true
 	if msg.conversationID != "" {
 		m.conversationID = msg.conversationID
@@ -631,9 +631,9 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // --- Frame handling ---
 
-func (m *tuiModel) handleFrameMsg(frame *commonpb.ChannelOutbound) {
+func (m *tuiModel) handleFrameMsg(frame *commonpb.ChannelStreamOutbound) {
 	switch c := frame.Command.(type) {
-	case *commonpb.ChannelOutbound_TurnState:
+	case *commonpb.ChannelStreamOutbound_TurnState:
 		ts := c.TurnState
 		if ts.ConversationId == "" || ts.ConversationId != m.conversationID {
 			return
@@ -655,7 +655,7 @@ func (m *tuiModel) handleFrameMsg(frame *commonpb.ChannelOutbound) {
 			m.commitLine("")
 			m.input.Focus()
 		}
-	case *commonpb.ChannelOutbound_StreamItem:
+	case *commonpb.ChannelStreamOutbound_StreamItem:
 		item := c.StreamItem
 		if item.ConversationId != m.conversationID {
 			return

@@ -7,7 +7,7 @@
 //! `handle.<channel>` keys naming that channel's platform user ID. The table
 //! answers two questions and only these: which workspaces a subject reaches
 //! (ListWorkspaces), and which subject a channel handle resolves to (the
-//! adapter path). A handle that no operator bound resolves to nothing.
+//! channel path). A handle that no operator bound resolves to nothing.
 
 use k8s_openapi::api::core::v1::ConfigMap;
 use relay_controller::identity::{apply_delivery, IdentityTable};

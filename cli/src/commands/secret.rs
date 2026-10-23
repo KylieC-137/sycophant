@@ -7,11 +7,11 @@ use crate::commands::common;
 use crate::runner::{run_output, run_stdin};
 use crate::scope::Scope;
 
-pub(crate) fn run(scope: &Scope, cmd: SecretCmd) -> Result<(), String> {
+pub(crate) fn run(cmd: SecretCmd) -> Result<(), String> {
     match cmd.sub {
-        SecretSub::Set(set) => do_set(scope, &set.name),
-        SecretSub::List(list) => do_list(scope, list),
-        SecretSub::Delete(del) => do_delete(scope, &del.name),
+        SecretSub::Set(set) => do_set(&Scope::for_tenant(&set.ns)?, &set.name),
+        SecretSub::List(list) => do_list(&Scope::for_tenant(&list.ns)?, list),
+        SecretSub::Delete(del) => do_delete(&Scope::for_tenant(&del.ns)?, &del.name),
     }
 }
 

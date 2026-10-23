@@ -1,4 +1,3 @@
-pub(crate) mod audit;
 pub(crate) mod build;
 pub(crate) mod command;
 pub(crate) mod common;

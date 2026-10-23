@@ -26,8 +26,8 @@ import (
 const testWorkspace = "w-test"
 
 // fakeGateway plays the relay's client-facing protocol on a loopback port.
-// It acks every ChannelReceive with a fresh channel ID and then sends only
-// the frames a test pushes onto that stream. It acks ChannelIngest with the
+// It acks every ChannelStreamReceive with a fresh channel stream ID and then sends only
+// the frames a test pushes onto that stream. It acks ChannelStreamIngest with the
 // conversation the request names, or with freshID when it names none, and
 // from then on that conversation's history holds the user's message. It
 // answers GetConversationHistory with the scripted entries for conversations
@@ -38,25 +38,25 @@ type fakeGateway struct {
 
 	addr string
 
-	mu        sync.Mutex
-	history   map[string][]*commonpb.HistoryEntry
-	turnState commonpb.TurnState
-	freshID   string
-	channels  int
+	mu             sync.Mutex
+	history        map[string][]*commonpb.HistoryEntry
+	turnState      commonpb.TurnState
+	freshID        string
+	channelStreams int
 
 	streamCh chan *fakeStream
 	ingestCh chan struct{}
 }
 
-// fakeStream is one open ChannelReceive. Frames pushed onto it are sent in
+// fakeStream is one open ChannelStreamReceive. Frames pushed onto it are sent in
 // order; end() closes the stream after every pushed frame has gone out.
 type fakeStream struct {
-	channelID string
-	frames    chan *commonpb.ChannelOutbound
-	endOnce   sync.Once
+	channelStreamID string
+	frames          chan *commonpb.ChannelStreamOutbound
+	endOnce         sync.Once
 }
 
-func (s *fakeStream) push(frames ...*commonpb.ChannelOutbound) {
+func (s *fakeStream) push(frames ...*commonpb.ChannelStreamOutbound) {
 	for _, f := range frames {
 		s.frames <- f
 	}
@@ -113,42 +113,42 @@ func (f *fakeGateway) setFreshID(id string) {
 	f.freshID = id
 }
 
-// nextStream waits for the next ChannelReceive the client opens.
+// nextStream waits for the next ChannelStreamReceive the client opens.
 func (f *fakeGateway) nextStream(t *testing.T, timeout time.Duration) *fakeStream {
 	t.Helper()
 	select {
 	case s := <-f.streamCh:
 		return s
 	case <-time.After(timeout):
-		t.Fatalf("client opened no ChannelReceive within %v", timeout)
+		t.Fatalf("client opened no ChannelStreamReceive within %v", timeout)
 		return nil
 	}
 }
 
-// nextIngest waits for the next ChannelIngest the client sends.
+// nextIngest waits for the next ChannelStreamIngest the client sends.
 func (f *fakeGateway) nextIngest(t *testing.T, timeout time.Duration) {
 	t.Helper()
 	select {
 	case <-f.ingestCh:
 	case <-time.After(timeout):
-		t.Fatalf("client sent no ChannelIngest within %v", timeout)
+		t.Fatalf("client sent no ChannelStreamIngest within %v", timeout)
 	}
 }
 
-func (f *fakeGateway) ChannelReceive(
-	_ *commonpb.ChannelReceiveRequest,
-	stream grpc.ServerStreamingServer[commonpb.ChannelOutbound],
+func (f *fakeGateway) ChannelStreamReceive(
+	_ *commonpb.ChannelStreamReceiveRequest,
+	stream grpc.ServerStreamingServer[commonpb.ChannelStreamOutbound],
 ) error {
 	f.mu.Lock()
-	f.channels++
+	f.channelStreams++
 	s := &fakeStream{
-		channelID: fmt.Sprintf("chan-%d", f.channels),
-		frames:    make(chan *commonpb.ChannelOutbound, 64),
+		channelStreamID: fmt.Sprintf("chan-%d", f.channelStreams),
+		frames:          make(chan *commonpb.ChannelStreamOutbound, 64),
 	}
 	f.mu.Unlock()
 
-	ack := &commonpb.ChannelOutbound{
-		Command: &commonpb.ChannelOutbound_Ack{Ack: &commonpb.ChannelAck{ChannelId: s.channelID}},
+	ack := &commonpb.ChannelStreamOutbound{
+		Command: &commonpb.ChannelStreamOutbound_Ack{Ack: &commonpb.ChannelStreamAck{ChannelStreamId: s.channelStreamID}},
 	}
 	if err := stream.Send(ack); err != nil {
 		return err
@@ -169,10 +169,10 @@ func (f *fakeGateway) ChannelReceive(
 	}
 }
 
-func (f *fakeGateway) ChannelIngest(
+func (f *fakeGateway) ChannelStreamIngest(
 	_ context.Context,
-	req *commonpb.ChannelIngestRequest,
-) (*commonpb.ChannelIngestAck, error) {
+	req *commonpb.ChannelStreamIngestRequest,
+) (*commonpb.ChannelStreamIngestAck, error) {
 	f.mu.Lock()
 	id := req.GetConversationId()
 	if id == "" {
@@ -186,7 +186,7 @@ func (f *fakeGateway) ChannelIngest(
 	}
 	f.mu.Unlock()
 	f.ingestCh <- struct{}{}
-	return &commonpb.ChannelIngestAck{ChannelId: req.GetChannelId(), ConversationId: id}, nil
+	return &commonpb.ChannelStreamIngestAck{ChannelStreamId: req.GetChannelStreamId(), ConversationId: id}, nil
 }
 
 func (f *fakeGateway) GetConversationHistory(
@@ -227,9 +227,9 @@ func assistantEntry(text string) *commonpb.HistoryEntry {
 	return &commonpb.HistoryEntry{Message: &commonpb.Message{Role: "assistant", Content: textContent(text)}}
 }
 
-func turnStateFrame(conversationID string, state commonpb.TurnState) *commonpb.ChannelOutbound {
-	return &commonpb.ChannelOutbound{
-		Command: &commonpb.ChannelOutbound_TurnState{
+func turnStateFrame(conversationID string, state commonpb.TurnState) *commonpb.ChannelStreamOutbound {
+	return &commonpb.ChannelStreamOutbound{
+		Command: &commonpb.ChannelStreamOutbound_TurnState{
 			TurnState: &commonpb.TurnStateEvent{State: state, ConversationId: conversationID},
 		},
 	}
@@ -237,13 +237,13 @@ func turnStateFrame(conversationID string, state commonpb.TurnState) *commonpb.C
 
 // streamTextFrames is one streamed text item for a conversation: start,
 // one delta carrying text, stop.
-func streamTextFrames(conversationID, itemID, text string) []*commonpb.ChannelOutbound {
-	item := func(phase func(*commonpb.StreamItem)) *commonpb.ChannelOutbound {
+func streamTextFrames(conversationID, itemID, text string) []*commonpb.ChannelStreamOutbound {
+	item := func(phase func(*commonpb.StreamItem)) *commonpb.ChannelStreamOutbound {
 		si := &commonpb.StreamItem{ItemId: itemID, ConversationId: conversationID}
 		phase(si)
-		return &commonpb.ChannelOutbound{Command: &commonpb.ChannelOutbound_StreamItem{StreamItem: si}}
+		return &commonpb.ChannelStreamOutbound{Command: &commonpb.ChannelStreamOutbound_StreamItem{StreamItem: si}}
 	}
-	return []*commonpb.ChannelOutbound{
+	return []*commonpb.ChannelStreamOutbound{
 		item(func(si *commonpb.StreamItem) {
 			si.Phase = &commonpb.StreamItem_Start{Start: &commonpb.ItemStart{
 				Kind: &commonpb.ItemStart_Text{Text: &commonpb.TextItem{}},

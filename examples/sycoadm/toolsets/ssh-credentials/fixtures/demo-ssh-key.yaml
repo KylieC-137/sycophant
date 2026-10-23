@@ -1,6 +1,0 @@
-apiVersion: v1
-kind: Secret
-metadata:
-  name: demo-ssh-key
-stringData:
-  demo-ssh-key: "FAKE-ED25519-PRIVATE-KEY-DO-NOT-USE"

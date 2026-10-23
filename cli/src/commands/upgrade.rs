@@ -70,6 +70,7 @@ const KYVERNO_POLICIES: &[(&str, &str)] = &[
         "generatingpolicies.policies.kyverno.io",
         "provision-user-grant",
     ),
+    ("generatingpolicies.policies.kyverno.io", "uninstall-user"),
     (
         "generatingpolicies.policies.kyverno.io",
         "provision-toolset",

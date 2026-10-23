@@ -15,7 +15,7 @@ use crate::turn;
 /// dispatch runs its own bounded loop inside `runtime_tools::dispatch` and
 /// does NOT re-enter this function.
 pub(crate) struct LoopMode {
-    pub reply_channel: Option<String>,
+    pub reply_channel_stream: Option<String>,
     /// Max silence between inference-job events before the turn is failed as
     /// wedged (vs awaited forever). Carried here so callers thread it from
     /// config without changing `llm_loop`'s arg list.
@@ -74,7 +74,7 @@ struct ContinuationCtx {
     /// this against its model catalog and refuses an absent one. There is no
     /// default.
     model: Option<String>,
-    reply_channel: Option<String>,
+    reply_channel_stream: Option<String>,
     conversation_id: String,
 }
 
@@ -84,7 +84,7 @@ fn build_continuation(ctx: &ContinuationCtx, messages: Vec<Message>) -> TurnRequ
         tools: ctx.tools.clone(),
         messages,
         model: ctx.model.clone(),
-        reply_channel: ctx.reply_channel.clone(),
+        reply_channel_stream: ctx.reply_channel_stream.clone(),
         role: None,
         correlation_id: None,
         conversation_id: ctx.conversation_id.clone(),
@@ -173,7 +173,7 @@ pub(crate) async fn llm_loop(
         system: initial_request.system.clone(),
         tools: initial_request.tools.clone(),
         model: initial_request.model.clone(),
-        reply_channel: mode.reply_channel,
+        reply_channel_stream: mode.reply_channel_stream,
         conversation_id: initial_request.conversation_id.clone(),
     };
     let tag = scope_tag(scope);
@@ -268,7 +268,7 @@ pub(crate) async fn llm_loop(
                             &grants,
                             toolset,
                             &ctx.conversation_id,
-                            ctx.reply_channel.as_deref(),
+                            ctx.reply_channel_stream.as_deref(),
                             &tc.id,
                             &cancel,
                         )
@@ -474,7 +474,7 @@ mod tests {
             _grants: &std::collections::HashMap<String, String>,
             _toolset: &mut dyn ToolsetRpc,
             conversation_id: &str,
-            _reply_channel: Option<&str>,
+            _reply_channel_stream: Option<&str>,
             _tool_call_id: &str,
             _cancel: &tokio_util::sync::CancellationToken,
         ) -> Result<CallToolResponse, DispatchAbort> {
@@ -527,16 +527,16 @@ mod tests {
                 is_error: None,
             }],
             model: None,
-            reply_channel: None,
+            reply_channel_stream: None,
             role: None,
             correlation_id: None,
             conversation_id: conv_id.into(),
         }
     }
 
-    fn mode(reply_channel: Option<&str>) -> LoopMode {
+    fn mode(reply_channel_stream: Option<&str>) -> LoopMode {
         LoopMode {
-            reply_channel: reply_channel.map(str::to_string),
+            reply_channel_stream: reply_channel_stream.map(str::to_string),
             idle_gap: std::time::Duration::from_secs(45),
             cancel: tokio_util::sync::CancellationToken::new(),
             grants: std::collections::HashMap::new(),
@@ -620,11 +620,11 @@ mod tests {
             router.last_conv_id.lock().unwrap().as_deref(),
             Some("conv-99")
         );
-        // Continuation preserves conversation_id, system, and reply_channel.
+        // Continuation preserves conversation_id, system, and reply_channel_stream.
         let cont = &tb.recorded[1];
         assert_eq!(cont.conversation_id, "conv-99");
         assert_eq!(cont.system.as_deref(), Some("orch-system"));
-        assert_eq!(cont.reply_channel.as_deref(), Some("ch-1"));
+        assert_eq!(cont.reply_channel_stream.as_deref(), Some("ch-1"));
         assert_eq!(cont.role, None);
         assert_eq!(cont.correlation_id, None);
     }
@@ -1030,7 +1030,7 @@ mod tests {
             _grants: &std::collections::HashMap<String, String>,
             _toolset: &mut dyn ToolsetRpc,
             _conversation_id: &str,
-            _reply_channel: Option<&str>,
+            _reply_channel_stream: Option<&str>,
             _tool_call_id: &str,
             _cancel: &tokio_util::sync::CancellationToken,
         ) -> Result<CallToolResponse, DispatchAbort> {
@@ -1130,7 +1130,7 @@ mod tests {
         let cancel = tokio_util::sync::CancellationToken::new();
         cancel.cancel(); // fired before the loop consumes the model call
         LoopMode {
-            reply_channel: None,
+            reply_channel_stream: None,
             idle_gap: std::time::Duration::from_secs(45),
             cancel,
             grants: std::collections::HashMap::new(),

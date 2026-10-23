@@ -27,7 +27,7 @@ pub(crate) fn test_instructions() -> Arc<Instructions> {
 }
 
 /// A toolset stub backing the `ToolRouter<A>` generic in tests that exercise the
-/// runtime and channel paths. Tool dispatch runs in-process through
+/// runtime and channel-stream paths. Tool dispatch runs in-process through
 /// `DispatchState`, not this seam, so the tool-call RPCs are gone; only the
 /// sub-agent turn surface remains.
 #[derive(Clone)]
@@ -104,10 +104,11 @@ impl RelayRpc for RecordingRelay {
     }
     async fn deliver_stream_item(
         &mut self,
-        channel_id: &str,
+        channel_stream_id: &str,
         item: StreamItem,
     ) -> Result<bool, String> {
-        self.stream_items.push((channel_id.to_string(), item));
+        self.stream_items
+            .push((channel_stream_id.to_string(), item));
         Ok(true)
     }
     async fn deliver_reply(

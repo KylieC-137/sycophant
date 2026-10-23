@@ -111,7 +111,7 @@ mod tests {
     const BINDINGS: &str = r#"
 hello-world:
   - stdlib
-  - name: ssh-credentials
+  - name: hello-world
     grants:
       github:
         secret: demo-ssh-key
@@ -126,7 +126,7 @@ other-ws:
     #[test]
     fn a_malformed_grants_block_fails_the_load() {
         let err = CapabilityGrants::parse(
-            "hello-world:\n  - name: ssh-credentials\n    grants: [github, deploy-key]\n",
+            "hello-world:\n  - name: hello-world\n    grants: [github, deploy-key]\n",
         )
         .expect_err("a grants list is not a grant map");
         assert!(
@@ -141,7 +141,7 @@ other-ws:
         assert_eq!(
             grants.for_workspace("hello-world"),
             vec![(
-                "ssh-credentials".to_string(),
+                "hello-world".to_string(),
                 vec!["deploy-key".to_string(), "github".to_string()],
             )],
             "bare entries carry no grants; grant names come back sorted"
@@ -155,7 +155,7 @@ other-ws:
     const NAMES_ONLY: &str = r#"
 hello-world:
   - stdlib
-  - name: ssh-credentials
+  - name: hello-world
     grants:
       github: {}
       deploy-key: {}
