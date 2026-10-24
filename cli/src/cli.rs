@@ -13,6 +13,9 @@ pub(crate) struct Cli {
     reason = "clap arg structs, parsed once at startup"
 )]
 pub(crate) enum Command {
+    /// Check whether this host satisfies Sycophant's local prerequisites.
+    /// This command is diagnostic only and does not change the environment.
+    Doctor(DoctorCmd),
     Setup(SetupCmd),
     Destroy(DestroyCmd),
     Upgrade(UpgradeCmd),
@@ -29,6 +32,10 @@ pub(crate) enum Command {
 }
 
 // --- setup / destroy (cluster — no --ns) ---
+
+/// Run read-only diagnostics for the local Sycophant environment.
+#[derive(Args)]
+pub(crate) struct DoctorCmd {}
 
 /// Stand up a sycophant-ready cluster from nothing: ensure the k3d cluster
 /// `sycophant` with the apiserver trusting the bundled Dex, install the gVisor

@@ -3,6 +3,7 @@ pub(crate) mod build;
 pub(crate) mod command;
 pub(crate) mod common;
 pub(crate) mod destroy;
+pub(crate) mod doctor;
 pub(crate) mod down;
 pub(crate) mod operator;
 pub(crate) mod remove;
