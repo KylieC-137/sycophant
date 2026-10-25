@@ -127,8 +127,9 @@ func newChatCmd() *cobra.Command {
 
 			// Ingest the message (once, on first connect).
 			ingestResp, err := client.ChannelStreamIngest(ctx, &commonpb.ChannelStreamIngestRequest{
-				ChannelStreamId: channelStreamID,
-				ConversationId:  conversationID,
+				ChannelStreamId:  channelStreamID,
+				ConversationId:   conversationID,
+				SupportedMethods: supportedMethods,
 				UserMessage: &commonpb.UserMessage{
 					Content: []*commonpb.ContentBlock{
 						{
@@ -153,13 +154,15 @@ func newChatCmd() *cobra.Command {
 			// Stream the reply with reconnect support.
 			out := cmd.OutOrStdout()
 			rs := &recvState{
-				workspace:      p.Workspace,
-				conversationID: conversationID,
-				out:            out,
-				errOut:         cmd.ErrOrStderr(),
-				isTTY:          isTerminal(out),
-				toolStyle:      lipgloss.NewStyle().Foreground(lipgloss.Color("6")),
-				toolCalls:      make(map[string]string),
+				workspace:       p.Workspace,
+				conversationID:  conversationID,
+				channelStreamID: channelStreamID,
+				out:             out,
+				errOut:          cmd.ErrOrStderr(),
+				in:              cmd.InOrStdin(),
+				isTTY:           isTerminal(out),
+				toolStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("6")),
+				toolCalls:       make(map[string]string),
 			}
 
 			backoff := time.Second
@@ -196,7 +199,8 @@ func newChatCmd() *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("channel stream receive on reconnect: %w", err)
 				}
-				if _, err := readAck(stream); err != nil {
+				rs.channelStreamID, err = readAck(stream)
+				if err != nil {
 					return fmt.Errorf("reading channel stream ack on reconnect: %w", err)
 				}
 
@@ -332,6 +336,15 @@ type recvState struct {
 	// reconnected is set once a stream has dropped: streamed text is then
 	// discarded and the reply is read from history.
 	reconnected bool
+
+	// channelStreamID is the open stream, where approval answers go.
+	channelStreamID string
+	in              io.Reader
+	// lines reads in from the first approval request on, so a turn with
+	// none never touches standard input.
+	lines <-chan string
+	// approvals wait for a line each, first in, first out.
+	approvals []toolApproval
 }
 
 // recvLoop reads frames until the turn completes, the stream breaks, or the
@@ -356,9 +369,15 @@ func (rs *recvState) recvLoop(
 	}()
 
 	for {
+		var lines <-chan string
+		if len(rs.approvals) > 0 {
+			lines = rs.lines
+		}
 		select {
 		case <-ctx.Done():
 			return loopFatal, ctx.Err()
+		case line, ok := <-lines:
+			rs.answerApproval(ctx, client, ok && approvesLine(line))
 		case <-timer.C:
 			log.Printf("dead connection detected (no frame in %v)", deadConnectionTimeout)
 			return loopReconnect, nil
@@ -421,9 +440,34 @@ func (rs *recvState) handleFrame(
 			return loopContinue, nil
 		}
 		rs.renderStreamItem(item)
+
+	case *commonpb.ChannelStreamOutbound_ServerRequest:
+		if a, ok := toolApprovalOf(c.ServerRequest); ok {
+			rs.askApproval(a)
+		}
 	}
 
 	return loopContinue, nil
+}
+
+// askApproval shows an approval request and queues it for a line of input.
+func (rs *recvState) askApproval(a toolApproval) {
+	rs.approvals = append(rs.approvals, a)
+	if rs.lines == nil {
+		rs.lines = readLines(rs.in)
+	}
+	rs.printToolLine(fmt.Sprintf("⚙ %s wants to run with input: %s", a.tool, a.input))
+	fmt.Fprintln(rs.out, "approve? [y/N]")
+}
+
+// answerApproval sends the answer to the oldest queued approval request. A
+// failed send leaves the call unanswered, which the harness takes as a no.
+func (rs *recvState) answerApproval(ctx context.Context, client relaypb.RelayGatewayClient, approved bool) {
+	a := rs.approvals[0]
+	rs.approvals = rs.approvals[1:]
+	if _, err := client.ChannelStreamIngest(ctx, approvalAnswer(rs.channelStreamID, a.requestID, approved)); err != nil {
+		log.Printf("sending approval answer: %v", err)
+	}
 }
 
 // printReplyFromHistory prints the finished turn's reply as read from the

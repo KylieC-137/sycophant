@@ -47,13 +47,14 @@ fn resolve_primary_agent(instructions: &Instructions, workspace: &str) -> String
 }
 
 /// Cap on the number of paths the primary prompt's tree map renders, matching
-/// the `list` runtime tool's cap.
+/// the `ListInstructions` runtime tool's cap.
 const PRIMARY_TREE_CAP: usize = 1000;
 
 /// Compose the model-facing primary system prompt: the AGENTS.md entry body
 /// followed by a flat, capped map of the workspace instruction tree's paths.
-/// The map lets the primary turn see (and `read`/`dispatch`) nested files it
-/// would otherwise not know exist. An empty tree renders the body alone.
+/// The map lets the primary turn see (and `ReadInstructions`/`DispatchAgent`)
+/// nested files it would otherwise not know exist. An empty tree renders the
+/// body alone.
 fn render_primary_prompt(agents_body: &str, paths: &[String]) -> String {
     if paths.is_empty() {
         return agents_body.to_string();

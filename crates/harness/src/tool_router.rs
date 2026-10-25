@@ -1,14 +1,18 @@
 //! Tool router: fan-in across the live toolset table and the harness-local
-//! runtime (read / dispatch / list).
+//! runtime (ReadInstructions / DispatchAgent / ListInstructions).
 //!
 //! Every tool the LLM sees has a `Source`. `Toolset` tools come from the
 //! toolsets this workspace binds, rebuilt from the watched toolset ConfigMaps on
 //! every change, and dispatch in-process via `DispatchState`, which spawns the
 //! tool Job.
-//! `Runtime` tools (`read`, `dispatch`, `list`, `Think`, `RecentTurns`) are
-//! statically defined here and dispatched in-process — instruction content is
-//! read directly from this workspace's mounted instructions volume; `dispatch` also
-//! composes a toolset `Turn`. They never fabricate results.
+//! `Runtime` tools (`ReadInstructions`, `DispatchAgent`, `ListInstructions`,
+//! `Think`, `RecentTurns`) are statically defined here and dispatched
+//! in-process — instruction content is read directly from this workspace's
+//! mounted instructions volume; `DispatchAgent` also composes a toolset `Turn`.
+//! They never fabricate results.
+//!
+//! A model call to a toolset tool or `DispatchAgent` is put to the user for
+//! approval before it runs (`tool_approval`). Client-direct calls are not.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,6 +33,10 @@ use crate::execution_log::{assemble_from_frames, frames_from_response, Execution
 use crate::instructions::Instructions;
 use crate::registry::ConversationRegistry;
 use crate::runtime_tools::{self, DispatchAbort};
+use crate::tool_approval::{self, Approval};
+
+/// Mints a fresh relay handle per call.
+type RelaySeam = Arc<dyn Fn() -> Box<dyn RelayRpc> + Send + Sync>;
 
 /// Which subsystem owns a given tool name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,8 +101,9 @@ struct CatalogEntry {
 
 pub(crate) struct ToolRouter<A = UnconfiguredToolset> {
     /// This workspace's instructions reader, backing the in-process `Runtime` arm
-    /// (`read`/`list` content, `dispatch` sub-turn instruction files). Reads the
-    /// mounted read-only instructions volume; no network hop.
+    /// (`ReadInstructions`/`ListInstructions` content, `DispatchAgent` sub-turn
+    /// instruction files). Reads the mounted read-only instructions volume; no
+    /// network hop.
     instructions: Arc<Instructions>,
     /// This harness's own workspace name. Each harness serves only its own
     /// workspace's instructions; the name roots every instructions read.
@@ -104,11 +113,11 @@ pub(crate) struct ToolRouter<A = UnconfiguredToolset> {
     /// unset: agent turns dial the model directly via `InferenceDispatch`.
     toolset: Option<A>,
     /// Dialer for the relay gateway's internal listener. `ChannelStream`-source
-    /// tools push `ServerRequest` frames through it. `None` in tests and when
-    /// no gateway is configured.
-    relay: Option<RelayClient>,
+    /// tools push `ServerRequest` frames through it, and approval requests go
+    /// out on it. `None` when no gateway is configured.
+    relay: Option<RelaySeam>,
     /// Conversation registry — `Runtime`-source tools reach it for
-    /// minting sub-conversations (`dispatch`) and reading history
+    /// minting sub-conversations (`DispatchAgent`) and reading history
     /// (`RecentTurns`).
     registry: Arc<ConversationRegistry>,
     /// Live snapshot keyed by tool name. Toolset pushes overwrite their own
@@ -167,9 +176,9 @@ const RUNTIME_CALL_RETENTION: std::time::Duration = std::time::Duration::from_se
 /// Stand-in for the toolset seam on the client-driven runtime path when no
 /// toolset client is configured. It is also the router's default type
 /// parameter: production leaves the toolset seam unset and drives agent turns
-/// through `InferenceDispatch`. Only the `dispatch` arm of
+/// through `InferenceDispatch`. Only the `DispatchAgent` arm of
 /// `runtime_tools::dispatch` reaches for it, so every instructions-only runtime tool
-/// stays correct without one; a `dispatch` call that does reach for it gets a
+/// stays correct without one; a `DispatchAgent` call that does reach for it gets a
 /// named error rather than a silently different answer.
 #[derive(Clone)]
 pub(crate) struct UnconfiguredToolset;
@@ -231,6 +240,10 @@ fn failed_terminal() -> ToolResultFrame {
     }
 }
 
+fn relay_seam<R: RelayRpc + Clone + Sync + 'static>(relay: R) -> RelaySeam {
+    Arc::new(move || Box::new(relay.clone()) as Box<dyn RelayRpc>)
+}
+
 impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
     pub(crate) fn new(
         instructions: Arc<Instructions>,
@@ -273,7 +286,7 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
             instructions,
             workspace,
             toolset,
-            relay,
+            relay: relay.map(relay_seam),
             registry,
             tools: ArcSwap::new(Arc::new(tools)),
             apply_lock: std::sync::Mutex::new(()),
@@ -283,6 +296,22 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
             calls: Arc::new(RwLock::new(HashMap::new())),
             dispatch: None,
         }
+    }
+
+    /// Install `relay` as the relay every call reaches, in place of the
+    /// `RelayClient` given to `new`.
+    #[cfg(test)]
+    pub(crate) fn with_relay<R: RelayRpc + Clone + Sync + 'static>(self, relay: R) -> Self {
+        self.with_relay_seam(Some(relay_seam(relay)))
+    }
+
+    fn with_relay_seam(mut self, relay: Option<RelaySeam>) -> Self {
+        self.relay = relay;
+        self
+    }
+
+    fn relay_rpc(&self) -> Option<Box<dyn RelayRpc>> {
+        self.relay.as_ref().map(|mint| mint())
     }
 
     /// Attach the in-process tool-call dispatcher. Production wires this at boot
@@ -498,6 +527,11 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
                 let dispatch = self.dispatch.clone().ok_or_else(|| {
                     DispatchAbort::Error("tool dispatch is not configured".into())
                 })?;
+                if let Approval::Refused(refusal) =
+                    self.ask_approval(name, input_json, cancel).await?
+                {
+                    return Ok(refusal);
+                }
                 self.dispatch_toolset_in_process(
                     dispatch,
                     name,
@@ -509,7 +543,14 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
                 .await
             }
             Source::Runtime => {
-                let mut gateway = self.relay.clone();
+                if name == runtime_tools::DISPATCH_AGENT_TOOL_NAME {
+                    if let Approval::Refused(refusal) =
+                        self.ask_approval(name, input_json, cancel).await?
+                    {
+                        return Ok(refusal);
+                    }
+                }
+                let mut gateway = self.relay_rpc();
                 runtime_tools::dispatch(
                     name,
                     input_json,
@@ -520,19 +561,19 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
                     &self.registry,
                     conversation_id,
                     reply_channel_stream,
-                    gateway.as_mut().map(|g| g as &mut dyn RelayRpc),
+                    gateway.as_mut().map(|g| &mut **g as &mut dyn RelayRpc),
                     cancel,
                 )
                 .await
             }
             Source::ChannelStream => {
-                let mut gateway = self.relay.clone().ok_or_else(|| {
+                let mut gateway = self.relay_rpc().ok_or_else(|| {
                     DispatchAbort::Error("relay gateway client not configured".into())
                 })?;
                 channel_stream_tools::dispatch(
                     name,
                     input_json,
-                    &mut gateway,
+                    &mut *gateway,
                     reply_channel_stream,
                     tool_call_id,
                     &self.workspace,
@@ -541,6 +582,23 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
                 .map_err(DispatchAbort::Error)
             }
         }
+    }
+
+    async fn ask_approval(
+        &self,
+        name: &str,
+        input_json: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Approval, DispatchAbort> {
+        let mut relay = self.relay_rpc();
+        tool_approval::ask(
+            relay.as_mut().map(|r| &mut **r as &mut dyn RelayRpc),
+            &self.workspace,
+            name,
+            input_json,
+            cancel,
+        )
+        .await
     }
 
     /// Agent-turn dispatch of a `Source::Toolset` tool through the in-process
@@ -780,7 +838,8 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
         let name = name.to_string();
         let input_json = input_json.to_string();
         let mut toolset = self.toolset.clone();
-        let mut relay = self.relay.clone();
+        let relay_seam = self.relay.clone();
+        let mut relay = self.relay_rpc();
 
         tokio::spawn(async move {
             let mut unconfigured = UnconfiguredToolset;
@@ -796,14 +855,15 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
             // over the same instructions and registry: it advertises and routes the
             // runtime substrate. Client-driven dispatch carries no applied
             // toolset catalog, so toolset tools are unavailable on this path —
-            // `list`/`read` ignore the dispatcher entirely.
+            // `ListInstructions`/`ReadInstructions` ignore the dispatcher entirely.
             let sub_router = ToolRouter::<UnconfiguredToolset>::new(
                 instructions.clone(),
                 workspace.clone(),
                 None,
-                relay.clone(),
+                None,
                 registry.clone(),
-            );
+            )
+            .with_relay_seam(relay_seam);
             let dispatched = runtime_tools::dispatch(
                 &name,
                 &input_json,
@@ -814,7 +874,7 @@ impl<A: ToolsetRpc + Clone + Send + 'static> ToolRouter<A> {
                 &registry,
                 &conversation_id,
                 None,
-                relay.as_mut().map(|g| g as &mut dyn RelayRpc),
+                relay.as_mut().map(|g| &mut **g as &mut dyn RelayRpc),
                 &cancel,
             )
             .await;
@@ -1022,6 +1082,7 @@ impl<A: ToolsetRpc + Clone + Send + Sync + 'static> ToolDispatcher for ToolRoute
 mod tests {
     use super::*;
     use crate::instructions::Instructions;
+    use crate::test_doubles::{RelayAnswer, ScriptedRelay};
     use shared::toolset::ToolDecl;
     use tokio_stream::StreamExt;
 
@@ -1104,7 +1165,7 @@ mod tests {
     fn applied_toolset_preserves_runtime_entries() {
         let router = seed(empty_router(), vec![t("Bash"), t("Git")]);
         let names = names(&router);
-        assert!(names.iter().any(|n| n == "dispatch"));
+        assert!(names.iter().any(|n| n == "DispatchAgent"));
         assert!(names.iter().any(|n| n == "Bash"));
         assert!(names.iter().any(|n| n == "Git"));
     }
@@ -1136,7 +1197,7 @@ mod tests {
         let router = scoped_router(&["clash", "git"]);
 
         let warnings = router.apply_toolsets(&table(vec![
-            ("clash", vec![t("read"), t("Other")]),
+            ("clash", vec![t("ReadInstructions"), t("Other")]),
             ("git", vec![t("git-status")]),
         ]));
 
@@ -1144,8 +1205,8 @@ mod tests {
         let names = names(&router);
         assert!(names.iter().any(|n| n == "git-status"));
         assert!(!names.iter().any(|n| n == "Other"));
-        assert_eq!(names.iter().filter(|n| *n == "read").count(), 1);
-        assert_eq!(router.source_of("read"), Some(Source::Runtime));
+        assert_eq!(names.iter().filter(|n| *n == "ReadInstructions").count(), 1);
+        assert_eq!(router.source_of("ReadInstructions"), Some(Source::Runtime));
     }
 
     #[test]
@@ -1378,17 +1439,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn call_tool_routes_list_through_in_process_runtime_dispatch() {
-        // `list` is Runtime-source, served in-process from the instructions — no gRPC
-        // hop. Against an empty instructions it returns an empty array (not an
-        // "unknown tool" or "not configured" error), proving the call reached
-        // the in-process instructions reader.
+    async fn call_tool_routes_list_instructions_through_in_process_runtime_dispatch() {
+        // `ListInstructions` is Runtime-source, served in-process from the
+        // instructions — no gRPC hop. Against an empty instructions it returns
+        // an empty array (not an "unknown tool" or "not configured" error),
+        // proving the call reached the in-process instructions reader.
         let router = empty_router();
         let mut tb = UnconfiguredToolset;
         let cancel = CancellationToken::new();
         let resp = router
             .call_tool(
-                "list",
+                "ListInstructions",
                 "{}",
                 &no_grants(),
                 &mut tb,
@@ -1398,7 +1459,7 @@ mod tests {
                 &cancel,
             )
             .await
-            .expect("list routes to the in-process runtime dispatch");
+            .expect("ListInstructions routes to the in-process runtime dispatch");
         assert!(!resp.is_error);
         assert_eq!(crate::agent::collect_text(&resp.content), "[]");
     }
@@ -1407,13 +1468,19 @@ mod tests {
     fn source_of_returns_correct_attribution() {
         let router = seed(empty_router(), vec![t("Bash")]);
         assert_eq!(router.source_of("Bash"), Some(Source::Toolset));
-        // read/dispatch are built-in runtime tools.
-        assert_eq!(router.source_of("read"), Some(Source::Runtime));
-        assert_eq!(router.source_of("dispatch"), Some(Source::Runtime));
+        // ReadInstructions/DispatchAgent are built-in runtime tools.
+        assert_eq!(router.source_of("ReadInstructions"), Some(Source::Runtime));
+        assert_eq!(router.source_of("DispatchAgent"), Some(Source::Runtime));
         assert_eq!(router.source_of("Ghost"), None);
     }
 
-    const RUNTIME_TOOLS: &[&str] = &["read", "dispatch", "list", "Think", "RecentTurns"];
+    const RUNTIME_TOOLS: &[&str] = &[
+        "ReadInstructions",
+        "DispatchAgent",
+        "ListInstructions",
+        "Think",
+        "RecentTurns",
+    ];
     const CHANNEL_STREAM_TOOLS: &[&str] = &["RevealPath", "RequestUserInput", "RequestUserAuth"];
 
     /// Router carrying all three sources: runtime + channel-stream from `empty_router`,
@@ -1520,21 +1587,26 @@ mod tests {
         std::fs::create_dir_all(root.join(WS).join("agents")).unwrap();
         std::fs::write(root.join(WS).join("agents/scout.md"), "scout agent").unwrap();
         let instructions = Arc::new(Instructions::new(root));
-        let router: ToolRouter =
-            ToolRouter::new(instructions, WS.to_string(), None, None, test_registry());
 
         // The sub-turn's model stream never terminates on its own — only a
         // fired, forwarded cancel can abandon it. If the router dropped the
         // caller's token (M4 at the `runtime_tools::dispatch(...)` forward) and
         // handed dispatch a fresh never-fired token, this drains forever
         // (hang/timeout) instead of returning Cancelled.
+        //
+        // The token fires while the user approves the call, not before it: a
+        // token fired before the call would stop it at the approval wait and
+        // never reach runtime dispatch.
         let mut turn_seam = EndlessToolset;
         let cancel = CancellationToken::new();
-        cancel.cancel(); // fired before the first poll
+        let router: ToolRouter =
+            ToolRouter::new(instructions, WS.to_string(), None, None, test_registry()).with_relay(
+                ScriptedRelay::new(vec![RelayAnswer::ApproveAndCancel(cancel.clone())]),
+            );
 
         let outcome = router
             .call_tool(
-                "dispatch",
+                "DispatchAgent",
                 r#"{"path":"agents/scout.md","query":"go"}"#,
                 &no_grants(),
                 &mut turn_seam,
@@ -1577,6 +1649,10 @@ mod tests {
         // hang — that hang is the non-blocking clause's teeth.
         let dispatch = in_process_dispatch();
         seed_job(&dispatch, "Bash", "job-x", None).await;
+        // The token fires while the user approves the call: a token fired
+        // before the call would stop it at the approval wait, before
+        // `begin_call`, and the pod would never claim.
+        let cancel = CancellationToken::new();
         let router: ToolRouter = ToolRouter::new(
             test_instructions(),
             WS.to_string(),
@@ -1584,14 +1660,15 @@ mod tests {
             None,
             test_registry(),
         )
-        .with_dispatch(dispatch.clone());
+        .with_dispatch(dispatch.clone())
+        .with_relay(ScriptedRelay::new(vec![RelayAnswer::ApproveAndCancel(
+            cancel.clone(),
+        )]));
         let router = seed(router, vec![t("Bash")]);
 
         let capture = spawn_claiming_pod(&dispatch, "Bash", "job-x");
 
         let mut turn_seam = UnconfiguredToolset; // the in-process arm never touches it
-        let cancel = CancellationToken::new();
-        cancel.cancel(); // fired before dispatch
 
         let outcome = router
             .call_tool(
@@ -1671,7 +1748,8 @@ mod tests {
             None,
             test_registry(),
         )
-        .with_dispatch(dispatch.clone());
+        .with_dispatch(dispatch.clone())
+        .with_relay(ScriptedRelay::new(vec![RelayAnswer::approve()]));
         let router = seed(router, vec![tool_with_arg("Git", "message", "MESSAGE")]);
 
         // The pod: dequeue the assignment for its job, capture the args, then
@@ -1743,7 +1821,8 @@ mod tests {
             None,
             test_registry(),
         )
-        .with_dispatch(dispatch.clone());
+        .with_dispatch(dispatch.clone())
+        .with_relay(ScriptedRelay::new(vec![RelayAnswer::approve()]));
         let router = seed_granted(
             router,
             vec![t("Bash")],
@@ -1803,7 +1882,8 @@ mod tests {
             None,
             test_registry(),
         )
-        .with_dispatch(dispatch.clone());
+        .with_dispatch(dispatch.clone())
+        .with_relay(ScriptedRelay::new(vec![RelayAnswer::approve()]));
         let router = seed(router, vec![t("Bash")]);
 
         let capture = spawn_pod(&dispatch, "Bash", "job-x", vec![done_terminal()]);
@@ -1856,7 +1936,8 @@ mod tests {
             test_registry(),
         )
         .with_dispatch(dispatch.clone())
-        .with_execution_log(log.clone());
+        .with_execution_log(log.clone())
+        .with_relay(ScriptedRelay::new(vec![RelayAnswer::approve()]));
         let router = seed(router, vec![t("Bash")]);
 
         let capture = spawn_pod(
@@ -1929,6 +2010,10 @@ mod tests {
             dir.path().to_path_buf(),
             "test-conv".to_string(),
         ));
+        // The token fires while the user approves the call: a token fired
+        // before the call would stop it at the approval wait, before
+        // `begin_call`, and nothing would be drained into the log.
+        let cancel = CancellationToken::new();
         let router: ToolRouter = ToolRouter::new(
             test_instructions(),
             WS.to_string(),
@@ -1937,7 +2022,10 @@ mod tests {
             test_registry(),
         )
         .with_dispatch(dispatch.clone())
-        .with_execution_log(log.clone());
+        .with_execution_log(log.clone())
+        .with_relay(ScriptedRelay::new(vec![RelayAnswer::ApproveAndCancel(
+            cancel.clone(),
+        )]));
         let router = seed(router, vec![t("Bash")]);
 
         // The runtime streams a partial output line, then — because its child was
@@ -1960,8 +2048,6 @@ mod tests {
         );
 
         let mut turn_seam = UnconfiguredToolset;
-        let cancel = CancellationToken::new();
-        cancel.cancel(); // fired before dispatch: the arm takes the cancel branch
 
         let outcome = router
             .call_tool(
@@ -2370,7 +2456,7 @@ mod tests {
         );
 
         let call_id = router
-            .dispatch_client_tool("list", r#"{"detail":true}"#, &conv_id)
+            .dispatch_client_tool("ListInstructions", r#"{"detail":true}"#, &conv_id)
             .await
             .expect("a Runtime-source tool must resolve in-process on the client path");
 
@@ -2398,7 +2484,7 @@ mod tests {
             ToolRouter::new(test_instructions(), WS.to_string(), None, None, reg.clone());
 
         let call_id = router
-            .dispatch_client_tool("read", r#"{"path":"missing.md"}"#, &conv_id)
+            .dispatch_client_tool("ReadInstructions", r#"{"path":"missing.md"}"#, &conv_id)
             .await
             .expect("a Runtime-source tool must resolve in-process on the client path");
 
@@ -2455,7 +2541,7 @@ mod tests {
     // of the result and must still be servable.
     //
     // This is the production command-menu path: the menu opens with no
-    // conversation selected, dispatches `list`, then awaits.
+    // conversation selected, dispatches `ListInstructions`, then awaits.
     //
     // Retiring the session as soon as the task finishes would drop the only copy
     // of the frames, and the late subscriber would get `NotFound`. The three
@@ -2481,7 +2567,7 @@ mod tests {
         // Empty conversation_id: no execution log is derived at dispatch, so
         // nothing durable can serve this call later.
         let call_id = router
-            .dispatch_client_tool("list", r#"{"detail":true}"#, "")
+            .dispatch_client_tool("ListInstructions", r#"{"detail":true}"#, "")
             .await
             .expect("a Runtime-source tool must resolve in-process on the client path");
 
@@ -2523,5 +2609,782 @@ mod tests {
             0,
             "a rejected ChannelStream dispatch must not reach the in-process dispatcher"
         );
+    }
+
+    // ---- Tool-call approval ----
+
+    use crate::clients::ServerRequestOutcome;
+    use crate::test_doubles::{complete_turn, event_log, EventLog, ScriptedTurns};
+    use proto_common::StopReason;
+
+    const APPROVAL: &str = "RequestToolApproval";
+    const DENIED: &str = "The user denied this tool call. Do not retry it. Wait for the user.";
+    const NO_ANSWER: &str = "The user did not answer in time. This tool call was denied. \
+                             Do not retry it. Wait for the user.";
+    const UNADVERTISED: &str = "client did not advertise `RequestToolApproval`";
+    const RETIRED: &str = "the tool job for Bash was retired before the call reached it";
+
+    /// A router with in-process dispatch, the scripted relay, and toolset
+    /// tool `Bash`.
+    fn gated_router(dispatch: &Arc<DispatchState>, relay: ScriptedRelay) -> ToolRouter {
+        let router: ToolRouter = ToolRouter::new(
+            test_instructions(),
+            WS.to_string(),
+            None,
+            None,
+            test_registry(),
+        )
+        .with_dispatch(dispatch.clone())
+        .with_relay(relay);
+        seed(router, vec![t("Bash")])
+    }
+
+    /// `call_tool` from a primary turn, bounded so a call that waits on a tool
+    /// pod no test provides fails instead of hanging.
+    async fn call_bounded(
+        router: &ToolRouter,
+        name: &str,
+        input_json: &str,
+        cancel: &CancellationToken,
+    ) -> Result<CallToolResponse, DispatchAbort> {
+        let mut tb = UnconfiguredToolset;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            router.call_tool(
+                name,
+                input_json,
+                &no_grants(),
+                &mut tb,
+                "conv",
+                None,
+                "tc",
+                cancel,
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!("call_tool({name}) did not return within 5 s: it is waiting on a tool pod")
+        })
+    }
+
+    fn text_of(resp: &CallToolResponse) -> String {
+        crate::agent::collect_text(&resp.content)
+    }
+
+    fn params_of(request: &crate::test_doubles::RelayRequest) -> serde_json::Value {
+        serde_json::from_str(&request.params_json).expect("params_json is JSON")
+    }
+
+    /// Spawn a pod for `(tool, job_id)` that serves `calls` calls in turn. For
+    /// each it logs `pod claimed`, waits 50 ms, logs `pod result`, then streams
+    /// `frames` back. The wait gives anything that should come after the result
+    /// time to show up before it when the code under test does not wait.
+    fn spawn_logging_pod(
+        dispatch: &Arc<DispatchState>,
+        tool: &str,
+        job_id: &str,
+        calls: usize,
+        frames: Vec<ToolResultFrame>,
+        events: EventLog,
+    ) {
+        let pod_dispatch = dispatch.clone();
+        let tool = tool.to_string();
+        let job_id = job_id.to_string();
+        tokio::spawn(async move {
+            for _ in 0..calls {
+                let call = loop {
+                    if let Some(call) = pod_dispatch.dequeue_call(&tool, &job_id).await {
+                        break call;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                };
+                events.lock().unwrap().push("pod claimed".to_string());
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                events.lock().unwrap().push("pod result".to_string());
+                let _ = pod_dispatch
+                    .forward_result_frames(
+                        call.call_id,
+                        tokio_stream::iter(
+                            frames
+                                .clone()
+                                .into_iter()
+                                .map(Ok::<ToolResultFrame, tonic::Status>),
+                        ),
+                    )
+                    .await;
+            }
+        });
+    }
+
+    fn events_of(events: &EventLog) -> Vec<String> {
+        events.lock().unwrap().clone()
+    }
+
+    /// Instructions holding one agent file at `agents/<name>.md`.
+    fn agent_instructions(name: &str, body: &str) -> Arc<Instructions> {
+        let root = tempfile::TempDir::new().unwrap().keep();
+        std::fs::create_dir_all(root.join(WS).join("agents")).unwrap();
+        std::fs::write(root.join(WS).join(format!("agents/{name}.md")), body).unwrap();
+        Arc::new(Instructions::new(root))
+    }
+
+    #[tokio::test]
+    async fn approved_toolset_call_with_no_warm_pod_is_asked_about_once_before_the_call_is_begun() {
+        // No Job is seeded, so no warm pod is attachable and `begin_call`
+        // answers with the retired-job error the moment it runs. Getting that
+        // error after exactly one approval request means the call was begun,
+        // and only after the user approved it.
+        let dispatch = in_process_dispatch();
+        let relay = ScriptedRelay::new(vec![RelayAnswer::approve()]);
+        let router = gated_router(&dispatch, relay.clone());
+
+        let outcome = call_bounded(&router, "Bash", "{}", &CancellationToken::new()).await;
+
+        assert_eq!(
+            relay.requests_for(APPROVAL).len(),
+            1,
+            "one approval request is sent for the call"
+        );
+        match outcome {
+            Err(DispatchAbort::Error(e)) => {
+                assert_eq!(e, RETIRED, "the approved call reaches begin_call")
+            }
+            other => panic!("expected begin_call's retired-job error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn turn_cancelled_while_a_toolset_call_waits_for_approval_ends_cancelled_without_beginning_the_call(
+    ) {
+        // No Job is seeded: had `begin_call` run before or without approval,
+        // the call would end in the retired-job error, never in Cancelled.
+        let dispatch = in_process_dispatch();
+        let relay = ScriptedRelay::new(vec![RelayAnswer::Never]);
+        let router = gated_router(&dispatch, relay.clone());
+        let cancel = CancellationToken::new();
+
+        let cancel_once_asked = async {
+            for _ in 0..400 {
+                if !relay.requests_for(APPROVAL).is_empty() {
+                    cancel.cancel();
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            cancel.cancel();
+            false
+        };
+        let (outcome, asked) = tokio::join!(
+            call_bounded(&router, "Bash", "{}", &cancel),
+            cancel_once_asked
+        );
+
+        assert!(
+            asked,
+            "the call waits on an approval request, got {outcome:?}"
+        );
+        assert!(
+            matches!(outcome, Err(DispatchAbort::Cancelled)),
+            "a turn cancelled during the approval wait ends cancelled, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn approved_toolset_call_is_asked_about_before_the_warm_pod_claims_it_and_returns_the_pods_result(
+    ) {
+        let dispatch = in_process_dispatch();
+        seed_job(&dispatch, "Bash", "job-x", None).await;
+        let events = event_log();
+        let relay = ScriptedRelay::new(vec![RelayAnswer::approve()]).with_events(events.clone());
+        let router = gated_router(&dispatch, relay);
+        spawn_logging_pod(
+            &dispatch,
+            "Bash",
+            "job-x",
+            1,
+            vec![stdout_frame("warm pod output"), done_terminal()],
+            events.clone(),
+        );
+
+        let resp = call_bounded(&router, "Bash", "{}", &CancellationToken::new())
+            .await
+            .expect("an approved call returns the tool's result");
+
+        assert_eq!(
+            events_of(&events),
+            vec![
+                format!("request {APPROVAL}"),
+                "pod claimed".to_string(),
+                "pod result".to_string(),
+            ],
+            "the approval request comes before the warm pod claims the call"
+        );
+        assert!(!resp.is_error, "the warm pod's result is not an error");
+        assert_eq!(text_of(&resp), "warm pod output");
+    }
+
+    #[tokio::test]
+    async fn approval_request_goes_to_the_workspace_names_the_tool_carries_its_input_verbatim_and_asks_for_a_300_second_wait(
+    ) {
+        let dispatch = in_process_dispatch();
+        seed_job(&dispatch, "Bash", "job-x", None).await;
+        let relay = ScriptedRelay::new(vec![RelayAnswer::deny()]);
+        let router = gated_router(&dispatch, relay.clone());
+        // Malformed and oddly spaced: only the raw text survives unchanged.
+        let raw = "{ \"cmd\" :  \"ls\" ,";
+
+        let _ = call_bounded(&router, "Bash", raw, &CancellationToken::new()).await;
+
+        let requests = relay.requests_for(APPROVAL);
+        assert_eq!(requests.len(), 1, "one approval request is sent");
+        let params = params_of(&requests[0]);
+        assert!(params.is_object(), "params_json is a JSON object: {params}");
+        assert_eq!(params["tool"], "Bash");
+        assert_eq!(
+            params["input"], raw,
+            "the input is the model's text, unchanged"
+        );
+        assert_eq!(requests[0].timeout_seconds, 300);
+        assert_eq!(
+            requests[0].workspace, WS,
+            "the request goes to the workspace"
+        );
+    }
+
+    #[tokio::test]
+    async fn toolset_call_without_an_explicit_approval_is_refused_and_never_handed_to_the_warm_pod()
+    {
+        fn result(json: &str) -> RelayAnswer {
+            RelayAnswer::Outcome(ServerRequestOutcome::Result(json.to_string()))
+        }
+        // `None` expects the send-and-wait failure on the call's error path.
+        let cases: Vec<(&str, RelayAnswer, Option<&str>)> = vec![
+            ("denied", RelayAnswer::deny(), Some(DENIED)),
+            (
+                "client error",
+                RelayAnswer::Outcome(ServerRequestOutcome::Error {
+                    code: 1,
+                    message: "boom".into(),
+                }),
+                Some(DENIED),
+            ),
+            (
+                "approved as a string",
+                result(r#"{"approved":"true"}"#),
+                Some(DENIED),
+            ),
+            (
+                "approved as a number",
+                result(r#"{"approved":1}"#),
+                Some(DENIED),
+            ),
+            ("not an object", result("true"), Some(DENIED)),
+            (
+                "timed out",
+                RelayAnswer::Outcome(ServerRequestOutcome::TimedOut),
+                Some(NO_ANSWER),
+            ),
+            (
+                "method not advertised",
+                RelayAnswer::Outcome(ServerRequestOutcome::UnsupportedMethod),
+                Some(UNADVERTISED),
+            ),
+            (
+                "no channel stream",
+                RelayAnswer::Outcome(ServerRequestOutcome::UnknownChannelStream),
+                Some(UNADVERTISED),
+            ),
+            (
+                "send-and-wait failed",
+                RelayAnswer::Err("relay unreachable".into()),
+                None,
+            ),
+        ];
+
+        for (case, answer, want) in cases {
+            let dispatch = in_process_dispatch();
+            seed_job(&dispatch, "Bash", "job-x", None).await;
+            let relay = ScriptedRelay::new(vec![answer]);
+            let router = gated_router(&dispatch, relay.clone());
+
+            let outcome = call_bounded(&router, "Bash", "{}", &CancellationToken::new()).await;
+
+            assert_eq!(
+                relay.requests_for(APPROVAL).len(),
+                1,
+                "{case}: one approval request is sent"
+            );
+            match (want, outcome) {
+                (Some(text), Ok(resp)) => {
+                    assert!(resp.is_error, "{case}: the refusal is an error tool result");
+                    assert_eq!(text_of(&resp), text, "{case}: the refusal's whole text");
+                }
+                (None, Err(DispatchAbort::Error(e))) => assert!(
+                    e.contains("relay unreachable"),
+                    "{case}: the call's error carries the relay error, got {e:?}"
+                ),
+                (_, other) => panic!("{case}: unexpected outcome {other:?}"),
+            }
+            assert_eq!(
+                dispatch.pending_call_count().await,
+                0,
+                "{case}: the call is never handed to the warm pod"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn toolset_call_on_a_router_without_a_relay_is_refused_as_unadvertised_and_never_begun() {
+        let dispatch = in_process_dispatch();
+        seed_job(&dispatch, "Bash", "job-x", None).await;
+        let router: ToolRouter = ToolRouter::new(
+            test_instructions(),
+            WS.to_string(),
+            None,
+            None,
+            test_registry(),
+        )
+        .with_dispatch(dispatch.clone());
+        let router = seed(router, vec![t("Bash")]);
+
+        let resp = call_bounded(&router, "Bash", "{}", &CancellationToken::new())
+            .await
+            .expect("the refusal is a tool result, not an abort");
+
+        assert!(resp.is_error);
+        assert_eq!(text_of(&resp), UNADVERTISED);
+        assert_eq!(
+            dispatch.pending_call_count().await,
+            0,
+            "the call is never handed to the warm pod"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_agent_call_is_asked_about_by_name_before_any_sub_turn_model_request() {
+        let reg = test_registry();
+        let parent = reg.mint("owner").await.unwrap();
+        let events = event_log();
+        let relay = ScriptedRelay::new(vec![RelayAnswer::approve()]).with_events(events.clone());
+        let mut turns =
+            ScriptedTurns::new(vec![complete_turn(StopReason::EndTurn, "sub reply", &[])])
+                .with_events(events.clone());
+        let router: ToolRouter = ToolRouter::new(
+            agent_instructions("scout", "scout agent"),
+            WS.to_string(),
+            None,
+            None,
+            reg,
+        )
+        .with_relay(relay.clone());
+
+        let _ = router
+            .call_tool(
+                "DispatchAgent",
+                r#"{"path":"agents/scout.md","query":"go"}"#,
+                &no_grants(),
+                &mut turns,
+                &parent,
+                None,
+                "tc",
+                &CancellationToken::new(),
+            )
+            .await;
+
+        assert_eq!(
+            events_of(&events),
+            vec![format!("request {APPROVAL}"), "model turn".to_string()],
+            "the approval request comes before the sub-turn's model request"
+        );
+        assert_eq!(
+            params_of(&relay.requests_for(APPROVAL)[0])["tool"],
+            "DispatchAgent"
+        );
+    }
+
+    #[tokio::test]
+    async fn denied_dispatch_agent_call_returns_the_denied_text_without_starting_the_sub_agent() {
+        let reg = test_registry();
+        let parent = reg.mint("owner").await.unwrap();
+        let mut turns = ScriptedTurns::new(vec![]);
+        let router: ToolRouter = ToolRouter::new(
+            agent_instructions("scout", "scout agent"),
+            WS.to_string(),
+            None,
+            None,
+            reg.clone(),
+        )
+        .with_relay(ScriptedRelay::new(vec![RelayAnswer::deny()]));
+
+        let resp = router
+            .call_tool(
+                "DispatchAgent",
+                r#"{"path":"agents/scout.md","query":"go"}"#,
+                &no_grants(),
+                &mut turns,
+                &parent,
+                None,
+                "tc",
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("the denial is a tool result, not an abort");
+
+        assert!(resp.is_error);
+        assert_eq!(
+            text_of(&resp),
+            DENIED,
+            "the whole text, with no dispatch prefix"
+        );
+        assert_eq!(turns.turn_count(), 0, "no sub-turn model request is made");
+        assert_eq!(
+            reg.list_summaries("owner").await.len(),
+            1,
+            "no sub-conversation is minted beside the parent"
+        );
+    }
+
+    #[tokio::test]
+    async fn approved_dispatch_agent_whose_sub_turn_calls_a_granted_toolset_tool_asks_again_before_the_pod_claims_it(
+    ) {
+        let dispatch = in_process_dispatch();
+        seed_job(&dispatch, "Bash", "job-x", None).await;
+        let reg = test_registry();
+        let parent = reg.mint("owner").await.unwrap();
+        let events = event_log();
+        let relay = ScriptedRelay::new(vec![RelayAnswer::approve(), RelayAnswer::approve()])
+            .with_events(events.clone());
+        let mut turns = ScriptedTurns::new(vec![
+            complete_turn(StopReason::ToolUse, "", &[("tc-sub", "Bash", "{}")]),
+            complete_turn(StopReason::EndTurn, "built", &[]),
+        ]);
+        let router: ToolRouter = ToolRouter::new(
+            agent_instructions("builder", "---\ntools: [Bash]\n---\nbuild things"),
+            WS.to_string(),
+            None,
+            None,
+            reg,
+        )
+        .with_dispatch(dispatch.clone())
+        .with_relay(relay.clone());
+        let router = seed(router, vec![t("Bash")]);
+        spawn_logging_pod(
+            &dispatch,
+            "Bash",
+            "job-x",
+            1,
+            vec![done_terminal()],
+            events.clone(),
+        );
+
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            router.call_tool(
+                "DispatchAgent",
+                r#"{"path":"agents/builder.md","query":"go"}"#,
+                &no_grants(),
+                &mut turns,
+                &parent,
+                None,
+                "tc",
+                &CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("the dispatched agent finishes");
+
+        let asked: Vec<serde_json::Value> = relay
+            .requests_for(APPROVAL)
+            .iter()
+            .map(|r| params_of(r)["tool"].clone())
+            .collect();
+        assert_eq!(asked, vec!["DispatchAgent", "Bash"]);
+        let events = events_of(&events);
+        let second_request = events
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| *e == &format!("request {APPROVAL}"))
+            .nth(1)
+            .map(|(i, _)| i);
+        let claim = events.iter().position(|e| e == "pod claimed");
+        assert!(
+            matches!((second_request, claim), (Some(r), Some(c)) if r < c),
+            "the sub-turn's call is asked about before the pod claims it: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tools_that_need_no_approval_run_without_an_approval_request() {
+        let root = tempfile::TempDir::new().unwrap().keep();
+        std::fs::create_dir_all(root.join(WS).join("skills")).unwrap();
+        std::fs::write(root.join(WS).join("skills/a.md"), "# A\n\nAlpha.\n").unwrap();
+        let reg = test_registry();
+        let conv = reg.mint("owner").await.unwrap();
+        let relay = ScriptedRelay::new(vec![]);
+        let router: ToolRouter = ToolRouter::new(
+            Arc::new(Instructions::new(root)),
+            WS.to_string(),
+            None,
+            None,
+            reg,
+        )
+        .with_relay(relay.clone());
+
+        for (name, input) in [
+            ("RevealPath", r#"{"path":"/tmp/x"}"#),
+            ("RequestUserInput", r#"{"prompt":"which?"}"#),
+            ("RequestUserAuth", r#"{"provider":"x"}"#),
+            ("ReadInstructions", r#"{"path":"skills/a.md"}"#),
+            ("ListInstructions", "{}"),
+            ("RecentTurns", "{}"),
+            ("Think", r#"{"note":"n"}"#),
+        ] {
+            let mut tb = UnconfiguredToolset;
+            let resp = router
+                .call_tool(
+                    name,
+                    input,
+                    &no_grants(),
+                    &mut tb,
+                    &conv,
+                    Some("cs-1"),
+                    "tc",
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap_or_else(|e| panic!("{name} runs, got {e:?}"));
+            assert!(!resp.is_error, "{name} runs, got {:?}", text_of(&resp));
+        }
+        assert!(
+            relay.requests_for(APPROVAL).is_empty(),
+            "none of these tools asks for approval"
+        );
+    }
+
+    #[tokio::test]
+    async fn client_direct_toolset_and_dispatch_agent_calls_run_without_an_approval_request() {
+        let dispatch = in_process_dispatch();
+        seed_job(&dispatch, "Bash", "job-x", None).await;
+        let reg = test_registry();
+        let conv = reg.mint("owner").await.unwrap();
+        let relay = ScriptedRelay::new(vec![]);
+        let turns = ScriptedTurns::new(vec![complete_turn(StopReason::EndTurn, "sub reply", &[])]);
+        let router = ToolRouter::<ScriptedTurns>::new(
+            agent_instructions("scout", "scout agent"),
+            WS.to_string(),
+            Some(turns.clone()),
+            None,
+            reg,
+        )
+        .with_dispatch(dispatch.clone())
+        .with_relay(relay.clone());
+        let router = seed(router, vec![t("Bash")]);
+
+        let capture = spawn_pod(&dispatch, "Bash", "job-x", vec![done_terminal()]);
+        router
+            .dispatch_client_tool("Bash", "{}", &conv)
+            .await
+            .expect("the client's toolset call is dispatched");
+        claimed(&capture).await;
+
+        let call_id = router
+            .dispatch_client_tool(
+                "DispatchAgent",
+                r#"{"path":"agents/scout.md","query":"go"}"#,
+                &conv,
+            )
+            .await
+            .expect("the client's DispatchAgent call is dispatched");
+        let mut stream = router
+            .await_client_tool(&call_id, &conv)
+            .await
+            .expect("the dispatched call is awaitable");
+        let mut frames = Vec::new();
+        while let Some(item) = stream.next().await {
+            frames.push(item.expect("a frame"));
+        }
+        let resp = assemble_from_frames(&frames);
+        assert_eq!(text_of(&resp), "sub reply", "the sub-agent ran");
+        assert_eq!(turns.turn_count(), 1);
+
+        assert!(
+            relay.requests_for(APPROVAL).is_empty(),
+            "client-direct calls ask for no approval"
+        );
+    }
+
+    #[test]
+    fn catalog_advertises_the_title_case_instruction_tools_and_none_of_the_old_names() {
+        let names = names(&empty_router());
+        for want in ["ReadInstructions", "ListInstructions", "DispatchAgent"] {
+            assert!(
+                names.iter().any(|n| n == want),
+                "{want} missing from {names:?}"
+            );
+        }
+        for old in ["read", "list", "dispatch"] {
+            assert!(!names.iter().any(|n| n == old), "{old} still in {names:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn old_instruction_tool_names_are_unknown_to_model_and_client_calls_and_ask_nothing() {
+        let relay = ScriptedRelay::new(vec![]);
+        let router: ToolRouter = ToolRouter::new(
+            agent_instructions("scout", "scout agent"),
+            WS.to_string(),
+            None,
+            None,
+            test_registry(),
+        )
+        .with_relay(relay.clone());
+
+        for (old, input) in [
+            ("read", r#"{"path":"agents/scout.md"}"#),
+            ("list", "{}"),
+            ("dispatch", r#"{"path":"agents/scout.md","query":"go"}"#),
+        ] {
+            let mut tb = UnconfiguredToolset;
+            let err = router
+                .call_tool(
+                    old,
+                    input,
+                    &no_grants(),
+                    &mut tb,
+                    "conv",
+                    None,
+                    "tc",
+                    &CancellationToken::new(),
+                )
+                .await
+                .expect_err("an old name is not a tool");
+            assert_dispatch_error(err, &format!("unknown tool: {old}"));
+
+            let err = router
+                .dispatch_client_tool(old, input, "conv")
+                .await
+                .expect_err("an old name is not client-dispatchable");
+            assert!(
+                err.contains(&format!("unknown tool: {old}")),
+                "client call to {old}: {err:?}"
+            );
+        }
+        assert!(relay.requests_for(APPROVAL).is_empty());
+    }
+
+    /// Run one primary turn through `llm_loop` with this router.
+    async fn run_primary_turn(
+        router: &ToolRouter,
+        turns: &mut ScriptedTurns,
+    ) -> Result<String, crate::agent::LoopError> {
+        use crate::agent::{llm_loop, LoopMode};
+        use crate::conversation::{
+            AssistantAttribution, ConversationLog, HistoryScope, LocalFsStore,
+        };
+        let tmp = tempfile::TempDir::new().unwrap().keep();
+        let log = RwLock::new(ConversationLog::new(Arc::new(LocalFsStore::new(tmp))));
+        let mut sink = crate::turn::NullSink;
+        let scrub = shared::scrub::ScrubSet::from_env_var("__UNSET_APPROVAL_SCRUB__");
+        let request = toolset_proto::TurnRequest {
+            system: None,
+            tools: vec![],
+            messages: vec![proto_common::Message {
+                role: "user".into(),
+                content: vec![crate::agent::text_block("go".into())],
+                tool_calls: vec![],
+                tool_call_id: None,
+                is_error: None,
+            }],
+            model: None,
+            reply_channel_stream: None,
+            role: None,
+            correlation_id: None,
+            conversation_id: "conv".into(),
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            llm_loop(
+                10,
+                turns,
+                router,
+                &log,
+                HistoryScope::Orchestrator,
+                AssistantAttribution::default(),
+                request,
+                LoopMode {
+                    reply_channel_stream: None,
+                    idle_gap: std::time::Duration::from_secs(45),
+                    cancel: CancellationToken::new(),
+                    grants: HashMap::new(),
+                },
+                &mut sink,
+                &scrub,
+            ),
+        )
+        .await
+        .expect("the turn finishes")
+    }
+
+    fn two_bash_calls_then_done() -> ScriptedTurns {
+        ScriptedTurns::new(vec![
+            complete_turn(
+                StopReason::ToolUse,
+                "",
+                &[("tc1", "Bash", "{}"), ("tc2", "Bash", "{}")],
+            ),
+            complete_turn(StopReason::EndTurn, "done", &[]),
+        ])
+    }
+
+    #[tokio::test]
+    async fn second_toolset_call_in_a_reply_is_asked_about_only_after_the_first_was_answered_and_finished(
+    ) {
+        let dispatch = in_process_dispatch();
+        seed_job(&dispatch, "Bash", "job-x", None).await;
+        let events = event_log();
+        let relay = ScriptedRelay::new(vec![RelayAnswer::approve(), RelayAnswer::approve()])
+            .with_events(events.clone());
+        let router = gated_router(&dispatch, relay);
+        spawn_logging_pod(
+            &dispatch,
+            "Bash",
+            "job-x",
+            2,
+            vec![done_terminal()],
+            events.clone(),
+        );
+
+        let mut turns = two_bash_calls_then_done();
+        let result = run_primary_turn(&router, &mut turns).await;
+
+        assert!(matches!(result, Ok(ref s) if s == "done"), "got {result:?}");
+        let request = format!("request {APPROVAL}");
+        assert_eq!(
+            events_of(&events),
+            vec![
+                request.clone(),
+                "pod claimed".to_string(),
+                "pod result".to_string(),
+                request,
+                "pod claimed".to_string(),
+                "pod result".to_string(),
+            ],
+            "each call is asked about only after the previous one finished"
+        );
+    }
+
+    #[tokio::test]
+    async fn denying_the_first_toolset_call_in_a_reply_still_asks_about_the_second() {
+        let dispatch = in_process_dispatch();
+        seed_job(&dispatch, "Bash", "job-x", None).await;
+        let relay = ScriptedRelay::new(vec![RelayAnswer::deny(), RelayAnswer::approve()]);
+        let router = gated_router(&dispatch, relay.clone());
+        spawn_pod(&dispatch, "Bash", "job-x", vec![done_terminal()]);
+
+        let mut turns = two_bash_calls_then_done();
+        let result = run_primary_turn(&router, &mut turns).await;
+
+        assert!(matches!(result, Ok(ref s) if s == "done"), "got {result:?}");
+        assert_eq!(relay.requests_for(APPROVAL).len(), 2);
     }
 }

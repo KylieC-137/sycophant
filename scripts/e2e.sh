@@ -394,13 +394,14 @@ E2E_FETCH_CONV=""
 E2E_CHAT_CONV=""
 
 # tool_chat <config-dir> <tool> <prompt> [chat args...]
-# One syco chat turn that must call <tool>. Prints only the conversation ID
+# One syco chat turn that must call <tool>. Every tool-call approval in the
+# turn is answered `y`, as a user would. Prints only the conversation ID
 # syco chat reports on stderr; every log line goes to stderr.
 tool_chat() {
   local dir="$1" tool="$2" prompt="$3"; shift 3
   local out err conv
   err="$(mktemp)"
-  if ! out="$(SYCO_CONFIG_DIR="$dir" "$REPO_ROOT/target/syco" chat "$prompt" "$@" 2>"$err")"; then
+  if ! out="$(SYCO_CONFIG_DIR="$dir" "$REPO_ROOT/target/syco" chat "$prompt" "$@" 2>"$err" < <(yes))"; then
     warn "syco chat (${tool}) exited non-zero: ${out} $(cat "$err")"
     rm -f "$err"
     return 1
@@ -574,7 +575,7 @@ step_5b_syco_cli_chat() {
   # Returns the one-shot's exit status, or 124 when it was killed at the bound.
   bounded_chat() {
     local dir="$1" bound="$2" out="$3" err="$4"; shift 4
-    SYCO_CONFIG_DIR="$dir" "$REPO_ROOT/target/syco" chat "$@" >"$out" 2>"$err" &
+    SYCO_CONFIG_DIR="$dir" "$REPO_ROOT/target/syco" chat "$@" < <(yes) >"$out" 2>"$err" &
     local pid=$! rc=0
     if ! wait_for "one-shot to exit" "$bound" "! kill -0 $pid 2>/dev/null"; then
       kill -9 "$pid" 2>/dev/null || true
@@ -629,7 +630,7 @@ step_5b_syco_cli_chat() {
   }
   k_saved_or_exited() { k_saved || ! kill -0 "$k_pid" 2>/dev/null; }
   SYCO_CONFIG_DIR="$k_dir" "$REPO_ROOT/target/syco" chat "$k_msg" \
-    >"$k_dir/out" 2>"$k_dir/err" &
+    < <(yes) >"$k_dir/out" 2>"$k_dir/err" &
   k_pid=$!
   if ! wait_for "a hello-world history line from the running one-shot" 300 k_saved_or_exited; then
     kill -9 "$k_pid" 2>/dev/null || true

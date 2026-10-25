@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -29,7 +30,9 @@ const testWorkspace = "w-test"
 // It acks every ChannelStreamReceive with a fresh channel stream ID and then sends only
 // the frames a test pushes onto that stream. It acks ChannelStreamIngest with the
 // conversation the request names, or with freshID when it names none, and
-// from then on that conversation's history holds the user's message. It
+// from then on that conversation's history holds the user's message. An
+// ingest that answers a ServerRequest is acked as it is and touches no
+// history. Every ingest is recorded. It
 // answers GetConversationHistory with the scripted entries for conversations
 // it knows and NotFound for any other ID, and GetTurnState with the scripted
 // state (IDLE unless a test sets another).
@@ -46,6 +49,10 @@ type fakeGateway struct {
 
 	streamCh chan *fakeStream
 	ingestCh chan struct{}
+
+	// responseCh carries each ingest that answers a ServerRequest.
+	ingests    []*commonpb.ChannelStreamIngestRequest
+	responseCh chan *commonpb.ChannelStreamIngestRequest
 }
 
 // fakeStream is one open ChannelStreamReceive. Frames pushed onto it are sent in
@@ -73,12 +80,13 @@ func startFakeGateway(t *testing.T) *fakeGateway {
 		t.Fatalf("listen: %v", err)
 	}
 	f := &fakeGateway{
-		addr:      lis.Addr().String(),
-		history:   make(map[string][]*commonpb.HistoryEntry),
-		turnState: commonpb.TurnState_TURN_STATE_IDLE,
-		freshID:   "conv-fresh",
-		streamCh:  make(chan *fakeStream, 16),
-		ingestCh:  make(chan struct{}, 16),
+		addr:       lis.Addr().String(),
+		history:    make(map[string][]*commonpb.HistoryEntry),
+		turnState:  commonpb.TurnState_TURN_STATE_IDLE,
+		freshID:    "conv-fresh",
+		streamCh:   make(chan *fakeStream, 16),
+		ingestCh:   make(chan struct{}, 16),
+		responseCh: make(chan *commonpb.ChannelStreamIngestRequest, 16),
 	}
 	srv := grpc.NewServer()
 	relaypb.RegisterRelayGatewayServer(srv, f)
@@ -135,6 +143,35 @@ func (f *fakeGateway) nextIngest(t *testing.T, timeout time.Duration) {
 	}
 }
 
+// ingestLog is a copy of every ChannelStreamIngest request so far, in order.
+func (f *fakeGateway) ingestLog() []*commonpb.ChannelStreamIngestRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*commonpb.ChannelStreamIngestRequest(nil), f.ingests...)
+}
+
+// nextResponse waits for the next ingest that answers a ServerRequest.
+func (f *fakeGateway) nextResponse(t *testing.T, timeout time.Duration) *commonpb.ChannelStreamIngestRequest {
+	t.Helper()
+	select {
+	case req := <-f.responseCh:
+		return req
+	case <-time.After(timeout):
+		t.Fatalf("client sent no ClientResponse within %v", timeout)
+		return nil
+	}
+}
+
+// noResponse fails the test if the client answers a ServerRequest within d.
+func (f *fakeGateway) noResponse(t *testing.T, d time.Duration) {
+	t.Helper()
+	select {
+	case req := <-f.responseCh:
+		t.Fatalf("client sent an unexpected ClientResponse: %v", req.GetClientResponse())
+	case <-time.After(d):
+	}
+}
+
 func (f *fakeGateway) ChannelStreamReceive(
 	_ *commonpb.ChannelStreamReceiveRequest,
 	stream grpc.ServerStreamingServer[commonpb.ChannelStreamOutbound],
@@ -174,6 +211,12 @@ func (f *fakeGateway) ChannelStreamIngest(
 	req *commonpb.ChannelStreamIngestRequest,
 ) (*commonpb.ChannelStreamIngestAck, error) {
 	f.mu.Lock()
+	f.ingests = append(f.ingests, req)
+	if req.GetClientResponse() != nil {
+		f.mu.Unlock()
+		f.responseCh <- req
+		return &commonpb.ChannelStreamIngestAck{ChannelStreamId: req.GetChannelStreamId(), ConversationId: req.GetConversationId()}, nil
+	}
 	id := req.GetConversationId()
 	if id == "" {
 		id = f.freshID
@@ -231,6 +274,14 @@ func turnStateFrame(conversationID string, state commonpb.TurnState) *commonpb.C
 	return &commonpb.ChannelStreamOutbound{
 		Command: &commonpb.ChannelStreamOutbound_TurnState{
 			TurnState: &commonpb.TurnStateEvent{State: state, ConversationId: conversationID},
+		},
+	}
+}
+
+func serverRequestFrame(requestID, method, paramsJSON string) *commonpb.ChannelStreamOutbound {
+	return &commonpb.ChannelStreamOutbound{
+		Command: &commonpb.ChannelStreamOutbound_ServerRequest{
+			ServerRequest: &commonpb.ServerRequest{RequestId: requestID, Method: method, ParamsJson: paramsJSON},
 		},
 	}
 }
@@ -347,9 +398,14 @@ type chatRun struct {
 }
 
 func startChat(args ...string) *chatRun {
+	return startChatWithStdin(nil, args...)
+}
+
+func startChatWithStdin(stdin io.Reader, args ...string) *chatRun {
 	r := &chatRun{stdout: &syncBuffer{}, stderr: &syncBuffer{}, done: make(chan error, 1)}
 	root := Root()
 	root.SetArgs(append([]string{"chat"}, args...))
+	root.SetIn(stdin)
 	root.SetOut(r.stdout)
 	root.SetErr(r.stderr)
 	go func() { r.done <- root.Execute() }()

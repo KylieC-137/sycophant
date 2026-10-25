@@ -1,24 +1,26 @@
-//! Harness-local runtime tools: `read`, `dispatch`, `list`, `Think`, and
-//! `RecentTurns`.
+//! Harness-local runtime tools: `ReadInstructions`, `DispatchAgent`,
+//! `ListInstructions`, `Think`, and `RecentTurns`.
 //!
 //! These are framework-defined tools the LLM can call. The harness advertises
 //! them alongside the toolset-served tools and dispatches them in-process.
 //! Instruction content is read directly from this workspace's mounted instructions
 //! volume as an arbitrary read-only file tree; they never fabricate results.
 //!
-//! `read(path, offset?, limit?)` returns the body of any file in the tree by
-//! relative path, optionally sliced to a 1-based line window.
+//! `ReadInstructions(path, offset?, limit?)` returns the body of any file in the
+//! tree by relative path, optionally sliced to a 1-based line window.
 //!
-//! `dispatch(path, query)` loads any instruction file, strips its frontmatter
+//! `DispatchAgent(path, query)` loads any instruction file, strips its frontmatter
 //! into runtime configuration, and runs a fresh isolated sub-turn whose model
 //! and toolset tools come only from that frontmatter, with the stripped body as
 //! the system prompt and `query` as the user input. Every sub-turn is advertised
-//! the always-on runtime substrate (`read`/`dispatch`/`list`/`Think`) on top of
-//! the frontmatter-named toolset tools, and runs a bounded tool-use loop until
-//! it returns a final response. There is no single-shot mode.
+//! the always-on runtime substrate (`ReadInstructions`/`DispatchAgent`/
+//! `ListInstructions`/`Think`) on top of the frontmatter-named toolset tools,
+//! and runs a bounded tool-use loop until it returns a final response. There is
+//! no single-shot mode.
 //!
-//! `list()` returns a flat, sorted, capped list of the tree's file paths. The
-//! client command menu passes `{"detail":true}` to get `[{name, description}]`.
+//! `ListInstructions()` returns a flat, sorted, capped list of the tree's file
+//! paths. The client command menu passes `{"detail":true}` to get
+//! `[{name, description}]`.
 
 use proto_common::{content_text, CallToolResponse, Message, ToolDefinition, ToolInfo};
 use serde::{Deserialize, Serialize};
@@ -41,13 +43,13 @@ use crate::agent::collect_text;
 #[cfg(test)]
 use proto_common::StopReason;
 
-const READ_TOOL_NAME: &str = "read";
-const DISPATCH_TOOL_NAME: &str = "dispatch";
-const LIST_TOOL_NAME: &str = "list";
+const READ_INSTRUCTIONS_TOOL_NAME: &str = "ReadInstructions";
+pub(crate) const DISPATCH_AGENT_TOOL_NAME: &str = "DispatchAgent";
+const LIST_INSTRUCTIONS_TOOL_NAME: &str = "ListInstructions";
 pub(crate) const THINK_TOOL_NAME: &str = "Think";
 pub(crate) const RECENT_TURNS_TOOL_NAME: &str = "RecentTurns";
 
-/// Cap on the number of paths `list` returns.
+/// Cap on the number of paths `ListInstructions` returns.
 const LIST_CAP: usize = 1000;
 
 /// Upper bound on a dispatched sub-turn's tool-use rounds, mirroring the
@@ -70,7 +72,7 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
     vec![
         ToolInfo {
             toolset: String::new(),
-            name: READ_TOOL_NAME.into(),
+            name: READ_INSTRUCTIONS_TOOL_NAME.into(),
             description: "Read a file from the workspace instruction tree by relative path and \
                           return its contents. Optional 1-based `offset`/`limit` line numbers \
                           return only that window of lines."
@@ -97,7 +99,7 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
         },
         ToolInfo {
             toolset: String::new(),
-            name: DISPATCH_TOOL_NAME.into(),
+            name: DISPATCH_AGENT_TOOL_NAME.into(),
             description: "Dispatch a sub-turn defined by an instruction file: load the file at \
                           the given path, use its body as the system prompt, and run the query \
                           against the model and tools its frontmatter names. Returns the \
@@ -121,7 +123,7 @@ pub(crate) fn tool_definitions() -> Vec<ToolInfo> {
         },
         ToolInfo {
             toolset: String::new(),
-            name: LIST_TOOL_NAME.into(),
+            name: LIST_INSTRUCTIONS_TOOL_NAME.into(),
             description: "List the file paths available in this workspace's instruction tree, as \
                           a flat sorted array of relative paths."
                 .into(),
@@ -245,9 +247,9 @@ pub(crate) async fn dispatch(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<CallToolResponse, DispatchAbort> {
     match name {
-        READ_TOOL_NAME => dispatch_read(input_json, instructions, workspace),
-        LIST_TOOL_NAME => dispatch_list(input_json, instructions, workspace),
-        DISPATCH_TOOL_NAME => {
+        READ_INSTRUCTIONS_TOOL_NAME => dispatch_read(input_json, instructions, workspace),
+        LIST_INSTRUCTIONS_TOOL_NAME => dispatch_list(input_json, instructions, workspace),
+        DISPATCH_AGENT_TOOL_NAME => {
             dispatch_verb(
                 input_json,
                 instructions,
@@ -285,8 +287,8 @@ pub(crate) async fn dispatch(
     }
 }
 
-/// `read(path, offset?, limit?)`: return a file's body from the workspace
-/// instruction tree, optionally sliced to a 1-based line window. A
+/// `ReadInstructions(path, offset?, limit?)`: return a file's body from the
+/// workspace instruction tree, optionally sliced to a 1-based line window. A
 /// missing/invalid/escaping path folds into an `is_error` tool result the LLM
 /// sees; an I/O failure is a true infra abort.
 fn dispatch_read(
@@ -317,9 +319,9 @@ fn dispatch_read(
     }
 }
 
-/// `list()`: the workspace tree's flat sorted file paths, capped. `{detail:true}`
-/// returns `[{name, description}]` (path plus the file's first paragraph); the
-/// default returns a bare paths array.
+/// `ListInstructions()`: the workspace tree's flat sorted file paths, capped.
+/// `{detail:true}` returns `[{name, description}]` (path plus the file's first
+/// paragraph); the default returns a bare paths array.
 fn dispatch_list(
     input_json: &str,
     instructions: &Instructions,
@@ -420,7 +422,7 @@ fn dispatch_think(input_json: &str) -> Result<CallToolResponse, String> {
     }
 }
 
-/// `dispatch(path, query)`: read the instruction file at `path`, strip its
+/// `DispatchAgent(path, query)`: read the instruction file at `path`, strip its
 /// frontmatter into runtime configuration, and run a fresh isolated sub-turn on
 /// the file's model with its body as the system prompt. The sub-turn is
 /// advertised the always-on runtime substrate plus the toolset tools the
@@ -629,6 +631,7 @@ mod tests {
     use super::*;
     use crate::clients::TurnSource;
     use crate::instructions::Instructions;
+    use crate::test_doubles::ScriptedSource;
     use crate::tool_router::ToolDispatcher;
     use proto_common::{content_block, ContentBlock, TextBlock, ToolCall};
     use std::collections::{HashMap, VecDeque};
@@ -653,17 +656,6 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join(WS)).unwrap();
         let instructions = Instructions::new(tmp.path());
         (tmp, instructions)
-    }
-
-    struct FakeTurnSource {
-        events: VecDeque<TurnEvent>,
-    }
-
-    #[async_trait::async_trait]
-    impl TurnSource for FakeTurnSource {
-        async fn next_event(&mut self) -> Option<Result<TurnEvent, String>> {
-            self.events.pop_front().map(Ok)
-        }
     }
 
     struct FakeToolset {
@@ -691,7 +683,7 @@ mod tests {
                 .turns
                 .pop_front()
                 .ok_or_else(|| "FakeToolset: no more scripted turns".to_string())?;
-            Ok(Box::new(FakeTurnSource {
+            Ok(Box::new(ScriptedSource {
                 events: events.into(),
             }))
         }
@@ -866,7 +858,7 @@ mod tests {
         let instructions = Instructions::new(tmp.path());
         let mut toolset = FakeToolset::new(vec![end_turn("the sub-turn reply")]);
         let resp = run_dispatch(
-            "dispatch",
+            "DispatchAgent",
             r#"{"path":"agents/team/scribe.md","query":"hi"}"#,
             &instructions,
             &mut toolset,
@@ -912,7 +904,7 @@ mod tests {
 
         let mut ts1 = FakeToolset::new(vec![end_turn("ok")]);
         run_dispatch_routed(
-            "dispatch",
+            "DispatchAgent",
             r#"{"path":"agents/withtool.md","query":"hi"}"#,
             &instructions,
             &mut ts1,
@@ -933,7 +925,7 @@ mod tests {
 
         let mut ts2 = FakeToolset::new(vec![end_turn("ok")]);
         run_dispatch_routed(
-            "dispatch",
+            "DispatchAgent",
             r#"{"path":"agents/without.md","query":"hi"}"#,
             &instructions,
             &mut ts2,
@@ -982,7 +974,7 @@ mod tests {
         }];
         let mut toolset = FakeToolset::new(vec![call_toolset, end_turn("done after toolset tool")]);
         let resp = run_dispatch_routed(
-            "dispatch",
+            "DispatchAgent",
             r#"{"path":"agents/user.md","query":"hi"}"#,
             &instructions,
             &mut toolset,
@@ -1013,9 +1005,9 @@ mod tests {
 
     // There is NO single-shot mode. A dispatched agent whose frontmatter grants
     // no toolset tools is still advertised the always-on runtime substrate
-    // (read/dispatch/list/Think), exactly like the primary turn, and is
-    // loop-capable: a runtime tool call is dispatched and its result fed back
-    // rather than erroring or terminating.
+    // (ReadInstructions/DispatchAgent/ListInstructions/Think), exactly like the
+    // primary turn, and is loop-capable: a runtime tool call is dispatched and
+    // its result fed back rather than erroring or terminating.
     #[tokio::test]
     async fn dispatch_no_toolset_tools_still_advertises_runtime_substrate_and_loops() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1041,7 +1033,7 @@ mod tests {
         let mut toolset = FakeToolset::new(vec![call_think, end_turn("looped to done")]);
         let dispatcher = FakeDispatcher::empty();
         let resp = run_dispatch_routed(
-            "dispatch",
+            "DispatchAgent",
             r#"{"path":"agents/leaf.md","query":"hi"}"#,
             &instructions,
             &mut toolset,
@@ -1057,7 +1049,12 @@ mod tests {
             .iter()
             .map(|t| t.name.clone())
             .collect();
-        for want in ["read", "dispatch", "list", "Think"] {
+        for want in [
+            "ReadInstructions",
+            "DispatchAgent",
+            "ListInstructions",
+            "Think",
+        ] {
             assert!(
                 advertised.iter().any(|n| n == want),
                 "runtime tool `{want}` is advertised to a no-toolset-tools sub-turn, got {advertised:?}"
@@ -1117,7 +1114,7 @@ mod tests {
         let cancel = tokio_util::sync::CancellationToken::new();
 
         let resp = dispatch(
-            "dispatch",
+            "DispatchAgent",
             r#"{"path":"agents/scout.md","query":"find it"}"#,
             &instructions,
             WS,
@@ -1178,7 +1175,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_list_detail_returns_name_and_description_json() {
+    async fn dispatch_list_instructions_detail_returns_name_and_description_json() {
         let tmp = tempfile::tempdir().unwrap();
         write_md(
             tmp.path(),
@@ -1188,7 +1185,7 @@ mod tests {
         let instructions = Instructions::new(tmp.path());
         let mut toolset = FakeToolset::empty();
         let resp = run_dispatch(
-            "list",
+            "ListInstructions",
             r#"{"detail":true}"#,
             &instructions,
             &mut toolset,

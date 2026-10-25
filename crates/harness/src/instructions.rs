@@ -117,7 +117,8 @@ impl Instructions {
 
 /// Extract a short description from a markdown blob: the first non-empty,
 /// non-heading paragraph, trimmed and collapsed to a single line. Used by the
-/// generic `list` verb so the orchestrator can present human-readable choices.
+/// `ListInstructions` tool so the orchestrator can present human-readable
+/// choices.
 pub fn first_paragraph(body: &str) -> String {
     let mut buf = String::new();
     for line in body.lines() {

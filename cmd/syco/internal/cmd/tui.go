@@ -183,6 +183,9 @@ type tuiModel struct {
 	running bool
 	// sending covers an ingest in flight.
 	sending bool
+	// approvals wait for a y or n key each, first in, first out. The first
+	// is the one showing.
+	approvals []toolApproval
 
 	// Display.
 	committed strings.Builder
@@ -383,8 +386,9 @@ func (m *tuiModel) ingestCmd(message string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := grpcclient.WithToken(context.Background(), token)
 		resp, err := client.ChannelStreamIngest(ctx, &commonpb.ChannelStreamIngestRequest{
-			ChannelStreamId: channelStreamID,
-			ConversationId:  conversationID,
+			ChannelStreamId:  channelStreamID,
+			ConversationId:   conversationID,
+			SupportedMethods: supportedMethods,
 			UserMessage: &commonpb.UserMessage{
 				Content: []*commonpb.ContentBlock{
 					{
@@ -400,6 +404,17 @@ func (m *tuiModel) ingestCmd(message string) tea.Cmd {
 			return streamErrMsg{err: fmt.Errorf("channel stream ingest: %w", err), ingest: true}
 		}
 		return ingestAckMsg{conversationID: resp.ConversationId}
+	}
+}
+
+func (m *tuiModel) answerApprovalCmd(requestID string, approved bool) tea.Cmd {
+	client, channelStreamID, token := m.client, m.channelStreamID, m.token
+	return func() tea.Msg {
+		ctx := grpcclient.WithToken(context.Background(), token)
+		if _, err := client.ChannelStreamIngest(ctx, approvalAnswer(channelStreamID, requestID, approved)); err != nil {
+			return connErrMsg{err: fmt.Errorf("sending approval answer: %w", err)}
+		}
+		return nil
 	}
 }
 
@@ -520,7 +535,7 @@ func (m *tuiModel) selectWorkspace(workspace string) (tea.Model, tea.Cmd) {
 
 // acceptsInput reports whether the user may type and send.
 func (m *tuiModel) acceptsInput() bool {
-	return m.connected && !m.running && !m.sending
+	return len(m.approvals) == 0 && m.connected && !m.running && !m.sending
 }
 
 func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -528,6 +543,14 @@ func (m *tuiModel) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if len(m.approvals) > 0 && msg.Type == tea.KeyRunes {
+			switch string(msg.Runes) {
+			case "y", "n":
+				a := m.approvals[0]
+				m.approvals = m.approvals[1:]
+				return m, m.answerApprovalCmd(a.requestID, string(msg.Runes) == "y")
+			}
+		}
 		switch msg.Type {
 		case tea.KeyEsc, tea.KeyCtrlC:
 			m.quitting = true
@@ -661,6 +684,10 @@ func (m *tuiModel) handleFrameMsg(frame *commonpb.ChannelStreamOutbound) {
 			return
 		}
 		m.handleStreamItem(item)
+	case *commonpb.ChannelStreamOutbound_ServerRequest:
+		if a, ok := toolApprovalOf(c.ServerRequest); ok {
+			m.approvals = append(m.approvals, a)
+		}
 	}
 }
 
@@ -850,5 +877,10 @@ func (m *tuiModel) viewChat() string {
 	}
 	status := ctx + strings.Repeat(" ", pad) + indicator
 
-	return m.viewport.View() + "\n" + status + "\n" + m.input.View()
+	bottom := m.input.View()
+	if len(m.approvals) > 0 {
+		a := m.approvals[0]
+		bottom = toolStyle.Render(fmt.Sprintf("⚙ %s wants to run with input: %s · y approve · n deny", a.tool, a.input))
+	}
+	return m.viewport.View() + "\n" + status + "\n" + bottom
 }

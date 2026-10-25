@@ -347,17 +347,7 @@ mod tests {
     use toolset_proto::{turn_event, TurnComplete, TurnEvent};
 
     use crate::clients::TurnSource;
-
-    struct FakeTurnSource {
-        events: VecDeque<TurnEvent>,
-    }
-
-    #[async_trait::async_trait]
-    impl TurnSource for FakeTurnSource {
-        async fn next_event(&mut self) -> Option<Result<TurnEvent, String>> {
-            self.events.pop_front().map(Ok)
-        }
-    }
+    use crate::test_doubles::ScriptedSource;
 
     struct FakeToolset {
         turns: VecDeque<Vec<TurnEvent>>,
@@ -395,7 +385,7 @@ mod tests {
                 .turns
                 .pop_front()
                 .ok_or_else(|| "FakeToolset: no more scripted turns".to_string())?;
-            Ok(Box::new(FakeTurnSource {
+            Ok(Box::new(ScriptedSource {
                 events: events.into(),
             }))
         }
