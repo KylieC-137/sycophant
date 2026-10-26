@@ -150,7 +150,9 @@ if [ -n "${host_free_kb:-}" ]; then
     printf '  %s host free disk: %dGB\n' "$(grn '✓')" "$host_free_gb"
   fi
 fi
-if docker info >/dev/null 2>&1; then
+if [ "${SYCO_PREFLIGHT_SKIP_VM_DISK:-0}" = "1" ]; then
+  echo "  - Docker VM disk: skipped (read-only mode)"
+elif docker info >/dev/null 2>&1; then
   vm_free_kb="$(docker run --rm busybox df -Pk / 2>/dev/null | awk 'NR==2{print $4}')"
   if [ -n "${vm_free_kb:-}" ]; then
     vm_free_gb=$((vm_free_kb / 1024 / 1024))
