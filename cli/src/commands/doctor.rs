@@ -22,8 +22,7 @@ fn find_preflight_script() -> Result<PathBuf, String> {
 
 /// Run read-only diagnostics using Sycophant's existing preflight script.
 pub(crate) fn run() -> Result<(), String> {
-    println!("Sycophant Environment Diagnostics");
-    println!("Running preflight checks...");
+    println!("Sycophant Doctor");
     println!();
 
     let script = find_preflight_script()?;
