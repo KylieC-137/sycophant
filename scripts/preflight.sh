@@ -9,13 +9,10 @@
 #   - always:      runtime + deploy toolchain, native build tools, free disk
 #   - cross-build: musl cross-compile chain, only when CLEAN=1 (a reuse run
 #                  keeps the loaded images and never cross-compiles)
-#   - client:      Flutter + platform SDK for the app compile check, only when
-#                  FLUTTER_TARGET != none
 #
 # Env (shared with scripts/e2e.sh):
 #   ARCH            target arch for the musl build (default aarch64)
 #   CLEAN           1 on a from-scratch build (checks the cross-build tier)
-#   FLUTTER_TARGET  macos | none  (none skips the Flutter compile check and its client tier)
 
 set -uo pipefail
 
@@ -25,8 +22,6 @@ RUST_TARGET="${ARCH}-unknown-linux-musl"
 readonly RUST_TARGET
 CROSS_LINKER="${ARCH}-linux-musl-gcc"
 readonly CROSS_LINKER
-FLUTTER_TARGET="${FLUTTER_TARGET:-macos}"
-readonly FLUTTER_TARGET
 CLEAN="${CLEAN:-0}"
 readonly CLEAN
 
@@ -62,7 +57,7 @@ need() {
   fi
 }
 
-echo "==> sycophant preflight  (arch=${ARCH}, client=${FLUTTER_TARGET}, os=${OS})"
+echo "==> sycophant preflight  (arch=${ARCH}, os=${OS})"
 
 # ---- always: cluster + build tooling on PATH ----
 echo "-- toolchain --"
@@ -72,12 +67,10 @@ need "docker (running)" "docker info" \
 need "k3d"     "command -v k3d"     "brew install k3d"      "curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash"
 need "helm"    "command -v helm"    "brew install helm"     "curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash"
 need "kubectl" "command -v kubectl" "brew install kubectl"  "https://kubernetes.io/docs/tasks/tools/#kubectl"
-need "aws"     "command -v aws"     "brew install awscli"    "https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
 need "cargo"   "command -v cargo"   "https://rustup.rs"     "https://rustup.rs"
 need "protoc"  "command -v protoc"  "brew install protobuf" "apt-get install -y protobuf-compiler  (or: dnf install protobuf-compiler)"
 need "cmake"   "command -v cmake"   "brew install cmake"    "apt-get install -y cmake  (or: dnf install cmake)"
 need "jq"      "command -v jq"           "brew install jq"      "apt-get install -y jq  (or: dnf install jq)"
-need "xxd"     "command -v xxd"          "brew install vim"     "apt-get install -y xxd  (or: dnf install vim-common)"
 need "openssl" "command -v openssl"      "brew install openssl" "apt-get install -y openssl"
 need "PyJWT"   "python3 -c 'import jwt'" "pip3 install pyjwt"   "pip3 install pyjwt  (or: apt-get install -y python3-jwt)"
 # Step 5 drives the app path with grpcurl over the run's tailnet.
@@ -117,28 +110,6 @@ else
   echo "-- musl cross-build: skipped (reuse run — images already loaded) --"
 fi
 
-# ---- client tier: only when a client is being installed ----
-if [ "$FLUTTER_TARGET" != "none" ]; then
-  echo "-- flutter client (FLUTTER_TARGET=${FLUTTER_TARGET}) --"
-  need "flutter" "command -v flutter" \
-    "brew install --cask flutter" \
-    "https://docs.flutter.dev/get-started/install/linux"
-  case "$FLUTTER_TARGET" in
-    macos)
-      need "full Xcode (macOS app build)" "xcodebuild -version" \
-        "install Xcode from the App Store, then: sudo xcode-select -s /Applications/Xcode.app && sudo xcodebuild -license accept" \
-        "n/a (macOS target needs macOS)"
-      need "CocoaPods" "command -v pod" "brew install cocoapods" "n/a"
-      ;;
-    *)
-      printf '  %s unknown FLUTTER_TARGET=%s (expected macos|none)\n' "$(red '✗')" "$FLUTTER_TARGET"
-      MISSING=$((MISSING + 1))
-      ;;
-  esac
-else
-  echo "-- flutter client: skipped (FLUTTER_TARGET=none, backend-only) --"
-fi
-
 # ---- disk ----
 echo "-- disk --"
 host_free_kb="$(df -Pk "$REPO_ROOT" 2>/dev/null | awk 'NR==2{print $4}')"
@@ -150,9 +121,7 @@ if [ -n "${host_free_kb:-}" ]; then
     printf '  %s host free disk: %dGB\n' "$(grn '✓')" "$host_free_gb"
   fi
 fi
-if [ "${SYCO_PREFLIGHT_SKIP_VM_DISK:-0}" = "1" ]; then
-  echo "  - Docker VM disk: skipped (read-only mode)"
-elif docker info >/dev/null 2>&1; then
+if docker info >/dev/null 2>&1; then
   vm_free_kb="$(docker run --rm busybox df -Pk / 2>/dev/null | awk 'NR==2{print $4}')"
   if [ -n "${vm_free_kb:-}" ]; then
     vm_free_gb=$((vm_free_kb / 1024 / 1024))

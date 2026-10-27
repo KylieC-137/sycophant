@@ -29,7 +29,6 @@ pub(crate) fn run() -> Result<(), String> {
 
     let status = Command::new("bash")
         .arg(&script)
-        .env("SYCO_PREFLIGHT_SKIP_VM_DISK", "1")
         .status()
         .map_err(|err| format!("Failed to run preflight: {err}"))?;
 
