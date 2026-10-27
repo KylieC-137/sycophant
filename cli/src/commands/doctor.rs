@@ -27,8 +27,12 @@ pub(crate) fn run() -> Result<(), String> {
 
     let script = find_preflight_script()?;
 
-    let status = Command::new("bash")
-        .arg(&script)
+    run_preflight_command(Command::new("bash").arg(&script))
+}
+
+/// Execute the diagnostic command and report its result.
+fn run_preflight_command(command: &mut Command) -> Result<(), String> {
+    let status = command
         .status()
         .map_err(|err| format!("Failed to run preflight: {err}"))?;
 
@@ -38,5 +42,27 @@ pub(crate) fn run() -> Result<(), String> {
         Err(format!(
             "Environment diagnostics failed (exit status: {status})"
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doctor_succeeds_when_preflight_passes() {
+        let result = run_preflight_command(Command::new("bash").arg("-c").arg("exit 0"));
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn doctor_fails_when_preflight_fails() {
+        let result = run_preflight_command(Command::new("bash").arg("-c").arg("exit 1"));
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("Environment diagnostics failed"));
     }
 }

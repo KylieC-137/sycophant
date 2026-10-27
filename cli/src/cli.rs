@@ -277,4 +277,12 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn doctor_is_recognized_as_a_top_level_command() {
+        let cli =
+            Cli::try_parse_from(["sycoadm", "doctor"]).expect("doctor should be a valid command");
+
+        assert!(matches!(cli.command, Command::Doctor(_)));
+    }
 }
