@@ -25,10 +25,8 @@ fn main() {
         Command::Tenant(cmd) => commands::tenant::run(cmd),
         Command::Connect(cmd) => commands::connect::run(cmd),
         Command::Toolset(cmd) => component("toolset", cmd),
-        Command::Workspace(cli::ComponentCmd { sub }) => match sub {
-            cli::ComponentSub::Up(c) => commands::workspace::up(&c.values),
-            cli::ComponentSub::Down(c) => commands::workspace::down(&c.name, &c.tenant),
-        },
+        Command::Workspace(cmd) => component("workspace", cmd),
+        Command::Instructions(cmd) => component("instructions", cmd),
         Command::User(cli::UserCmd { sub }) => match sub {
             cli::UserSub::Up(c) => commands::command::up("user", &c.values),
             cli::UserSub::Down(c) => commands::command::user_down(&c.subject, &c.tenant),

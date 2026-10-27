@@ -1,0 +1,17 @@
+# The instructions jobs' role, bound per command by a RoleBinding in the tenant
+# namespace: restart the workspace Deployment and delete the job's own command.
+# Kyverno already holds these verbs, so the generated bind passes anti-escalation.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: instructions-job
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+    app.kubernetes.io/component: instructions-job
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "delete"]

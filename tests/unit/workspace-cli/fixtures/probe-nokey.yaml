@@ -1,4 +1,0 @@
-# The probe workspace with no instructions key.
-workspace:
-  name: probe
-  tenant: acme

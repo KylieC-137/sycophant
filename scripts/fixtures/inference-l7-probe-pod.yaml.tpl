@@ -28,9 +28,6 @@ spec:
       args:
         - |
           b=http://${svc}:${INFERENCE_PORT}
-          code() { wget -S -q -O /dev/null "$1" 2>&1 | grep -o 'HTTP/[0-9.]* [0-9][0-9][0-9]' | tail -1 | grep -o '[0-9][0-9][0-9]$'; }
-          echo "METRICS=$(code $b/metrics)"
-          echo "SLOTS=$(code $b/slots)"
           r=$(wget -S -q -O- --header 'Content-Type: application/json' --post-data '{"model":"${INFERENCE_PROFILE}","messages":[{"role":"user","content":"Reply with a short greeting."}],"stream":false,"max_tokens":32}' "$b/v1/chat/completions" 2>&1 || true)
           echo "COMPLETION=$(printf '%s' "$r" | grep -o 'HTTP/[0-9.]* [0-9][0-9][0-9]' | tail -1 | grep -o '[0-9][0-9][0-9]$')"
           printf '%s' "$r" | tr ',{}' '\n' | grep -oE '"(completion_tokens|prompt_ms|predicted_ms|predicted_per_second)":[0-9.]+'

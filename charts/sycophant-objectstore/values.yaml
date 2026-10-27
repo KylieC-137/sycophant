@@ -7,9 +7,10 @@
 #
 # The store always trusts the cluster apiserver as a token issuer: a workspace
 # pod presents its own service-account token through STS and gets a short-lived
-# read-only credential for its own instructions folder. Egress is default-deny:
-# cluster DNS plus the apiserver (for the cluster issuer's key set), and with an
-# operator oidc issuer also that one issuer, and nothing else.
+# read-only credential for its own instructions folder. Only the instructions
+# jobs reach the filer, which writes those folders. Egress is default-deny:
+# cluster DNS plus the apiserver (for the cluster issuer's key set), and
+# nothing else.
 
 # SeaweedFS server image (Alpine, multi-arch), pinned by index digest.
 image: chrislusf/seaweedfs@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882
@@ -18,34 +19,3 @@ pullPolicy: IfNotPresent
 storage:
   # Backing disk for the instruction bucket, filer metadata, and volume data.
   size: 1Gi
-
-# Optional operator OIDC trust, on top of the built-in cluster trust. Omit the
-# whole block to disable: no operator provider renders and the store egress
-# stays cluster DNS plus the apiserver. Set `issuer` to point the
-# store at an operator-owned issuer; the store then verifies tokens from that
-# issuer and mints short-lived credentials through STS AssumeRoleWithWebIdentity.
-#
-# oidc:
-#   issuer: https://issuer.example.com
-#   # OIDC audience the store accepts. Use `clientIds` for a list.
-#   clientId: sycophant-objectstore
-#   # JWKS endpoint. Omit to let SeaweedFS fall back to issuer discovery, then
-#   # {issuer}/.well-known/jwks.json.
-#   jwksUri: https://issuer.example.com/.well-known/jwks.json
-#   # JWKS cache lifetime in seconds. Defaults to 3600.
-#   jwksCacheTTLSeconds: 3600
-#   # Exactly one egress arm. The store opens one peer to the issuer.
-#   egress:
-#     # In-cluster issuer: target the issuer pod by label, never by FQDN. The
-#     # socket-load-balancer rewrite drops an FQDN rule for a ClusterIP. No
-#     # default label — the operator supplies the issuer's pod label.
-#     inCluster:
-#       endpointSelector:
-#         matchLabels:
-#           app.kubernetes.io/name: oidc-fixture
-#       port: 8080
-#     # External issuer: target the issuer host. Host defaults to the issuer
-#     # URL host; override with `host`. Port defaults to 443.
-#     external:
-#       host: issuer.example.com
-#       port: 443

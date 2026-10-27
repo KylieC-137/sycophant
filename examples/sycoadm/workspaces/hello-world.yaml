@@ -5,7 +5,6 @@
 workspace:
   name: hello-world
   tenant: hello-world
-  instructions: ../instructions/hello-world
   toolsets: [hello-world]
   models: [qwen3-5-2b]
   grants:

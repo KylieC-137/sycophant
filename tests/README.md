@@ -41,13 +41,7 @@ Run Go CLI unit tests:
 make test-unit-go
 ```
 
-Run the sycoadm workspace CLI suite (builds sycoadm, then runs it against fake kubectl and helm):
-
-```bash
-make test-unit-cli
-```
-
-Run all unit tests (Rust + Go + k8s + CLI):
+Run all unit tests (Rust + Go + k8s):
 
 ```bash
 make test-unit

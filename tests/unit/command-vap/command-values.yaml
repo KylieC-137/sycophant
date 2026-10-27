@@ -46,14 +46,18 @@ workspace:
   toolsets: [hello-world]
   models: [deepseek, local]
   storage: 5Gi
-  # Read by sycoadm only; never rendered into the command.
-  instructions: ../instructions/hello-world
   grants:
     hello-world:
       demo-key:
         secret: demo-ssh-key
         path: /home/agent/.ssh/id_ed25519
         egress: git.example.com
+
+instructions:
+  name: hello-world
+  tenant: acme
+  # Set by sycoadm from the instructions folder: a base64 gzip tar.
+  archive: "H4sIAFU932oC/+3NMQrCQAAEwKt9xb0gHEnQ2kLsbExjGTFgI5Ez+b9HGsFeEZxpdtlmt/vdoTtWt0v4nFSs23bJ4j1TqptXX/ZN3TYhpvAF82Pqc7kM/+k0zrHPQ5yuQ7zn8TxUqwAAAAAAAAAAAMDvewIo91QUACgAAA=="
 
 user:
   tenant: acme

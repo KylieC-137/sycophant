@@ -72,9 +72,9 @@ sycoadm toolset up -f examples/sycoadm/toolsets/hello-world/values.yaml
 printf '%s' 'hello-world-demo-secret-DO-NOT-USE' \
   | sycoadm tenant secret set demo-ssh-key --ns tenant-hello-world
 
-# Uploads the workspace's instructions to the store, then installs it. Rerun
-# after editing the instructions.
 sycoadm workspace up -f examples/sycoadm/workspaces/hello-world.yaml
+
+sycoadm instructions up -f examples/sycoadm/instructions/hello-world.yaml
 
 sycoadm channel up -f examples/sycoadm/channels/tailnet.yaml
 

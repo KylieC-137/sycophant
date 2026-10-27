@@ -22,10 +22,12 @@ pub(crate) enum Command {
     Connect(ConnectCmd),
     /// Install or remove one toolset through its provision and reap commands
     Toolset(ComponentCmd),
-    /// Install or remove one workspace. `up` takes exactly one -f and replaces
-    /// the workspace's instructions folder before provisioning; `down` deletes
-    /// the folder after the reap
+    /// Install or remove one workspace through its provision and reap commands
     Workspace(ComponentCmd),
+    /// Deliver or remove one workspace's instructions folder. `up` takes
+    /// exactly one -f naming the workspace, its tenant and the folder, and
+    /// replaces the folder's files in the store; `down` empties it
+    Instructions(ComponentCmd),
     User(UserCmd),
     /// Install or remove one model through its provision and reap commands
     Inference(ComponentCmd),

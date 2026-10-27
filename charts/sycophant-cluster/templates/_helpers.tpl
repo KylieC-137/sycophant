@@ -28,6 +28,7 @@ keeps every provisioned namespace out of the reserved ones.
 {{- define "sycophant.toolsetProvisionCommandName" -}}provision-toolset{{- end -}}
 {{- define "sycophant.inferenceProvisionCommandName" -}}provision-inference{{- end -}}
 {{- define "sycophant.channelProvisionCommandName" -}}provision-channel{{- end -}}
+{{- define "sycophant.instructionsProvisionCommandName" -}}provision-instructions{{- end -}}
 {{- define "sycophant.suspendCommandName" -}}suspend-tenant{{- end -}}
 {{- define "sycophant.reapAfterAnnotation" -}}sycophant.md/reap-after{{- end -}}
 {{- define "sycophant.tenantNsPrefix" -}}tenant-{{- end -}}
@@ -102,13 +103,12 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{- /*
 One single-shot install per provision command. The stack policy stamps a
-ServiceAccount and a Job in sycophant-system; the Job runs `helm upgrade
---install` against its kind's chart baked into the installer image, presenting
-the ServiceAccount's projected token. The ServiceAccount lives outside the
+ServiceAccount and a Job in sycophant-system. The Job runs its kind's script
+with the ServiceAccount's projected token. The ServiceAccount lives outside the
 tenant namespace, so it stays an external caller to the tenant-scoped write
 protections and needs no exemption from them.
 
-The grant policy binds that ServiceAccount to ClusterRole/provision-write in the
+The grant policy binds that ServiceAccount to its kind's ClusterRole in the
 tenant namespace, so RBAC bounds its reach to that one namespace. It is a
 separate policy because its target namespace may not exist yet (the tenant
 provision command's sibling reactor creates it), and its retry must never
@@ -119,17 +119,13 @@ Every generated object is named `provision-<kind>-<uid10>`, from the provision
 command's uid, so a re-created command never collides with an earlier run's
 Job, even within its TTL.
 
-The tenant provision command lives in sycophant-system and installs the
-sycophant-tenant release; headscale values come from CEL env vars via jq. Every other provision command is
-`provision-<kind>-<name>` in the tenant namespace it targets, so the tenant is
-the command's own namespace, and installs one release from the
-`sycophant-<kind>` chart, named by sycophant.releasePrefix: `ws-<name>`,
-`ts-<name>`, `inf-<name>`, `ch-<name>` or `user-<handle>`. Only the tenant chart can render the Namespace, and
-its install forces namespace.create=false so a provision command cannot manage
-it. Only the tenant install takes ownership of existing objects; a capability
-install refuses a name another release holds.
+The tenant provision command lives in sycophant-system. Every other provision
+command is `provision-<kind>-<name>` in the tenant namespace it targets. Only
+the tenant chart can render the Namespace, and its install forces
+namespace.create=false so a provision command cannot manage it. Only the tenant
+install takes ownership of existing objects.
 
-Provision commands are one-shot: once helm succeeds the Job deletes its
+Provision commands are one-shot: once its script succeeds the Job deletes its
 command. A failed install exits first and leaves the command in place. The
 tenant install deletes its command through Role/provision-tenant-command in
 sycophant-system.
@@ -297,6 +293,14 @@ spec:
 {{- get (dict "workspace" "ws" "toolset" "ts" "inference" "inf" "user" "user" "channel" "ch") . -}}
 {{- end -}}
 
+{{- /* Read the command into CM; stop if it is gone or was replaced. */ -}}
+{{- define "sycophant.commandFetch" -}}
+CM="$(kubectl get configmap "$COMMAND" -n "$TENANT" -o json)" \
+  || { echo "command $COMMAND is gone; this attempt is stale" >&2; exit 1; }
+CM_UID="$(printf '%s' "$CM" | jq -r '.metadata.uid')"
+[ "$CM_UID" = "$COMMAND_UID" ] || { echo "command $COMMAND was replaced (uid $CM_UID != $COMMAND_UID); this attempt is stale" >&2; exit 1; }
+{{- end -}}
+
 {{- /* The install script for one kind; see sycophant.provisionInstaller. */ -}}
 {{- define "sycophant.provisionInstallScript" -}}
 {{- $ctx := .ctx -}}
@@ -357,13 +361,8 @@ NAME="${COMMAND#provision-{{ $kind }}-}"
 # under a retry) stops the install: helm given empty values would prune the
 # release.
 # Read the command in one get: uid, data and (for user) the write time.
-# Stop if the command is gone, empty, or belongs to a different grant.
-CM="$(kubectl get configmap "$COMMAND" -n "$TENANT" -o json)" \
-  || { echo "command $COMMAND is gone; this attempt is stale" >&2; exit 1; }
-CM_UID="$(printf '%s' "$CM" | jq -r '.metadata.uid')"
-[ "$CM_UID" = "$COMMAND_UID" ] || { echo "command $COMMAND was replaced (uid $CM_UID != $COMMAND_UID); this attempt is stale" >&2; exit 1; }
-DATA="$(printf '%s' "$CM" | jq -c '.data')"
-[ -n "$DATA" ] && [ "$DATA" != "null" ] || { echo "command $COMMAND has no data" >&2; exit 1; }
+{{ include "sycophant.commandFetch" . }}
+DATA="$(printf '%s' "$CM" | jq -c '.data // {}')"
 printf '{"command":%s}' "$DATA" > /tmp/values.yaml
 {{- if eq $kind "user" }}
 CREATED="$(printf '%s' "$CM" | jq -r '.metadata.creationTimestamp')"
@@ -384,6 +383,8 @@ kubectl delete configmap "$COMMAND" -n "$TENANT"
 {{- $ctx := .ctx -}}
 {{- $kind := .kind -}}
 {{- $component := printf "provision-%s" $kind -}}
+{{- $script := .script | default (include "sycophant.provisionInstallScript" (dict "ctx" $ctx "kind" $kind)) -}}
+{{- $role := .role | default "provision-write" -}}
 apiVersion: policies.kyverno.io/v1
 kind: GeneratingPolicy
 metadata:
@@ -401,7 +402,7 @@ spec:
     - template:
         interpolate: cel
         value: |
-          {{- include "sycophant.provisionerJob" (dict "ctx" $ctx "name" $component "script" (include "sycophant.provisionInstallScript" (dict "ctx" $ctx "kind" $kind))) | nindent 10 }}
+          {{- include "sycophant.provisionerJob" (dict "ctx" $ctx "name" $component "script" $script) | nindent 10 }}
 ---
 apiVersion: policies.kyverno.io/v1
 kind: GeneratingPolicy
@@ -420,7 +421,7 @@ spec:
     - template:
         interpolate: cel
         value: |
-          {{- include "sycophant.provisionerBinding" (dict "ctx" $ctx "name" $component "namespace" "(( variables.tenant ))" "kind" "ClusterRole" "role" "provision-write") | nindent 10 }}
+          {{- include "sycophant.provisionerBinding" (dict "ctx" $ctx "name" $component "namespace" "(( variables.tenant ))" "kind" "ClusterRole" "role" $role) | nindent 10 }}
           {{- if eq $kind "tenant" }}
           ---
           {{- include "sycophant.provisionerBinding" (dict "ctx" $ctx "name" $component "namespace" "sycophant-system" "kind" "Role" "role" "provision-tenant-command") | nindent 10 }}
@@ -460,10 +461,9 @@ kubectl delete configmap "$COMMAND" -n "$TENANT"
 {{- /*
 One single-shot uninstall per reap command `reap-<kind>-<name>` in a tenant
 namespace. The ServiceAccount and Job `uninstall-<kind>-<uid10>` live in
-sycophant-system; the RoleBinding of the same name binds them to
-ClusterRole/provision-write in the reap command's namespace, which exists already.
-The Job uninstalls the release the provision command installed and then
-deletes the reap command; a failed uninstall exits first and leaves the command
+sycophant-system. The RoleBinding of the same name binds them to the kind's
+ClusterRole in the reap command's namespace. The Job runs its kind's script,
+then deletes the reap command. A failed run exits first and leaves the command
 in place. The ServiceAccount and RoleBinding carry component `uninstall-<kind>`
 and the reap-after annotation, so `reap-<kind>` sweeps them.
 */ -}}
@@ -471,7 +471,8 @@ and the reap-after annotation, so `reap-<kind>` sweeps them.
 {{- $ctx := .ctx -}}
 {{- $kind := .kind -}}
 {{- $name := printf "uninstall-%s" $kind -}}
-{{- $script := include "sycophant.provisionUninstallScript" (dict "kind" $kind) -}}
+{{- $script := .script | default (include "sycophant.provisionUninstallScript" (dict "kind" $kind)) -}}
+{{- $role := .role | default "provision-write" -}}
 apiVersion: policies.kyverno.io/v1
 kind: GeneratingPolicy
 metadata:
@@ -491,7 +492,7 @@ spec:
         value: |
           {{- include "sycophant.provisionerJob" (dict "ctx" $ctx "name" $name "script" $script) | nindent 10 }}
           ---
-          {{- include "sycophant.provisionerBinding" (dict "ctx" $ctx "name" $name "namespace" "(( variables.tenant ))" "kind" "ClusterRole" "role" "provision-write") | nindent 10 }}
+          {{- include "sycophant.provisionerBinding" (dict "ctx" $ctx "name" $name "namespace" "(( variables.tenant ))" "kind" "ClusterRole" "role" $role) | nindent 10 }}
 {{- end -}}
 
 {{/*

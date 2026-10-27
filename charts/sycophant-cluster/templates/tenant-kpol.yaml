@@ -110,8 +110,7 @@ spec:
 # per-object condition branches on kind to select those, never a sibling installer's.
 # TODO: the reap deletes Kubernetes objects only. The tenant's workspace instruction
 # folders in the shared object store survive it. Deleting them on reap is not built.
-# The leftovers stay unreadable to a same-name tenant only while every
-# `sycoadm workspace up` overwrites the workspace's folder before its pod starts.
+# A new tenant with the same name reads them until its own instructions are delivered.
 apiVersion: policies.kyverno.io/v1
 kind: DeletingPolicy
 metadata:

@@ -19,11 +19,12 @@ generate() {
   kyverno apply "$WORK/$1-policy.yaml" --resource "$HERE/$2.yaml" \
     -f "$HERE/values.yaml" -o "$WORK/$2-out" --remove-color >/dev/null 2>&1
 }
-for kind in tenant workspace user toolset inference channel; do
+for kind in tenant workspace user toolset inference channel instructions; do
   render --show-only "templates/$kind-kpol.yaml" > "$WORK/$kind-policy.yaml"
   generate "$kind" "$kind"
 done
 generate workspace reap-workspace
+generate instructions reap-instructions
 render > "$WORK/cluster.yaml"
 
 mkdir -p "$WORK/bin"
@@ -33,6 +34,7 @@ printf 'kubectl %s\n' "$*" >> "$CALLS"
 case "$*" in
   *"get configmap"*"-o json"*) [ -n "${GET_CM_EXIT:-}" ] && exit "$GET_CM_EXIT"; _d='{}'; printf '{"metadata":{"uid":"%s","creationTimestamp":"2026-01-01T00:00:00Z"},"data":%s}' "${ORIG_UID:-$COMMAND_UID}" "${GET_CM-$_d}" ;;
   *"get configmap"*) [ -n "${GET_CM_EXIT:-}" ] && exit "$GET_CM_EXIT"; printf '%s' "${GET_CM-{\}}" ;;
+  *"get deployment"*) [ -n "${GET_DEPLOY_EXIT:-}" ] && exit "$GET_DEPLOY_EXIT"; printf 'deployment.apps/ws-one\n' ;;
 esac
 exit 0
 SH
@@ -41,10 +43,58 @@ cat > "$WORK/bin/helm" <<'SH'
 printf 'helm %s\n' "$*" >> "$CALLS"
 exit "${HELM_EXIT:-0}"
 SH
-chmod +x "$WORK/bin/kubectl" "$WORK/bin/helm"
+cat > "$WORK/bin/curl" <<'SH'
+#!/bin/sh
+printf 'curl %s\n' "$*" >> "$CALLS"
+exit 0
+SH
+# BusyBox tar as the provisioner image ships it (v1.37.0), for the job's two
+# calls, `-tvzf FILE` and `-xzf FILE -C DIR`: both strip a leading '/' or
+# '../' with a stderr notice and exit 0; links list with ' -> '.
+cat > "$WORK/bin/tar" <<SH
+#!$(python3 -c 'import sys; print(sys.executable)')
+SH
+cat >> "$WORK/bin/tar" <<'SH'
+import os, sys, tarfile, time
+with open(os.environ["CALLS"], "a") as fh:
+    fh.write("tar " + " ".join(sys.argv[1:]) + "\n")
+args = sys.argv[1:]
+mode, archive = args[0][1], args[1]
+dest = args[3] if mode == "x" else "."
+tf = tarfile.open(archive, mode="r:gz")
+warned = set()
+def strip(name):
+    while True:
+        for p in ("/", "../"):
+            if name.startswith(p):
+                if p not in warned:
+                    sys.stderr.write(f"tar: removing leading '{p}' from member names\n")
+                    warned.add(p)
+                name = name[len(p):]
+                break
+        else:
+            return name
+for m in tf:
+    name = strip(m.name)
+    if mode == "t":
+        kind = "d" if m.isdir() else "l" if m.issym() else "-"
+        perm = "".join(c if m.mode & (1 << (8 - n)) else "-" for n, c in enumerate("rwxrwxrwx"))
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(m.mtime))
+        link = f" -> {m.linkname}" if m.issym() else ""
+        print(f"{kind}{perm} {m.uid}/{m.gid} {m.size:>9} {stamp} {name}{link}")
+    else:
+        path = os.path.join(dest, name)
+        if m.isdir():
+            os.makedirs(path, exist_ok=True)
+        elif m.isfile():
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "wb") as out:
+                out.write(tf.extractfile(m).read())
+SH
+chmod +x "$WORK/bin/kubectl" "$WORK/bin/helm" "$WORK/bin/curl" "$WORK/bin/tar"
 
 python3 - "$WORK" "$HERE" <<'PY'
-import json, os, re, subprocess, sys, yaml
+import base64, io, json, os, re, subprocess, sys, tarfile, yaml
 
 work = sys.argv[1]
 uid10 = "0a1b2c3d4e"
@@ -83,7 +133,7 @@ def find(docs, kind, name, ns):
             return d
     return None
 
-def run_job(job, helm_exit, get_cm="{}", get_cm_exit="", wrong_uid=False):
+def run_job(job, helm_exit, get_cm="{}", get_cm_exit="", wrong_uid=False, get_deploy_exit=""):
     c = job["spec"]["template"]["spec"]["containers"][0]
     script = c["args"][0].replace("/tmp/", work + "/scratch/")
     os.makedirs(work + "/scratch", exist_ok=True)
@@ -92,7 +142,7 @@ def run_job(job, helm_exit, get_cm="{}", get_cm_exit="", wrong_uid=False):
     env = {e["name"]: e.get("value", "") for e in c.get("env", [])}
     import shutil
     jq_dir = os.path.dirname(shutil.which("jq") or "/usr/local/bin/jq")
-    env.update(PATH=f"{work}/bin:{jq_dir}:/usr/bin:/bin", CALLS=calls, HELM_EXIT=str(helm_exit), HOME=work, GET_CM=get_cm, GET_CM_EXIT=get_cm_exit)
+    env.update(PATH=f"{work}/bin:{jq_dir}:/usr/bin:/bin", CALLS=calls, HELM_EXIT=str(helm_exit), HOME=work, GET_CM=get_cm, GET_CM_EXIT=get_cm_exit, GET_DEPLOY_EXIT=get_deploy_exit)
     # The stub always returns the command's real uid in its JSON.
     # ORIG_UID carries it; COMMAND_UID is what the Job thinks its command's uid is.
     env["ORIG_UID"] = env.get("COMMAND_UID", "")
@@ -177,12 +227,6 @@ for kind in ("tenant", "workspace"):
         # values would prune the release.
         name = f"{kind}: a missing command stops the install before helm"
         rc, calls = run_job(job, 0, get_cm_exit="1")
-        if rc != 0 and not any(a[0] == "helm" for a in calls):
-            ok(name)
-        else:
-            bad(name, f"rc={rc}, calls={[' '.join(a) for a in calls]}")
-        name = f"{kind}: a command with no data stops the install before helm"
-        rc, calls = run_job(job, 0, get_cm="")
         if rc != 0 and not any(a[0] == "helm" for a in calls):
             ok(name)
         else:
@@ -325,8 +369,115 @@ for kind, release, prefix in (("workspace", "one", "ws"),):
         else:
             ok(name)
 
+def archive_of(members):
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.USTAR_FORMAT) as tf:
+        for name, kind, payload in members:
+            ti = tarfile.TarInfo(name)
+            if kind == "dir":
+                ti.type, ti.mode = tarfile.DIRTYPE, 0o755
+                tf.addfile(ti)
+            elif kind == "symlink":
+                ti.type, ti.linkname = tarfile.SYMTYPE, payload
+                tf.addfile(ti)
+            else:
+                ti.size, ti.mode = len(payload), 0o644
+                tf.addfile(ti, io.BytesIO(payload))
+    return base64.b64encode(buf.getvalue()).decode()
+
+FOLDER = "/buckets/sycophant-instructions/system:serviceaccount:tenant-acme:ws-one/"
+
+def store_calls(calls):
+    out = []
+    for i, a in enumerate(calls):
+        if a[0] != "curl":
+            continue
+        url = next((x for x in a if "seaweedfs.sycophant-system.svc:8888" in x), "")
+        method = next((a[j + 1] for j in range(len(a) - 1) if a[j] in ("-X", "--request")), "")
+        out.append((i, method.upper(), url))
+    return out
+
+def restarts(calls):
+    return [i for i, a in enumerate(calls) if a[0] == "kubectl" and "rollout" in a and "restart" in a
+            and "deployment/ws-one" in a
+            and any(a[j] in ("-n", "--namespace") and a[j + 1] == "tenant-acme" for j in range(len(a) - 1))]
+
+def show(calls):
+    return [" ".join(a) for a in calls]
+
+inst = find(generated("instructions"), "Job", f"provision-instructions-{uid10}", "sycophant-system")
+inst_rb = find(generated("instructions"), "RoleBinding", f"provision-instructions-{uid10}", "tenant-acme")
+good = archive_of([("AGENTS.md", "file", b"You are the probe.\n"), ("docs", "dir", None), ("docs/deep.md", "file", b"deep\n")])
+name = "instructions: an install replaces the folder from the archive, restarts the workspace, then deletes its command"
+if not inst:
+    bad(name, f"no Job provision-instructions-{uid10}; generated {[(d['kind'], d['metadata'].get('name')) for d in generated('instructions')]}")
+else:
+    rc, calls = run_job(inst, 0, json.dumps({"archive": good}))
+    store = store_calls(calls)
+    listed = [i for i, a in enumerate(calls) if a[0] == "tar" and "t" in a[1]]
+    wipe = [i for i, m, u in store if m == "DELETE" and u.endswith(FOLDER + "?recursive=true")]
+    puts = {u.split(FOLDER, 1)[-1]: i for i, m, u in store if m == "PUT" and FOLDER in u}
+    rs = restarts(calls)
+    dels = [i for i, a in enumerate(calls) if deletes_command(a, "provision-instructions-one", "tenant-acme")]
+    if rc == 0 and listed and store and min(listed) < min(i for i, _, _ in store) and wipe \
+            and set(puts) == {"AGENTS.md", "docs/deep.md"} and min(puts.values()) > max(wipe) \
+            and rs and min(rs) > max(puts.values()) and dels and min(dels) > max(rs) \
+            and not any(a[0] == "helm" for a in calls):
+        ok(name)
+    else:
+        bad(name, f"rc={rc}, calls={show(calls)}")
+
+    name = "instructions: a failed workspace lookup fails the job before the restart and leaves its command"
+    rc, calls = run_job(inst, 0, json.dumps({"archive": good}), get_deploy_exit="1")
+    if rc != 0 and not restarts(calls) \
+            and not any(deletes_command(a, "provision-instructions-one", "tenant-acme") for a in calls):
+        ok(name)
+    else:
+        bad(name, f"rc={rc}, calls={show(calls)}")
+
+    for label, members in (
+        ("a symlink", [("AGENTS.md", "file", b"x\n"), ("ln", "symlink", "/etc/passwd")]),
+        ("a path outside its folder", [("AGENTS.md", "file", b"x\n"), ("../evil.md", "file", b"x\n")]),
+        ("an unsafe name", [("AGENTS.md", "file", b"x\n"), ("a?b.md", "file", b"x\n")]),
+    ):
+        name = f"instructions: an archive holding {label} fails before any store call and leaves its command"
+        rc, calls = run_job(inst, 0, json.dumps({"archive": archive_of(members)}))
+        if rc != 0 and not store_calls(calls) and not restarts(calls) \
+                and not any(deletes_command(a, "provision-instructions-one", "tenant-acme") for a in calls):
+            ok(name)
+        else:
+            bad(name, f"rc={rc}, calls={show(calls)}")
+
 cluster_text = open(os.path.join(work, "cluster.yaml")).read()
 cluster = [d for d in yaml.safe_load_all(cluster_text) if d]
+
+name = "instructions: the install binds a narrow ClusterRole, not provision-write"
+role_name = (inst_rb or {}).get("roleRef", {}).get("name")
+role = next((d for d in cluster if d.get("kind") == "ClusterRole"
+             and d["metadata"]["name"] == role_name), None) if role_name else None
+grants = sorted((g, r, v) for rule in (role or {}).get("rules") or [] for g in rule.get("apiGroups", [])
+                for r in rule.get("resources", []) for v in rule.get("verbs", []))
+want = sorted([("apps", "deployments", "get"), ("apps", "deployments", "patch"),
+               ("", "configmaps", "get"), ("", "configmaps", "delete")])
+if role_name and role_name != "provision-write" and grants == want:
+    ok(name)
+else:
+    bad(name, f"roleRef={role_name}, rules={grants}")
+
+reap_inst = find(generated("reap-instructions"), "Job", f"uninstall-instructions-{uid10}", "sycophant-system")
+name = "instructions: a reap removes the folder, restarts the workspace, then deletes its reap command"
+if not reap_inst:
+    bad(name, f"no Job uninstall-instructions-{uid10}; generated {[(d['kind'], d['metadata'].get('name')) for d in generated('reap-instructions')]}")
+else:
+    rc, calls = run_job(reap_inst, 0)
+    wipe = [i for i, m, u in store_calls(calls) if m == "DELETE" and u.endswith(FOLDER + "?recursive=true")]
+    rs = restarts(calls)
+    dels = [i for i, a in enumerate(calls) if deletes_command(a, "reap-instructions-one", "tenant-acme")]
+    if rc == 0 and wipe and rs and min(rs) > max(wipe) and dels and min(dels) > max(rs):
+        ok(name)
+    else:
+        bad(name, f"rc={rc}, calls={show(calls)}")
+
 blocks = re.split(r"\n---\n", cluster_text)
 
 def check(name, why):

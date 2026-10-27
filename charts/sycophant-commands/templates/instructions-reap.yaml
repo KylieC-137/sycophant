@@ -1,0 +1,3 @@
+{{- with .Values.instructions }}
+{{ include "commands.reap" (dict "kind" "instructions" "v" .) }}
+{{- end }}

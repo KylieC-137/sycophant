@@ -33,10 +33,13 @@
 #   models: []
 #   storage: 5Gi
 #   grants: {}              # <toolset>: {<grant>: {secret, path, egress}}
-#   instructions: ../instructions/hello-world  # read by sycoadm only, never rendered:
-#                           # the instructions directory, relative to this file
-#   instructionsHash: ""    # set by sycoadm only (--set-string), from the
-#                           # instructions files; rides the command as instructions-hash
+
+# instructions:
+#   name: hello-world       # the workspace
+#   tenant: acme
+#   folder: hello-world     # read by sycoadm only, never rendered:
+#                           # the instructions folder, relative to this file
+#   archive: ""             # set by sycoadm only, from the folder: a base64 gzip tar
 
 # user:
 #   tenant: acme

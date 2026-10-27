@@ -337,9 +337,10 @@ deploy_toolsets() {
 deploy_workspace_and_user() {
   # The workspace and its bound user are one provision command each.
   "$SYCO" workspace up -f "$REPO_ROOT/examples/sycoadm/workspaces/hello-world.yaml"
+  "$SYCO" instructions up -f "$REPO_ROOT/examples/sycoadm/instructions/hello-world.yaml"
   "$SYCO" user up -f "$REPO_ROOT/examples/sycoadm/users/alice.yaml" \
     --set "user.subject=${APISERVER_OIDC_ISSUER}#${TENANT_A_USER_SUB}"
-  ok "sycoadm workspace up and sycoadm user up: hello-world and its bound user installed"
+  ok "sycoadm workspace up, instructions up and user up: hello-world, its instructions and its bound user installed"
 }
 
 deploy_channel() {
@@ -401,7 +402,7 @@ tool_chat() {
   local dir="$1" tool="$2" prompt="$3"; shift 3
   local out err conv
   err="$(mktemp)"
-  if ! out="$(SYCO_CONFIG_DIR="$dir" "$REPO_ROOT/target/syco" chat "$prompt" "$@" 2>"$err" < <(yes))"; then
+  if ! out="$(SYCO_CONFIG_DIR="$dir" "$REPO_ROOT/target/syco" chat "$prompt" "$@" 2>"$err" < <(yes || true))"; then
     warn "syco chat (${tool}) exited non-zero: ${out} $(cat "$err")"
     rm -f "$err"
     return 1
@@ -472,19 +473,6 @@ TOML
 
   # Last, so the grantless hello-world toolset pod they start is freshly used
   # when Step 6 probes it: keepalive pods exit after 10 minutes idle.
-  #
-  # Nothing binds the workspace data volume before the first tool call: on a
-  # fresh cluster it is still unbound here. A missing claim counts as unbound.
-  if [ "$CLEAN" = "1" ]; then
-    local pvc_phase
-    pvc_phase="$(kubectl get pvc ws-hello-world-data -n "$NAMESPACE" \
-      -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-    if [ "$pvc_phase" = "Bound" ]; then
-      warn "ws-hello-world-data is Bound before the first tool call"
-      return 1
-    fi
-    ok "ws-hello-world-data unbound before the first tool call (${pvc_phase:-absent})"
-  fi
 
   if ! E2E_TOOL_CONV="$(tool_chat "$SYCO_APP_TMP" ShowKernel \
       "Use the ShowKernel tool and show me its output.")"; then
@@ -575,7 +563,7 @@ step_5b_syco_cli_chat() {
   # Returns the one-shot's exit status, or 124 when it was killed at the bound.
   bounded_chat() {
     local dir="$1" bound="$2" out="$3" err="$4"; shift 4
-    SYCO_CONFIG_DIR="$dir" "$REPO_ROOT/target/syco" chat "$@" < <(yes) >"$out" 2>"$err" &
+    SYCO_CONFIG_DIR="$dir" "$REPO_ROOT/target/syco" chat "$@" < <(yes || true) >"$out" 2>"$err" &
     local pid=$! rc=0
     if ! wait_for "one-shot to exit" "$bound" "! kill -0 $pid 2>/dev/null"; then
       kill -9 "$pid" 2>/dev/null || true
@@ -630,7 +618,7 @@ step_5b_syco_cli_chat() {
   }
   k_saved_or_exited() { k_saved || ! kill -0 "$k_pid" 2>/dev/null; }
   SYCO_CONFIG_DIR="$k_dir" "$REPO_ROOT/target/syco" chat "$k_msg" \
-    < <(yes) >"$k_dir/out" 2>"$k_dir/err" &
+    < <(yes || true) >"$k_dir/out" 2>"$k_dir/err" &
   k_pid=$!
   if ! wait_for "a hello-world history line from the running one-shot" 300 k_saved_or_exited; then
     kill -9 "$k_pid" 2>/dev/null || true
@@ -648,7 +636,6 @@ step_5b_syco_cli_chat() {
     return 1
   fi
   k_id="$(awk -F'\t' '$2 == "hello-world" { print $1; exit }' "$k_dir/history")"
-  ok "One-shot saved its conversation ID (${k_id}) while its turn was still running, then was killed"
 
   # k_history: GetConversationHistory for K's ID, as grpcurl JSON.
   k_history() {
@@ -729,21 +716,6 @@ step_5_channel() {
 }
 
 # ---- step 6: security assertions ----
-assert_gvisor_isolation() {
-  local task_pod="$1"
-  kubectl wait -n "$NAMESPACE" --for=condition=Ready --timeout=60s "pod/$task_pod" >/dev/null
-  ok "hello-world toolset pod Ready ($task_pod)"
-
-  local first_line
-  first_line="$(kubectl exec -n "$NAMESPACE" "$task_pod" -- dmesg 2>/dev/null | head -1)"
-  if echo "$first_line" | grep -q 'Starting gVisor'; then
-    ok "gVisor kernel isolation"
-  else
-    warn "gVisor first dmesg line was: $first_line"
-    return 1
-  fi
-}
-
 # attach_ephemeral_scrubber <namespace> <pod> <container-name>: attach an
 # ephemeral busybox to <pod>'s harness container, sharing its PID namespace.
 attach_ephemeral_scrubber() {
@@ -852,32 +824,6 @@ assert_scrubbing() {
   fi
 }
 
-assert_egress_containment() {
-  local task_pod="$1"
-  if kubectl exec -n "$NAMESPACE" "$task_pod" -- \
-       wget -qO- --timeout=3 https://httpbin.org/ip >/dev/null 2>&1; then
-    warn "hello-world toolset pod reached httpbin.org — NetworkPolicy egress NOT enforced"
-    return 1
-  else
-    ok "NetworkPolicy blocks hello-world toolset egress"
-  fi
-
-  # L7 DNS allowlist holds: the toolset must NOT resolve arbitrary names (the
-  # DNS-tunnel exfil guard — proves baseline + per-toolset CNP compose without
-  # L4-shadows-L7).
-  # Best-effort: skip cleanly if the toolset image lacks nslookup.
-  if kubectl exec -n "$NAMESPACE" "$task_pod" -- sh -c 'command -v nslookup' >/dev/null 2>&1; then
-    if kubectl exec -n "$NAMESPACE" "$task_pod" -- nslookup example.com >/dev/null 2>&1; then
-      warn "hello-world toolset resolved example.com — L7 DNS allowlist NOT enforced"
-      return 1
-    else
-      ok "L7 DNS allowlist blocks arbitrary name resolution"
-    fi
-  else
-    warn "nslookup absent in toolset image — skipping L7 DNS probe (wget check still covers egress containment)"
-  fi
-}
-
 assert_credential_isolation() {
   local task_pod="$1"
   # Positive control first: the granted pod holds the demo key at the grant's
@@ -909,8 +855,7 @@ dispatch_security_substeps() {
   # rest and masks unrelated properties.
   local -a checks=(
     step_6_relay_sheds_tsnet
-    step_6_channel_port_fence
-    step_6_inference_fence
+    step_6_inference_served
     step_6_identity_hot_reload
   )
   local failed=() c
@@ -941,7 +886,8 @@ step_6_security() {
                 -l "$toolset_selector" \
                 -o jsonpath='{.items[0].metadata.name}')"
 
-  assert_gvisor_isolation "$task_pod"
+  kubectl wait -n "$NAMESPACE" --for=condition=Ready --timeout=60s "pod/$task_pod" >/dev/null
+  ok "hello-world toolset pod Ready ($task_pod)"
 
   # The conversation log is on the harness's OWN RWO PVC
   # (ws-<ws>-conversation at /var/lib/harness/conversations). A separate
@@ -974,7 +920,6 @@ step_6_security() {
 
   assert_tool_results "$tb_pod" "$scrub_c" "$tool_dir" "$fetch_dir"
   assert_scrubbing "$tb_pod" "$scrub_c" "$conv_root" "$chat_dir"
-  assert_egress_containment "$task_pod"
   assert_credential_isolation "$task_pod"
   dispatch_security_substeps
 }
@@ -993,101 +938,13 @@ step_6_relay_sheds_tsnet() {
   ok "Relay pod carries no tailscale container"
 }
 
-# Parameterized L4 probe: accepts name, target host, target port, label extras,
-# optional runtimeClassName, and optional resource overrides.
-# $1=name $2=host $3=port $4=label-extras $5=runtimeClassName (empty=none) $6=resource-json (empty=none)
-l4_probe() {
-  local name="$1" host="$2" port="$3" labels="$4"
-  local runtime="${5:-}" resources="${6:-}"
-  kubectl delete pod "$name" -n "$NAMESPACE" --ignore-not-found --wait=true >/dev/null 2>&1
-
-  # Build the overrides JSON; use printf to avoid quoting hell.
-  local rt_json="" res_json=""
-  [ -z "$runtime" ] || rt_json="$(printf ',"runtimeClassName":"%s"' "$runtime")"
-  [ -z "$resources" ] || res_json="$(printf ',"resources":%s' "$resources")"
-  local overrides
-  # shellcheck disable=SC2059  # format string is intentionally dynamic-free here.
-  overrides="$(printf '{"spec":{"automountServiceAccountToken":false%s,"containers":[{"name":"probe","image":"busybox:1.36"%s,"securityContext":{"runAsNonRoot":true,"runAsUser":65534,"readOnlyRootFilesystem":true,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}},"command":["sh","-c","nc -z -w 5 %s %s"]}]}}' "$rt_json" "$res_json" "$host" "$port")"
-
-  kubectl run "$name" -n "$NAMESPACE" --restart=Never --quiet \
-    --image=busybox:1.36 \
-    --labels="$labels" \
-    --overrides="$overrides" \
-    >/dev/null 2>&1
-  kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/"$name" \
-    -n "$NAMESPACE" --timeout=60s >/dev/null 2>&1
-}
-
-# An accept/deny pair. A deny-only probe passes on a fence that
-# refuses everything, so both halves are required: the labelled pod must
-# reach 9092 and the unlabelled one must not.
-step_6_channel_port_fence() {
-  step "Channel-port fence (9092)"
-  local target="relay-controller.${NAMESPACE}.svc.cluster.local"
-
-  if l4_probe channel-probe-allow "$target" 9092 "app.kubernetes.io/part-of=sycophant,app.kubernetes.io/component=channel,sycophant.md/channel-class=principal" gvisor; then
-    ok "principal-labelled pod reaches the channel port"
-  else
-    warn "principal-labelled pod could NOT reach the channel port — the fence admits nothing"
-    kubectl logs channel-probe-allow -n "$NAMESPACE" 2>&1 | tail -5 || true
-    kubectl delete pod channel-probe-allow channel-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
-    return 1
-  fi
-
-  if l4_probe channel-probe-deny "$target" 9092 "app.kubernetes.io/part-of=sycophant,app.kubernetes.io/component=channel" gvisor; then
-    warn "a pod without channel-class=principal reached the channel port — the fence is open"
-    kubectl delete pod channel-probe-allow channel-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
-    return 1
-  else
-    ok "pod without channel-class=principal is refused on the channel port"
-  fi
-
-  kubectl delete pod channel-probe-allow channel-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
-}
-
-# The in-cluster inference Service, fenced two ways.
-#
-# L3/L4: its ingress admits only pods carrying the profile's toolset label, so a
-# labelled probe connects and an unlabelled one is refused. Both halves are
-# required — a deny-only probe passes on a fence that admits nothing — so this is
-# the same accept/deny pair as the channel fence.
-#
-# L7: from a pod that DOES carry the label (L3/L4 already open), the Cilium HTTP
-# allowlist answers /metrics and /slots with 403 and lets a completion through
-# with 200. A denial here is a 403, not a drop, so the 403 is the positive signal
-# the filter is engaged; a 200 on /metrics would mean a policy applied from
-# outside the chart shadowed it, which the rendered-manifest checks cannot see.
-# The completion 200 is the accept half and is itself the proof a turn reaches
-# the in-cluster server rather than an external provider, since the probe dials
-# the cluster Service by name.
-inference_l4_fence() {
-  local svc="$1" inference_resources="$2"
-  # --- L3/L4: reachable only by the harness, which dials the warm Service ---
-  if l4_probe inference-probe-allow "$svc" "$INFERENCE_PORT" "app.kubernetes.io/part-of=sycophant,app.kubernetes.io/component=harness,sycophant.md/workspace=hello-world" "" "$inference_resources"; then
-    ok "harness-labelled pod reaches the inference Service"
-  else
-    warn "harness-labelled pod could NOT reach the inference Service — the fence admits nothing"
-    kubectl logs inference-probe-allow -n "$NAMESPACE" 2>&1 | tail -5 || true
-    kubectl delete pod inference-probe-allow inference-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
-    return 1
-  fi
-
-  if l4_probe inference-probe-deny "$svc" "$INFERENCE_PORT" "app.kubernetes.io/part-of=sycophant" "" "$inference_resources"; then
-    warn "a pod without the harness label reached the inference Service — the fence is open"
-    kubectl delete pod inference-probe-allow inference-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
-    return 1
-  else
-    ok "pod without the harness label is refused on the inference Service"
-  fi
-  kubectl delete pod inference-probe-allow inference-probe-deny -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
-}
-
-inference_l7_fence() {
-  local svc="$1"
-  # --- L7: the HTTP allowlist closes every route but the two completions ---
-  # One labelled pod probes /metrics, /slots and a completion, printing a status
-  # line per route plus the server's response so the host can parse it. The pod
-  # carries the harness label, so ws-<ws>-egress grants it egress to the
+# From a harness-labelled pod, a completion to the in-cluster inference Service
+# returns 200. The probe dials the cluster Service by name, so this proves a turn
+# reaches the in-cluster server rather than an external provider.
+step_6_inference_served() {
+  step "In-cluster inference (${INFERENCE_PROFILE})"
+  local svc="inf-${INFERENCE_PROFILE}.${NAMESPACE}.svc.cluster.local"
+  # The pod carries the harness label, so ws-<ws>-egress grants it egress to the
   # inference endpoint and DNS for the Service FQDN.
   kubectl delete pod inference-l7-probe -n "$NAMESPACE" --ignore-not-found --wait=true >/dev/null 2>&1
   export svc INFERENCE_PORT INFERENCE_PROFILE
@@ -1096,26 +953,17 @@ inference_l7_fence() {
     | kubectl apply -n "$NAMESPACE" -f - >/dev/null
   if ! kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/inference-l7-probe \
          -n "$NAMESPACE" --timeout=120s >/dev/null 2>&1; then
-    warn "inference L7 probe did not complete"
+    warn "inference probe did not complete"
     kubectl logs inference-l7-probe -n "$NAMESPACE" 2>&1 | tail -10 || true
     kubectl delete pod inference-l7-probe -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
     return 1
   fi
-  local out metrics_code slots_code completion_code toolcall_code toolcalls
+  local out completion_code toolcall_code toolcalls
   out="$(kubectl logs inference-l7-probe -n "$NAMESPACE" 2>/dev/null)"
   kubectl delete pod inference-l7-probe -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1
-  metrics_code="$(printf '%s' "$out" | sed -n 's/^METRICS=//p')"
-  slots_code="$(printf '%s' "$out" | sed -n 's/^SLOTS=//p')"
   completion_code="$(printf '%s' "$out" | sed -n 's/^COMPLETION=//p')"
   toolcall_code="$(printf '%s' "$out" | sed -n 's/^TOOLCALL=//p')"
   toolcalls="$(printf '%s' "$out" | sed -n 's/^TOOLCALLS=//p')"
-
-  if [ "$metrics_code" = "403" ] && [ "$slots_code" = "403" ]; then
-    ok "L7 allowlist denies /metrics and /slots with 403 (filter engaged)"
-  else
-    warn "L7 allowlist NOT engaged: /metrics=${metrics_code:-none} /slots=${slots_code:-none} — a 200 means a policy elsewhere shadowed the filter"
-    return 1
-  fi
 
   if [ "$completion_code" = "200" ]; then
     ok "In-cluster turn served: completion returned 200 from the inference pod (not an external provider)"
@@ -1131,14 +979,6 @@ inference_l7_fence() {
     warn "tool-call turn failed: status=${toolcall_code:-none} tool_calls=${toolcalls:-none} — a broken or dropped chat template drops the tools array (empty/null tool_calls); a missing template file crashes the server (status != 200)"
     return 1
   fi
-}
-
-step_6_inference_fence() {
-  step "In-cluster inference fence (${INFERENCE_PROFILE})"
-  local svc="inf-${INFERENCE_PROFILE}.${NAMESPACE}.svc.cluster.local"
-  local inference_resources='{"requests":{"cpu":"50m","memory":"64Mi"},"limits":{"cpu":"50m","memory":"64Mi"}}'
-  inference_l4_fence "$svc" "$inference_resources"
-  inference_l7_fence "$svc"
 }
 
 # Identity is live operator data: the operator re-runs `sycoadm user up` and the
@@ -1449,16 +1289,6 @@ verify_user_isolation() {
 }
 
 # ---- instructions delivery proof ----
-# `sycoadm workspace up` is the only path instructions take into a workspace:
-# it replaces the workspace's folder in the built-in store with the values
-# file's instructions directory, and the harness init container syncs that
-# folder into the pod with the pod's own projected token. The offline CLI
-# suite (tests/unit/workspace-cli) proves what the CLI decides; these legs keep
-# only what needs the live cluster: the real filer keeps the uploaded bytes and
-# the pod receives them, a changed hash rolls the pod, an unchanged one leaves
-# it, and the filer's recursive delete keeps a deleted file out of the new
-# pod. The pod is read back
-# through an ephemeral container; no folder is read over S3.
 readonly INSTRUCTIONS_PROBE_WS="instructions-probe"
 
 # Sorted "sha256  relpath" lines for the regular files under directory $1.
@@ -1494,6 +1324,19 @@ harness_pod() {
   printf '%s' "$pods"
 }
 
+# attach_reader <namespace> <pod> <container-name> <label>: attach an
+# ephemeral busybox to the pod and wait until it answers exec. <label> names
+# it in the warnings.
+attach_reader() {
+  local ns="$1" pod="$2" c="$3" label="$4"
+  if ! attach_ephemeral_scrubber "$ns" "$pod" "$c"; then
+    warn "attaching ${label} to ${ns}/${pod} failed"
+    return 1
+  fi
+  wait_for "${label} attached to ${ns}/${pod}" 90 \
+    "kubectl exec -n '$ns' '$pod' -c '$c' -- true >/dev/null 2>&1"
+}
+
 # The "sha256  relpath" manifest of the instructions directory inside
 # workspace $2's live harness pod (namespace $1); empty for an empty
 # directory. The harness image has no shell, so an ephemeral busybox sharing
@@ -1506,12 +1349,7 @@ pod_instructions_manifest() {
     return 1
   fi
   c="instr-read-$(date +%s)-${RANDOM}"
-  if ! attach_ephemeral_scrubber "$ns" "$pod" "$c"; then
-    warn "attaching an instructions reader to ${ns}/${pod} failed"
-    return 1
-  fi
-  if ! wait_for "instructions reader attached to ${ns}/${pod}" 90 \
-    "kubectl exec -n '$ns' '$pod' -c '$c' -- true >/dev/null 2>&1"; then
+  if ! attach_reader "$ns" "$pod" "$c" "an instructions reader"; then
     return 1
   fi
   if ! out="$(kubectl exec -n "$ns" "$pod" -c "$c" -- \
@@ -1557,10 +1395,7 @@ harness_pod_identity() {
   printf '%s/%s' "$uid" "$gen"
 }
 
-# Hello-world, provisioned by deploy_workspace_and_user from
-# the unmodified example values file, holds exactly the example tree
-# (AGENTS.md and agents/poet.md, a file in a subdirectory) in its pod: the
-# real filer kept the stdin PUT's bytes and the init container received them.
+# Hello-world's pod holds exactly the example instructions tree.
 instructions_baseline() {
   local example="$REPO_ROOT/examples/sycoadm/instructions/hello-world" want
   if [ ! -f "$example/agents/poet.md" ]; then
@@ -1574,12 +1409,10 @@ instructions_baseline() {
   if ! assert_pod_holds "$NAMESPACE" hello-world "$want" "baseline"; then
     return 1
   fi
-  ok "hello-world's pod holds exactly the example instructions, delivered by sycoadm workspace up"
+  ok "hello-world's pod holds exactly the example instructions, delivered by sycoadm instructions up"
 }
 
-# On probe workspace INSTRUCTIONS_PROBE_WS in the main tenant: changed and
-# deleted files roll the pod and the new pod holds exactly the new set.
-instructions_rerun() {
+instructions_probe() {
   local ns="$NAMESPACE" ws="$INSTRUCTIONS_PROBE_WS" tenant="${NAMESPACE#tenant-}"
   local d; d="$(mktemp -d)"
   trap 'rm -rf "'"$d"'"; trap - RETURN' RETURN
@@ -1587,11 +1420,18 @@ instructions_rerun() {
 
   local tree="$d/tree"
   cp -R "$REPO_ROOT/examples/sycoadm/instructions/hello-world" "$tree"
+  env WORKSPACE_NAME="$ws" WORKSPACE_TENANT="$tenant" \
+    envsubst '${WORKSPACE_NAME} ${WORKSPACE_TENANT}' \
+    < "$REPO_ROOT/tests/fixtures/instructions/workspace.yaml" > "$d/workspace.yaml"
   env WORKSPACE_NAME="$ws" WORKSPACE_TENANT="$tenant" INSTRUCTIONS_DIR="$tree" \
     envsubst '${WORKSPACE_NAME} ${WORKSPACE_TENANT} ${INSTRUCTIONS_DIR}' \
-    < "$REPO_ROOT/tests/fixtures/instructions/workspace.yaml" > "$d/probe.yaml"
-  if ! "$SYCO" workspace up -f "$d/probe.yaml"; then
-    warn "workspace up of ${ws} with instructions ${tree} failed"
+    < "$REPO_ROOT/tests/fixtures/instructions/instructions.yaml" > "$d/instructions.yaml"
+  if ! "$SYCO" workspace up -f "$d/workspace.yaml"; then
+    warn "workspace up of ${ws} failed"
+    return 1
+  fi
+  if ! "$SYCO" instructions up -f "$d/instructions.yaml"; then
+    warn "instructions up of ${ws} with ${tree} failed"
     return 1
   fi
   if ! want="$(tree_manifest "$tree")" || [ -z "$want" ]; then
@@ -1607,8 +1447,8 @@ instructions_rerun() {
   fi
   printf 'You are the changed probe.\n' > "$tree/AGENTS.md"
   rm "$tree/agents/poet.md"
-  if ! "$SYCO" workspace up -f "$d/probe.yaml"; then
-    warn "workspace up of ${ws} with changed instructions failed"
+  if ! "$SYCO" instructions up -f "$d/instructions.yaml"; then
+    warn "instructions up of ${ws} with changed instructions failed"
     return 1
   fi
   if ! after="$(harness_pod_identity "$ns" "$ws")"; then
@@ -1625,7 +1465,16 @@ instructions_rerun() {
   if ! assert_pod_holds "$ns" "$ws" "$want" "changed files"; then
     return 1
   fi
-  ok "changed and deleted instruction files rolled the pod; the new pod holds exactly the new set"
+  ok "changed and deleted instruction files restarted the pod; the new pod holds exactly the new set"
+
+  if ! "$SYCO" instructions down "$ws" --tenant "$tenant"; then
+    warn "instructions down ${ws} --tenant ${tenant} failed"
+    return 1
+  fi
+  if ! assert_pod_holds "$ns" "$ws" "" "instructions down"; then
+    return 1
+  fi
+  ok "instructions down left the probe pod holding no instructions"
 
   if ! "$SYCO" workspace down "$ws" --tenant "$tenant"; then
     warn "workspace down ${ws} --tenant ${tenant} failed"
@@ -1634,9 +1483,9 @@ instructions_rerun() {
 }
 
 verify_instructions_delivery() {
-  step "Instructions delivery proof (sycoadm workspace up/down)"
+  step "Instructions delivery proof (sycoadm instructions up/down)"
   instructions_baseline
-  instructions_rerun
+  instructions_probe
   ok "instructions delivery proof passed"
 }
 

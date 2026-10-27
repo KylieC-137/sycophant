@@ -29,8 +29,8 @@ harness:
     # with the pod's own projected service-account token, exchanged through the
     # store's STS for a short-lived read-only credential scoped to that folder.
     # The token is mounted into the init container ONLY; no Secret is read.
-    # `sycoadm workspace up` uploads the folder from the workspace values
-    # file's `instructions` directory.
+    # `sycoadm instructions up` delivers the folder; its job restarts the
+    # workspace so this init container syncs the new files.
     #
     # The store is one shared cluster component in the operator-owned system
     # namespace (charts/sycophant-objectstore), not a per-tenant instance. The

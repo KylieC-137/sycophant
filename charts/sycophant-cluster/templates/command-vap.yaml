@@ -183,7 +183,7 @@ the second install; decide whether to reject such names here instead.
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-workspace" "prefix" true
   "command" (include "sycophant.workspaceProvisionCommandName" .) "noun" "workspace" "action" "mint a workspace"
-  "keys" (list "toolsets" "models" "storage" "instructions-hash")
+  "keys" (list "toolsets" "models" "storage")
   "keyPattern" `^grant\.[a-z0-9]([-a-z0-9]*[a-z0-9])?\.[a-z0-9]([-a-z0-9]*[a-z0-9])?\.(secret|path|egress)$`
   "keyHelp" "grant.<toolset>.<grant>.<secret|path|egress>"
   "shape" `
@@ -236,11 +236,7 @@ the second install; decide whether to reject such names here instead.
     "a workspace command's '" +
     object.data.filter(k, k.startsWith('grant.') && k.endsWith('.egress') &&
     !object.data[k].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$'))[0] +
-    "' must be a dotted hostname"
-- expression: >-
-    !has(object.data) || !('instructions-hash' in object.data) ||
-    object.data['instructions-hash'].matches('^[a-f0-9]{64}$')
-  message: "a workspace command's 'instructions-hash' must be 64 lowercase hex characters"` ) }}
+    "' must be a dotted hostname"` ) }}
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-reap-workspace" "prefix" true
   "command" "reap-workspace" "noun" "reap-workspace" "action" "remove a workspace"
@@ -250,6 +246,32 @@ the second install; decide whether to reject such names here instead.
     variables.suffix.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
     size(variables.suffix) <= 49
   message: "a reap command name must be reap-workspace-<name> with a DNS-safe name of at most 49 characters"` ) }}
+---
+{{- /*
+One workspace's instructions folder, carried whole as `archive` (a base64 gzip
+tar). No pattern runs over the archive: a CEL pass over a value near the 1 MiB
+object limit risks the policy's cost budget. The job checks the archive.
+*/}}
+{{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-instructions" "prefix" true
+  "command" (include "sycophant.instructionsProvisionCommandName" .) "noun" "instructions" "action" "deliver instructions"
+  "keys" (list "archive")
+  "shape" `
+- expression: >-
+    variables.suffix.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
+    size(variables.suffix) <= 49
+  message: "an instructions command name must be provision-instructions-<workspace> with a DNS-safe name of at most 49 characters"
+- expression: >-
+    has(object.data) && 'archive' in object.data
+  message: "an instructions command must carry an 'archive'"` ) }}
+---
+{{ include "sycophant.commandVap" (dict "ctx" . "name" "command-reap-instructions" "prefix" true
+  "command" "reap-instructions" "noun" "reap-instructions" "action" "remove instructions"
+  "keys" (list)
+  "shape" `
+- expression: >-
+    variables.suffix.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
+    size(variables.suffix) <= 49
+  message: "a reap command name must be reap-instructions-<workspace> with a DNS-safe name of at most 49 characters"` ) }}
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-user" "prefix" true
   "command" (include "sycophant.userProvisionCommandName" .) "noun" "user" "action" "bind a user"

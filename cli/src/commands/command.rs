@@ -9,6 +9,7 @@ use serde_json::Value;
 
 use crate::cli::Values;
 use crate::commands::common::{ok, wait_for};
+use crate::commands::instructions;
 use crate::commands::operator::{self, Operator, OperatorKube};
 use crate::runner::{run_output, run_stdin, run_stdin_bytes};
 use crate::scope::Scope;
@@ -102,13 +103,7 @@ pub(crate) fn apply(op: &Operator, kind: &str, manifest: &str) -> Result<(), Str
 
 /// Render and write the `reap-<kind>-…` command into tenant `tenant` as the
 /// operator, and wait for the uninstall Job its uid names.
-pub(crate) fn reap(
-    op: &Operator,
-    kind: &str,
-    key: &str,
-    value: &str,
-    tenant: &str,
-) -> Result<(), String> {
+fn reap(op: &Operator, kind: &str, key: &str, value: &str, tenant: &str) -> Result<(), String> {
     let manifest = render(
         &format!("{kind}-reap"),
         &[
@@ -163,25 +158,18 @@ pub(crate) fn up(kind: &str, values: &Values) -> Result<(), String> {
     // registry and rewritten to in-cluster references — the
     // distribution-agnostic path that works on any cluster with a registry,
     // not just k3d image import.
-    let mut extra_files: Vec<(String, operator::TempFile)> = Vec::new();
-    let overrides = match kind {
-        "inference" => push_inference_images(values)?,
-        "toolset" => {
-            let (ov, f) = push_toolset_image(values)?;
-            if let Some(f) = f {
-                extra_files.push((f.path(), f));
-            }
-            ov
-        }
-        _ => Vec::new(),
+    let (overrides, extra) = match kind {
+        "inference" => (push_inference_images(values)?, None),
+        "toolset" => push_toolset_image(values)?,
+        "instructions" => (Vec::new(), Some(instructions::pack(values)?)),
+        _ => (Vec::new(), None),
     };
     for (key, val) in overrides {
         args.push("--set-string".to_string());
         args.push(format!("{key}={val}"));
     }
-    for (path, _tmp) in &extra_files {
-        args.push("-f".to_string());
-        args.push(path.clone());
+    if let Some(f) = &extra {
+        args.extend(["-f".into(), f.path()]);
     }
 
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -358,7 +346,7 @@ pub(crate) fn suspend(op: &Operator, ns: &str, keepalive: Option<&str>) -> Resul
 }
 
 /// Extract the target namespace from a rendered provision command manifest.
-pub(crate) fn manifest_namespace(manifest: &str) -> Option<String> {
+fn manifest_namespace(manifest: &str) -> Option<String> {
     let doc: serde_yaml::Value = serde_yaml::from_str(manifest).ok()?;
     doc["metadata"]["namespace"].as_str().map(|s| s.to_string())
 }

@@ -9,7 +9,6 @@ use crate::commands::build;
 use crate::commands::command::{COMMAND_WRITER_VERBS, SYSTEM_NS};
 use crate::commands::common::{ok, step, wait_for, warn};
 use crate::commands::operator;
-use crate::commands::workspace;
 use crate::runner::{run_output, run_passthrough, run_silent, run_stdin};
 use crate::scope::Scope;
 
@@ -905,17 +904,25 @@ fn install_objectstore(scope: &Scope) -> Result<(), String> {
     Ok(())
 }
 
+const BUCKET: &str = "sycophant-instructions";
+
 /// Create the instructions bucket through the store's filer. A bucket is a
 /// filer directory, and creating one is idempotent: 201 (created) and 409
 /// (exists) both succeed. The pod turns ready on the s3 port before the filer
 /// answers, so retry for a minute; any other status fails setup.
 fn create_instructions_bucket() -> Result<(), String> {
     let mut last = String::new();
-    wait_for(&format!("bucket {}", workspace::BUCKET), 60, || {
-        let url = workspace::bucket_url();
-        let argv = workspace::store_exec(
-            false,
+    wait_for(&format!("bucket {BUCKET}"), 60, || {
+        let url = format!("http://localhost:8888/buckets/{BUCKET}/");
+        last = run_output(
+            "kubectl",
             &[
+                "exec",
+                "-n",
+                SYSTEM_NS,
+                "deploy/seaweedfs",
+                "--",
+                "curl",
                 "-sS",
                 "-o",
                 "/dev/null",
@@ -925,8 +932,8 @@ fn create_instructions_bucket() -> Result<(), String> {
                 "POST",
                 &url,
             ],
-        );
-        last = run_output("kubectl", &argv).unwrap_or_else(|e| e);
+        )
+        .unwrap_or_else(|e| e);
         last == "201" || last == "409"
     })
     .map_err(|e| format!("{e}; last answer: {last}"))

@@ -12,7 +12,7 @@ source "$HERE/../lib.sh"
 LOCAL='{"format":"openai","model":"liquid/lfm2.5-8b-a1b","server.image":"llama-server:local","server.weights":"ghcr.io/example/weights:1","server.weightsPath":"/weights/model.gguf"}'
 REMOTE='{"format":"openai","model":"deepseek/deepseek-v4-flash","baseUrl":"https://openrouter.ai/api/v1","image":"inference-runtime:local","secret":"llm-openrouter"}'
 TOOLSET='{"image":"ghcr.io/sycophant-md/git@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","keepalive":"false","tool.git-status.description":"Show the working tree status.","tool.git-commit.description":"Commit staged changes.","tool.git-commit.arg.message.type":"string","tool.git-commit.arg.message.required":"true","tool.git-commit.arg.message.env":"MESSAGE"}'
-WORKSPACE='{"toolsets":"git,ssh","models":"a,b","storage":"5Gi","grant.ssh.demo.secret":"demo-key","grant.ssh.demo.path":"/home/agent/.ssh/id","grant.ssh.demo.egress":"github.com","grant.ssh.local.secret":"local-key","grant.ssh.local.path":"/home/agent/.ssh/local","instructions-hash":"abababababababababababababababababababababababababababababababab"}'
+WORKSPACE='{"toolsets":"git,ssh","models":"a,b","storage":"5Gi","grant.ssh.demo.secret":"demo-key","grant.ssh.demo.path":"/home/agent/.ssh/id","grant.ssh.demo.egress":"github.com","grant.ssh.local.secret":"local-key","grant.ssh.local.path":"/home/agent/.ssh/local"}'
 CHANNEL='{"loginServer":"http://headscale:8080"}'
 SUBJECT="https://issuer.example#alice"
 HASH="$(printf '%s' "$SUBJECT" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-10)"
@@ -44,15 +44,7 @@ render workspace workspace --set name=one --set-json "command=$WORKSPACE"
 render wsbase workspace --set name=one --set-json 'command={}'
 render user user --set-string name="$HASH" --set-json "command=$USER_COMMAND"
 render user-missing-ws user --set-string name="$HASH" --set-json "command=$USER_MISSING_WS"
-OIDC=(--set oidc.issuer=https://issuer.example.com --set oidc.clientId=sycophant-objectstore)
 render store objectstore
-render store-oidc objectstore "${OIDC[@]}" --set oidc.egress.external.port=443
-render store-oidc-again objectstore "${OIDC[@]}" --set oidc.egress.external.port=443
-render store-incluster objectstore --set oidc.issuer=http://oidc-fixture.sycophant-system.svc.cluster.local \
-  --set oidc.clientId=sycophant-objectstore --set oidc.egress.inCluster.port=8080 \
-  --set oidc.egress.inCluster.endpointSelector.matchLabels.app\\.kubernetes\\.io/name=oidc-fixture
-render store-emptylabels objectstore "${OIDC[@]}" --set oidc.egress.inCluster.port=8080 \
-  --set-json 'oidc.egress.inCluster.endpointSelector={"matchLabels":{}}'
 for m in override:'{"server.weightsPath":"/opt/m.gguf","server.contextBudget":"8192","server.slots":"1","server.outputCap":"512","server.threads":"2","server.memory":"4Gi","server.cpu":"2"}' \
          mount:'{"server.weightsDelivery":"mount"}' \
          tpl-copy:'{"server.chatTemplate":"TEMPLATE-BODY"}' \
@@ -413,15 +405,6 @@ def command_data_size(docs):
     return None if size == "5Gi" else f"ws-one-data must request the command's 5Gi; got {size}"
 check("a workspace command sizes its data volume at 5Gi", "workspace", command_data_size)
 
-# The instructions hash rides the pod template, so changed instructions roll the pod.
-def command_instructions_checksum(docs):
-    d = get(docs, "Deployment", "ws-one")
-    ann = (pod(d)["metadata"].get("annotations") or {}) if d else {}
-    want = "abababababababababababababababababababababababababababababababab"
-    got = ann.get("checksum/instructions")
-    return None if got == want else f"pod template checksum/instructions must be the command's instructions-hash; got {got!r}"
-check("a workspace command stamps its instructions-hash on the pod template", "workspace", command_instructions_checksum)
-
 WORKSPACE_OBJECTS = sorted([
     "CiliumNetworkPolicy/ws-one-egress", "CiliumNetworkPolicy/ws-one-grant-ssh-demo", "CiliumNetworkPolicy/ws-one-job-ingress",
     "ConfigMap/ws-one-capability-grants", "ConfigMap/ws-one-relay-grants", "Deployment/ws-one",
@@ -723,44 +706,49 @@ check("the local model admits only harness on 8080 for two POST routes and egres
 def store_ingress(docs):
     d = get(docs, "CiliumNetworkPolicy", "objectstore")
     rules = (d or {}).get("spec", {}).get("ingress") or []
-    froms = [fe.get("matchLabels") for r in rules for fe in r.get("fromEndpoints") or []]
-    want = [{"app.kubernetes.io/component": "harness", "app.kubernetes.io/part-of": "sycophant"}]
-    return None if froms == want and {p for r in rules for p in ports(r)} == {8333} else f"store ingress must admit only harness on 8333, got {froms} {[ports(r) for r in rules]}"
-check("the object store admits only harness pods, on 8333 only", "store", store_ingress)
+    got = sorted((json.dumps([fe.get("matchLabels") for fe in r.get("fromEndpoints") or []], sort_keys=True),
+                  json.dumps([fe.get("matchExpressions") for fe in r.get("fromEndpoints") or []], sort_keys=True),
+                  sorted(ports(r))) for r in rules)
+    harness = (json.dumps([{"app.kubernetes.io/component": "harness", "app.kubernetes.io/part-of": "sycophant"}], sort_keys=True),
+               json.dumps([[{"key": "k8s:io.kubernetes.pod.namespace", "operator": "Exists"}]], sort_keys=True), [8333])
+    filer = [r for r in rules if ports(r) == {8888}]
+    # A fromEndpoints selector with no namespace label matches the policy's own namespace.
+    filer_from = sorted(((fe.get("matchLabels") or {}).get("app.kubernetes.io/component"),
+                         (fe.get("matchLabels") or {}).get("k8s:io.kubernetes.pod.namespace", "sycophant-system"))
+                        for r in filer for fe in r.get("fromEndpoints") or [])
+    exprs = [fe.get("matchExpressions") for r in filer for fe in r.get("fromEndpoints") or [] if fe.get("matchExpressions")]
+    problems = [
+        harness not in got and f"harness must reach 8333 from every namespace, got {got}",
+        len(rules) != 2 and f"want exactly the harness 8333 rule and one filer 8888 rule, got {got}",
+        filer_from != [("provision-instructions", "sycophant-system"), ("uninstall-instructions", "sycophant-system")]
+        and f"filer 8888 must admit only the instructions job pods in sycophant-system, got {filer_from}",
+        exprs and f"the filer rule must not widen past sycophant-system: {exprs}",
+    ]
+    return [p for p in problems if p] or None
+check("the object store admits harness pods on 8333 and only the instructions jobs on the filer's 8888", "store", store_ingress)
 
-def store_egress(_):
-    def shape(out):
-        p = [d for d in cnps(load(out)[0]) if (d["spec"].get("endpointSelector") or {}).get("matchLabels", {}).get("app.kubernetes.io/component") == "objectstorage"]
-        if len(p) != 1:
-            return f"{len(p)} store policies"
-        eg = p[0]["spec"].get("egress") or []
-        peers = [e.get("matchLabels") for r in eg for e in r.get("toEndpoints") or [] if (e.get("matchLabels") or {}).get("k8s-app") != "kube-dns"]
-        dns = sorted(json.dumps(n, sort_keys=True) for r in eg for t in r.get("toPorts") or [] for n in (t.get("rules") or {}).get("dns") or [])
-        return (peers, [f.get("matchName") for r in eg for f in r.get("toFQDNs") or []], [c for r in eg for c in r.get("toCIDR") or []],
-                [r for r in eg if r.get("toEntities")], dns)
-    api = [{"toEntities": ["kube-apiserver"], "toPorts": [{"ports": [{"port": "6443", "protocol": "TCP"}]}]}]
-    names = lambda *h: sorted(json.dumps({"matchName": n}) for n in ("kubernetes.default.svc.cluster.local",) + h)
-    want = {"store": ([], [], [], api, names()),
-            "store-oidc": ([], ["issuer.example.com"], [], api, names("issuer.example.com")),
-            "store-incluster": ([{"app.kubernetes.io/name": "oidc-fixture"}], [], [], api, names("oidc-fixture.sycophant-system.svc.cluster.local"))}
-    got = {o: shape(o) for o in want}
+def store_filer_port(docs):
+    svc = get(docs, "Service", "seaweedfs")
+    got = sorted((p.get("name"), p.get("port")) for p in (svc or {}).get("spec", {}).get("ports") or [])
+    return None if got == [("filer", 8888), ("s3", 8333)] else f"Service seaweedfs ports must be s3 8333 and filer 8888, got {got}"
+check("the store Service publishes the filer on 8888 beside s3", "store", store_filer_port)
+
+def store_egress(docs):
+    p = [d for d in cnps(docs) if (d["spec"].get("endpointSelector") or {}).get("matchLabels", {}).get("app.kubernetes.io/component") == "objectstorage"]
+    if len(p) != 1:
+        return f"{len(p)} store policies"
+    eg = p[0]["spec"].get("egress") or []
+    peers = [e.get("matchLabels") for r in eg for e in r.get("toEndpoints") or [] if (e.get("matchLabels") or {}).get("k8s-app") != "kube-dns"]
+    dns = sorted(json.dumps(n, sort_keys=True) for r in eg for t in r.get("toPorts") or [] for n in (t.get("rules") or {}).get("dns") or [])
+    got = (peers, [f.get("matchName") for r in eg for f in r.get("toFQDNs") or []], [c for r in eg for c in r.get("toCIDR") or []],
+           [r for r in eg if r.get("toEntities")], dns)
+    want = ([], [], [], [{"toEntities": ["kube-apiserver"], "toPorts": [{"ports": [{"port": "6443", "protocol": "TCP"}]}]}],
+            [json.dumps({"matchName": "kubernetes.default.svc.cluster.local"})])
     return None if got == want else f"want {want}, got {got}"
-check("the store egresses to DNS and the apiserver, plus exactly one peer for an operator issuer", ([], None), store_egress)
-
-check("the store schema admits an external issuer and refuses an empty in-cluster selector", ([], None),
-      lambda _: None if int(open(f"{work}/store-oidc.rc").read()) == 0 and int(open(f"{work}/store-emptylabels.rc").read()) != 0
-      else "want store-oidc to render and store-emptylabels to fail")
-
-def store_deployment(out):
-    return next(d for d in load(out)[0] if d["kind"] == "Deployment" and pod(d)["metadata"]["labels"].get("app.kubernetes.io/component") == "objectstorage")
-
-def store_checksum(_):
-    sums = [(pod(store_deployment(o))["metadata"].get("annotations") or {}).get("checksum/config") for o in ("store", "store-oidc", "store-oidc-again")]
-    return None if sums[0] and sums[1] and sums[0] != sums[1] and sums[1] == sums[2] else f"checksum/config across default, oidc, oidc again: {sums}"
-check("the store pod's config checksum changes with the IAM config and only with it", ([], None), store_checksum)
+check("the store egresses only to DNS and the apiserver", "store", store_egress)
 
 def store_pod(docs):
-    spec = pod(store_deployment("store"))["spec"]
+    spec = pod(next(d for d in docs if d["kind"] == "Deployment" and pod(d)["metadata"]["labels"].get("app.kubernetes.io/component") == "objectstorage"))["spec"]
     c, = spec["containers"]
     args = " ".join((c.get("args") or []) + (c.get("command") or []))
     csc, psc = c.get("securityContext") or {}, spec.get("securityContext") or {}
@@ -773,47 +761,6 @@ def store_pod(docs):
     ]
     return [p for p in problems if p] or None
 check("the store pod runs SeaweedFS with its IAM config, no token and a read-only root", "store", store_pod)
-
-def iam(out):
-    import base64
-    sec, = [d for d in load(out)[0] if d["kind"] == "Secret" and d["metadata"]["name"] == "seaweedfs-iam"]
-    return json.loads(base64.b64decode(sec["data"]["iam.json"]))
-
-def trust(role):
-    st = (role.get("trustPolicy") or {}).get("Statement") or []
-    return [s.get("Condition") for s in st]
-
-def store_trust(_):
-    reader, writer = "arn:aws:iam::role/workspace-instructions-read", "arn:aws:iam::role/instructions-writer"
-    base, op = iam("store"), iam("store-oidc")
-    cluster = (base.get("providers") or [{}])[0].get("config") or {}
-    problems = [
-        [p.get("name") for p in base.get("providers") or []] != ["cluster"] and "default providers",
-        cluster.get("roleMapping") != {} and f"cluster roleMapping {cluster.get('roleMapping', '<absent>')!r} (absent falls back to readonly)",
-        [trust(r) for r in base.get("roles") or []] != [[{"StringEquals": {"oidc:iss": cluster.get("issuer")}}]] and "reader trust",
-        sorted(p.get("name") for p in base.get("policies") or []) != ["instructions-read"] and "default policies",
-        "instructions-write" in json.dumps(base) and "writer without an operator issuer",
-    ]
-    byname = {p.get("name"): p.get("config") or {} for p in op.get("providers") or []}
-    byarn = {r.get("roleArn"): r for r in op.get("roles") or []} if isinstance(op.get("roles"), list) else {}
-    problems += [
-        sorted(byname) != ["cluster", "operator-oidc"] and f"oidc providers {sorted(byname)}",
-        (byname.get("operator-oidc", {}).get("roleMapping") or {}).get("defaultRole") != writer and "operator roleMapping.defaultRole",
-        byname.get("operator-oidc", {}).get("issuer") != "https://issuer.example.com" and "operator issuer",
-        "roleMapping" in op and "top-level roleMapping",
-        sorted(byarn) != sorted([reader, writer]) and f"oidc roles {sorted(byarn)}",
-        trust(byarn.get(writer, {})) != [{"StringEquals": {"oidc:iss": "https://issuer.example.com"}}] and "writer trust",
-    ]
-    return [p for p in problems if p] or None
-check("the store trusts only the cluster issuer by default, and an operator issuer only for the writer role", ([], None), store_trust)
-
-def writer_scope(_):
-    pol = {p.get("name"): p for p in iam("store-oidc").get("policies") or []}.get("instructions-write") or {}
-    stmts = (pol.get("document") or {}).get("Statement") or []
-    res = [r for s in stmts for r in (s.get("Resource") if isinstance(s.get("Resource"), list) else [s.get("Resource")])]
-    want = {"arn:aws:s3:::sycophant-instructions", "arn:aws:s3:::sycophant-instructions/*"}
-    return None if len(stmts) == 1 and set(res) == want else f"writer Resource must be exactly {want}, got {stmts}"
-check("the store writer policy reaches only the instructions bucket", ([], None), writer_scope)
 
 def sync_token_only(docs):
     spec = pod(next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["labels"].get("app.kubernetes.io/component") == "harness"))["spec"]

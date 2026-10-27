@@ -59,27 +59,3 @@ metadata:
 data:
   toolsets: 'hello-world'
   grant.hello-world.demo-key.secret: 'Demo_Key'
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: provision-workspace-badhash-upper
-  namespace: tenant-acme
-  labels:
-    sycophant.md/command: 'true'
-    app.kubernetes.io/part-of: sycophant
-data:
-  toolsets: 'stdlib'
-  instructions-hash: '0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF'
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: provision-workspace-goodhash
-  namespace: tenant-acme
-  labels:
-    sycophant.md/command: 'true'
-    app.kubernetes.io/part-of: sycophant
-data:
-  toolsets: 'stdlib'
-  instructions-hash: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'

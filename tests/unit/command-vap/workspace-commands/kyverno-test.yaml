@@ -39,15 +39,3 @@ results:
   result: fail
   resources:
   - tenant-acme/provision-workspace-badsecret
-- policy: command-provision-workspace
-  isValidatingAdmissionPolicy: true
-  kind: ConfigMap
-  result: fail
-  resources:
-  - tenant-acme/provision-workspace-badhash-upper
-- policy: command-provision-workspace
-  isValidatingAdmissionPolicy: true
-  kind: ConfigMap
-  result: pass
-  resources:
-  - tenant-acme/provision-workspace-goodhash

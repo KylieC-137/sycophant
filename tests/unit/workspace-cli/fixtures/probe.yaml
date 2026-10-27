@@ -1,5 +1,0 @@
-# A probe workspace whose instructions directory sits beside this file.
-workspace:
-  name: probe
-  tenant: acme
-  instructions: tree

@@ -20,11 +20,6 @@ spec:
       app.kubernetes.io/name: seaweedfs
   template:
     metadata:
-      annotations:
-        # SeaweedFS reads -s3.iam.config only at boot, so a data-only change to
-        # the IAM Secret never rolls the pod on its own. Hashing it into the
-        # template forces a restart when the rendered config changes.
-        checksum/config: {{ .Values.oidc | default dict | toJson | sha256sum }}
       labels:
         app.kubernetes.io/name: seaweedfs
         app.kubernetes.io/component: objectstorage
@@ -45,8 +40,9 @@ spec:
           # All-in-one: master, volume, filer, and s3 gateway in one process. The
           # s3 gateway carries native STS and OIDC token verification; the admin
           # static identity is read from -s3.config and the OIDC/IAM trust from
-          # -s3.iam.config. Only the s3 port (8333) is Service-exposed; master,
-          # volume, and filer ports stay internal and the netpol denies them.
+          # -s3.iam.config. The s3 (8333) and filer (8888) ports are Service-exposed;
+          # the netpol admits the filer only for the instructions jobs. Master and
+          # volume ports stay internal and the netpol denies them.
           args:
             - server
             - -dir=/data
@@ -60,6 +56,7 @@ spec:
             - -s3.iam.config=/etc/seaweedfs/iam/iam.json
           ports:
             - { name: s3, containerPort: 8333 }
+            - { name: filer, containerPort: 8888 }
           # Gate readiness on the s3 gateway actually binding 8333 (STS loaded),
           # not just the process starting, so helm --wait is truthful.
           readinessProbe:

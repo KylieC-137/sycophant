@@ -89,10 +89,6 @@ spec:
       app.kubernetes.io/part-of: sycophant
   template:
     metadata:
-      annotations:
-        # A hash of the instruction files: changed files roll the pod so the
-        # init container syncs the new set; unchanged files leave it in place.
-        checksum/instructions: {{ index $m "instructions-hash" | default "" | quote }}
       labels:
         {{- include "sycophant.workspaceLabels" (dict "context" $ "name" $name) | nindent 8 }}
         sycophant.md/workspace: {{ $name }}

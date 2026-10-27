@@ -16,7 +16,9 @@ The hello world is five pieces, each from one values file:
 | channel | [`channels/tailnet.yaml`](channels/tailnet.yaml) |
 
 [`users/alice.yaml`](users/alice.yaml) binds a person to the workspace, and
-[`instructions/hello-world/`](instructions/hello-world/) is the workspace's
-instructions tree.
+[`instructions/hello-world.yaml`](instructions/hello-world.yaml) delivers the
+workspace's instructions tree,
+[`instructions/hello-world/`](instructions/hello-world/), through
+`sycoadm instructions up -f`.
 
 The [README quickstart](../../README.md#quickstart) installs them in order.

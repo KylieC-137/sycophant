@@ -94,6 +94,14 @@ want = ("provision-channel-app", "tenant-acme", {
 check("channel values flatten to command data", summary("channel-provision") == want,
       f"got: {summary('channel-provision')}")
 
+archive = yaml.safe_load(open(os.path.join(here, "command-values.yaml")))["instructions"]["archive"]
+want = ("provision-instructions-hello-world", "tenant-acme", {"archive": archive})
+check("instructions values render to a command carrying only the archive", summary("instructions-provision") == want,
+      f"got: {summary('instructions-provision')}")
+want = ("reap-instructions-hello-world", "tenant-acme", {})
+check("an instructions reap renders reap-instructions-<workspace> with no data", summary("instructions-reap") == want,
+      f"got: {summary('instructions-reap')}")
+
 results, names = [], []
 for out, d in sorted(rendered.items()):
     kind, verb = out.split("-")[:2]
@@ -281,9 +289,7 @@ expect workspace-commands provision-workspace-nosecret "'grant.hello-world.demo-
 expect workspace-commands provision-workspace-undottedegress "'grant.hello-world.demo-key.egress' must be a dotted hostname"
 expect workspace-commands provision-workspace-relativepath "'grant.hello-world.demo-key.path' must be an absolute path"
 expect workspace-commands provision-workspace-badsecret "a workspace grant's 'secret' must be a Secret name"
-expect workspace-commands provision-workspace-badhash-upper "a workspace command's 'instructions-hash' must be 64 lowercase hex characters"
-# A valid 64-lowercase-hex instructions-hash is admitted.
-expect workspace-commands provision-workspace-goodhash ""
+expect instructions-commands provision-instructions-owned ""
 expect suspend-bad-keepalive suspend-tenant "0, 30, 60, 90"
 expect slice-commands-validate-data "provision-workspace-$(printf 'a%.0s' {1..50})" "at most 49"
 expect slice-commands-validate-data "provision-toolset-$(printf 'a%.0s' {1..51})" "at most 50"

@@ -86,7 +86,7 @@ spec:
                 | kubectl create --as="${ISSUER}#operator" -f - >/dev/null
               kubectl delete configmap provision-workspace-ownertest -n "$TENANT_NS" --ignore-not-found >/dev/null
               true
-    - name: nonowner-denied-a-workspace-command
+    - name: nonowner-denied-workspace-and-instructions-commands
       try:
         - script:
             timeout: 30s
@@ -96,15 +96,16 @@ spec:
             content: |
               set -euo pipefail
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
-              err=$(kubectl create configmap provision-workspace-mallorytest -n "$TENANT_NS" \
-                --from-literal=toolsets=stdlib \
-                --dry-run=client -o yaml \
-                | kubectl label --local -f - -o yaml \
-                    app.kubernetes.io/part-of=sycophant sycophant.md/command=true \
-                | kubectl create --as="${ISSUER}#mallory" -f - 2>&1 >/dev/null) && {
-                echo "non-owner mallory was admitted"; exit 1; }
-              case "$err" in
-                *"tenant owner"*) ;;
-                *) echo "denied, but not by the owner check: $err"; exit 1 ;;
-              esac
+              for args in "provision-workspace-mallorytest --from-literal=toolsets=stdlib" "provision-instructions-mallorytest --from-literal=archive=eA==" "reap-instructions-mallorytest"; do
+                err=$(kubectl create configmap $args -n "$TENANT_NS" \
+                  --dry-run=client -o yaml \
+                  | kubectl label --local -f - -o yaml \
+                      app.kubernetes.io/part-of=sycophant sycophant.md/command=true \
+                  | kubectl create --as="${ISSUER}#mallory" -f - 2>&1 >/dev/null) && {
+                  echo "non-owner mallory was admitted: ${args%% *}"; exit 1; }
+                case "$err" in
+                  *"tenant owner"*) ;;
+                  *) echo "${args%% *} denied, but not by the owner check: $err"; exit 1 ;;
+                esac
+              done
               true
