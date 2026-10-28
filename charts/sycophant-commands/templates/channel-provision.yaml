@@ -1,10 +1,4 @@
-{{- /* headscale.<field> and headscale.acme.<field> become flat keys of the same path. */ -}}
 {{- with .Values.channel }}
-{{- $data := pick . "storageClass" "kind" "image" "tag" "pullPolicy" "loginServer" "hostname" "authKeySecret" }}
-{{- range $k, $v := .headscale }}
-{{- if kindIs "map" $v }}
-{{- range $k2, $v2 := $v }}{{ $_ := set $data (printf "headscale.%s.%s" $k $k2) $v2 }}{{ end }}
-{{- else }}{{ $_ := set $data (printf "headscale.%s" $k) $v }}{{ end }}
-{{- end }}
+{{- $data := pick . "storageClass" "image" "tag" "pullPolicy" "loginServer" "hostname" "authKeySecret" }}
 {{ include "commands.command" (dict "name" (printf "provision-channel-%s" .name) "namespace" (include "commands.tenantNs" .tenant) "data" $data) }}
 {{- end }}

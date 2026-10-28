@@ -1,8 +1,6 @@
 # Shared per-tenant write role. Its consumers bind it via a generated
-# per-namespace RoleBinding, never a ClusterRoleBinding: every
-# `provision-<kind>` and `uninstall-<kind>` ServiceAccount in sycophant-system,
-# one per provision or reap command, binds it. RBAC's namespacing rules scope
-# these verbs to that one tenant namespace only.
+# per-namespace RoleBinding, never a ClusterRoleBinding. RBAC's namespacing
+# rules scope these verbs to the binding's namespace only.
 #
 # Result: the holder has write access to Secrets, Deployments, etc. in
 # its one tenant namespace only, never in kube-system, sycophant-system, or
@@ -44,14 +42,13 @@ rules:
   # chart Role grants `get` on that same name, and creating that Role passes
   # K8s anti-escalation only if the creator already holds the verb (no escalate
   # verb anywhere):
-  #   adapter-state          the app adapter's tailnet node state. Fixed name
-  #                          (one app channel per tenant); absent when no app
-  #                          channel is configured, and a pinned `get` on an
-  #                          absent name grants nothing.
+  #   tailnet-identity       Fixed name (one tailnet channel per tenant);
+  #                          absent when no channel is configured, and a
+  #                          pinned `get` on an absent name grants nothing.
   - apiGroups: [""]
     resources:
       - "secrets"
-    resourceNames: ["adapter-state"]
+    resourceNames: ["tailnet-identity"]
     verbs: ["get"]
 
   # Warning Events. The relay-controller Role grants events create/patch to

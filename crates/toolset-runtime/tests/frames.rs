@@ -8,7 +8,6 @@
 
 use proto_common::tool_result_frame::Frame;
 use proto_common::ToolOutcome;
-use serial_test::serial;
 use shared::scrub::ScrubSet;
 use toolset_runtime::parts::frames_for;
 
@@ -50,11 +49,6 @@ fn stderr_text(vars: &[&Frame]) -> String {
 // A tool call's output streams as an ordered sequence of TYPED frames — stdout
 // and stderr on distinct frame kinds — terminating in one ToolComplete, not a
 // single buffered result.
-//
-// Materiality: the stub returns no frames, reding every assertion. A mutant
-// that folds stderr into a stdout frame (today's behavior) reds the
-// "stderr not in a stdout frame" assertion; dropping the terminal ToolComplete
-// reds the last-frame assertion; a wrong terminal exit_code reds it too.
 #[test]
 fn tool_output_streams_as_ordered_typed_frames_ending_in_tool_complete() {
     let frames = frames_for("first line\nsecond line\n", "a warning\n", 0, &no_scrub());
@@ -91,11 +85,6 @@ fn tool_output_streams_as_ordered_typed_frames_ending_in_tool_complete() {
 
 // An image result is assembled toolset-side and emitted as an image frame, not
 // sent as raw bytes on a text frame. The scratch file is consumed.
-//
-// Materiality: the stub emits no frames, reding the image-frame lookup. A
-// mutant that passes the marker line through as a stdout text frame (rather
-// than reading+assembling the scratch image) reds the image-frame assertion; a
-// mutant that stops deleting the scratch file reds the deletion assertion.
 #[test]
 fn an_image_marker_becomes_a_toolset_side_image_frame_and_consumes_the_scratch_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -135,20 +124,9 @@ fn an_image_marker_becomes_a_toolset_side_image_frame_and_consumes_the_scratch_f
 // stdout and stderr frames are scrubbed of secret values before they cross the
 // gRPC boundary, so neither the model-facing result nor the execution log ever
 // holds an unscrubbed secret.
-//
-// Materiality: the stub emits no frames, reding the redaction-tag assertion. A
-// mutant that scrubs the stdout frame but not the stderr frame leaves the
-// secret in the stderr frame, reding the per-frame leak assertion; dropping
-// scrub entirely reds both.
 #[test]
-#[serial]
 fn stdout_and_stderr_frames_are_scrubbed_before_leaving_the_toolset() {
-    std::env::set_var("FRAMES_TEST_SECRET_VAL", "hunter2-secret-token");
-    std::env::set_var(
-        "FRAMES_TEST_SCRUB",
-        r#"[{"name":"Tok","env":"FRAMES_TEST_SECRET_VAL"}]"#,
-    );
-    let scrub = ScrubSet::from_env_var("FRAMES_TEST_SCRUB");
+    let scrub = ScrubSet::from_secrets(&[("Tok", "hunter2-secret-token")]);
     assert!(
         !scrub.is_empty(),
         "test setup: the scrub set must be armed with the secret"
@@ -160,9 +138,6 @@ fn stdout_and_stderr_frames_are_scrubbed_before_leaving_the_toolset() {
         0,
         &scrub,
     );
-
-    std::env::remove_var("FRAMES_TEST_SCRUB");
-    std::env::remove_var("FRAMES_TEST_SECRET_VAL");
 
     let vars = variants(&frames);
     for v in &vars {

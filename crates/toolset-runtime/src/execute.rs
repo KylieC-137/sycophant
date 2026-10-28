@@ -321,32 +321,23 @@ mod tests {
     }
 
     #[test]
-    fn compose_argv_is_dispatch_then_tool_name() {
-        let cmd = compose_dispatch_command("notion-search", &HashMap::new(), "/workspace");
+    fn compose_runs_dispatch_with_only_the_tool_name_in_the_workspace_dir() {
+        // Args must NEVER appear as `KEY=val` argv elements — that would
+        // let a make-style dispatcher parse them as variable overrides
+        // and expand them into recipe text before the shell sees them.
+        // Only env vars: with args present, argv is still exactly
+        // [dispatch, tool name].
+        let mut args = HashMap::new();
+        args.insert("QUERY".into(), "evil".into());
+        let cmd = compose_dispatch_command("notion-search", &args, "/workspace");
         assert_eq!(
             argv_strings(&cmd),
             vec!["/etc/toolset/dispatch", "notion-search"]
         );
-    }
-
-    #[test]
-    fn compose_sets_working_dir() {
-        let cmd = compose_dispatch_command("t", &HashMap::new(), "/some/dir");
         assert_eq!(
             cmd.as_std().get_current_dir().map(|p| p.to_str().unwrap()),
-            Some("/some/dir")
+            Some("/workspace")
         );
-    }
-
-    #[test]
-    fn compose_sets_env_vars_from_args() {
-        let mut args = HashMap::new();
-        args.insert("QUERY".into(), "hello".into());
-        args.insert("PAGE_ID".into(), "abc-123".into());
-        let cmd = compose_dispatch_command("t", &args, "/w");
-        let env = env_pairs(&cmd);
-        assert_eq!(env.get("QUERY"), Some(&"hello".to_string()));
-        assert_eq!(env.get("PAGE_ID"), Some(&"abc-123".to_string()));
     }
 
     #[test]
@@ -362,28 +353,6 @@ mod tests {
         assert_eq!(
             env_pairs(&cmd).get("Q"),
             Some(&r#"foo"; rm -rf /; #"#.to_string())
-        );
-    }
-
-    #[test]
-    fn compose_no_kv_argv_positions() {
-        // Args must NEVER appear as `KEY=val` argv elements — that would
-        // let a make-style dispatcher parse them as variable overrides
-        // and expand them into recipe text before the shell sees them.
-        // Only env vars.
-        let mut args = HashMap::new();
-        args.insert("QUERY".into(), "evil".into());
-        let cmd = compose_dispatch_command("t", &args, "/w");
-        let argv = argv_strings(&cmd);
-        assert!(!argv.iter().any(|a| a.contains("=")));
-    }
-
-    #[test]
-    fn compose_zero_args() {
-        let cmd = compose_dispatch_command("notion-whoami", &HashMap::new(), "/w");
-        assert_eq!(
-            argv_strings(&cmd),
-            vec!["/etc/toolset/dispatch", "notion-whoami"]
         );
     }
 }

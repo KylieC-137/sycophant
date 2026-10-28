@@ -162,8 +162,8 @@ mod tests {
     #[test]
     #[serial]
     fn flush_propagates_to_inner() {
-        // Kills the `flush -> Ok(())` mutant: ScrubWriter must forward
-        // flush calls to its inner writer, not return Ok(()) directly.
+        // ScrubWriter must forward flush calls to its inner writer, not return
+        // Ok(()) directly.
         std::env::remove_var(SCRUB_ENV);
         let set = Arc::new(ScrubSet::from_env_var(SCRUB_ENV));
         let mut writer = ScrubWriter::new(set, FlushCountingInner::default());

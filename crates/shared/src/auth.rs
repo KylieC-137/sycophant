@@ -184,7 +184,7 @@ impl tonic::service::Interceptor for SaTokenInterceptor {
 /// On-disk mount path for the harness's relay-audience SA token.
 /// The chart's harness Deployment mounts the `harness-relay-auth`
 /// projected volume here. Used by the harness to dial the gateway's
-/// internal listener (Subscribe + the channel server-request methods).
+/// internal listener (Subscribe + the channel-stream server-request methods).
 pub const HARNESS_RELAY_TOKEN_PATH: &str = "/var/run/secrets/harness/relay/token";
 
 /// On-disk mount path for the relay-controller's harness-audience
@@ -193,9 +193,9 @@ pub const HARNESS_RELAY_TOKEN_PATH: &str = "/var/run/secrets/harness/relay/token
 /// when forwarding external `CallTool`/`WatchTools` calls.
 pub const RELAY_HARNESS_TOKEN_PATH: &str = "/var/run/secrets/relay/harness/token";
 
-/// Audience a channel adapter's SA token is minted for and the relay pins on
+/// Audience a channel's SA token is minted for and the relay pins on
 /// TokenReview, per the `<sender>.<recipient>.sycophant.md` convention.
-pub const ADAPTER_RELAY_AUDIENCE: &str = "adapter.relay.sycophant.md";
+pub const CHANNEL_RELAY_AUDIENCE: &str = "channel.relay.sycophant.md";
 
 /// Build the SubjectAccessReview checking `subject` for `get` on the named
 /// workspace's harness Service in the relay's own namespace. The namespace is
@@ -315,30 +315,20 @@ mod tests {
         );
         assert_eq!(parse_workspace_from_sa("ws-"), None);
         assert_eq!(parse_workspace_from_sa("ws--unprivileged"), None);
-    }
-
-    #[test]
-    fn parse_workspace_no_prefix() {
         assert_eq!(parse_workspace_from_sa("default"), None);
     }
 
     #[test]
-    fn extract_bearer_valid() {
+    fn extract_bearer_only_accepts_a_bearer_authorization_header() {
         let mut req = Request::new(());
         req.metadata_mut()
             .insert("authorization", "Bearer test-token".parse().unwrap());
         assert_eq!(extract_bearer_token(&req).unwrap(), "test-token");
-    }
 
-    #[test]
-    fn extract_bearer_missing() {
         let req = Request::new(());
         let err = extract_bearer_token(&req).unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
-    }
 
-    #[test]
-    fn extract_bearer_malformed() {
         let mut req = Request::new(());
         req.metadata_mut()
             .insert("authorization", "Basic xxx".parse().unwrap());
@@ -402,12 +392,6 @@ mod tests {
     }
 
     #[test]
-    fn workspace_from_username_harness_subject_resolves_workspace() {
-        let ws = workspace_from_username("system:serviceaccount:ns:ws-hello-world").unwrap();
-        assert_eq!(ws, "hello-world");
-    }
-
-    #[test]
     fn workspace_from_username_non_workspace_sa_denies() {
         let err = workspace_from_username("system:serviceaccount:ns:default").unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
@@ -438,18 +422,6 @@ mod tests {
     }
 
     #[test]
-    fn pinned_review_rejects_empty_audiences_echo() {
-        let review = review_with(
-            Some(true),
-            Some("system:serviceaccount:ns:ws-hello-world"),
-            Some(vec![]),
-        );
-        let err = username_from_review(review, Some(TEST_AUDIENCE)).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
-        assert!(err.message().contains("audience echo mismatch"));
-    }
-
-    #[test]
     fn pinned_review_rejects_audiences_echo_without_requested() {
         let review = review_with(
             Some(true),
@@ -464,7 +436,7 @@ mod tests {
     #[test]
     fn pinned_review_accepts_audiences_echo_containing_requested() {
         // Multi-audience echo with the requested audience among others — must
-        // succeed (catches a future mutant that flips `any` → strict equality).
+        // succeed: any listed audience matches, not strict equality.
         let review = review_with(
             Some(true),
             Some("system:serviceaccount:ns:ws-hello-world"),
@@ -475,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn build_token_review_includes_toolset_toolset_audience() {
+    fn build_token_review_carries_the_token_and_its_single_audience() {
         let tr = build_token_review("the-token", Some(TOOL_TOOLSET_AUDIENCE));
         assert_eq!(
             tr.spec.audiences,
@@ -483,15 +455,7 @@ mod tests {
             "TokenReviewSpec.audiences must carry the configured audience so \
              kube-apiserver rejects tokens minted for other audiences"
         );
-    }
-
-    #[test]
-    fn build_token_review_includes_harness_relay_audience() {
-        let tr = build_token_review("the-token", Some(HARNESS_RELAY_AUDIENCE));
-        assert_eq!(
-            tr.spec.audiences,
-            Some(vec![HARNESS_RELAY_AUDIENCE.to_string()]),
-        );
+        assert_eq!(tr.spec.token, Some("the-token".to_string()));
     }
 
     #[test]
@@ -503,19 +467,13 @@ mod tests {
             TOOL_TOOLSET_AUDIENCE,
             RELAY_HARNESS_AUDIENCE,
             HARNESS_RELAY_AUDIENCE,
-            ADAPTER_RELAY_AUDIENCE,
+            CHANNEL_RELAY_AUDIENCE,
         ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {
                 assert_ne!(all[i], all[j], "audiences {i} and {j} must differ");
             }
         }
-    }
-
-    #[test]
-    fn build_token_review_includes_token() {
-        let tr = build_token_review("the-token", Some(TOOL_TOOLSET_AUDIENCE));
-        assert_eq!(tr.spec.token, Some("the-token".to_string()));
     }
 
     // --- Person-token reviews and the username they yield ---

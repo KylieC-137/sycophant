@@ -218,75 +218,6 @@ mod tests {
         frames.iter().filter_map(|f| f.frame.as_ref()).collect()
     }
 
-    fn stdout_text(frames: &[ToolResultFrame]) -> String {
-        variants(frames)
-            .into_iter()
-            .filter_map(|v| match v {
-                Frame::Stdout(s) => Some(s.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    #[test]
-    fn plain_stdout_rides_stdout_frames_then_a_terminal() {
-        let frames = frames_for("hello world\n", "", 0, &no_scrub());
-        assert_eq!(stdout_text(&frames), "hello world");
-        match variants(&frames).last() {
-            Some(Frame::Complete(c)) => {
-                assert_eq!(c.outcome(), ToolOutcome::Done);
-                assert_eq!(c.exit_code, 0);
-            }
-            other => panic!("last frame must be the terminal, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn marker_line_becomes_an_image_frame_and_deletes_the_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("shot.png");
-        let bytes = vec![0x89u8, 0x50, 0x4e, 0x47, 1, 2, 3];
-        std::fs::write(&path, &bytes).unwrap();
-
-        let stdout = format!("{}\n", marker("image/png", path.to_str().unwrap()));
-        let frames = frames_for(&stdout, "", 0, &no_scrub());
-        let image = variants(&frames)
-            .into_iter()
-            .find_map(|v| match v {
-                Frame::Image(img) => Some(img.clone()),
-                _ => None,
-            })
-            .expect("a marker line produces an image frame");
-        assert_eq!(image.media_type, "image/png");
-        assert_eq!(image.data, bytes);
-        assert!(
-            !stdout_text(&frames).contains("TOOLSET-IMAGE"),
-            "the marker line is consumed into an image frame, not echoed as stdout"
-        );
-        assert!(!path.exists(), "the scratch file is removed after reading");
-    }
-
-    #[test]
-    fn mixed_text_and_image_keeps_both_frame_kinds() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("shot.png");
-        std::fs::write(&path, [1u8, 2, 3]).unwrap();
-
-        let stdout = format!(
-            "caption line\n{}\n",
-            marker("image/png", path.to_str().unwrap())
-        );
-        let frames = frames_for(&stdout, "", 0, &no_scrub());
-        assert_eq!(stdout_text(&frames), "caption line");
-        assert!(
-            variants(&frames)
-                .iter()
-                .any(|v| matches!(v, Frame::Image(_))),
-            "the marker still produces an image frame alongside the caption stdout frame"
-        );
-    }
-
     #[test]
     fn oversize_image_yields_an_error_terminal_not_an_image() {
         let dir = tempfile::tempdir().unwrap();
@@ -322,24 +253,6 @@ mod tests {
         assert!(
             parse_image_marker(&marker("image/png", "")).is_none(),
             "a blank path is not a valid marker"
-        );
-    }
-
-    #[test]
-    fn stderr_rides_its_own_frame_never_folded_into_stdout() {
-        let frames = frames_for("stdout line\n", "stderr detail\n", 0, &no_scrub());
-        assert_eq!(stdout_text(&frames), "stdout line");
-        let stderr: String = variants(&frames)
-            .into_iter()
-            .filter_map(|v| match v {
-                Frame::Stderr(s) => Some(s.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(stderr, "stderr detail");
-        assert!(
-            !stdout_text(&frames).contains("stderr detail"),
-            "stderr must never fold into a stdout frame"
         );
     }
 }

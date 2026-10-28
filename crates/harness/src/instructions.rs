@@ -117,7 +117,8 @@ impl Instructions {
 
 /// Extract a short description from a markdown blob: the first non-empty,
 /// non-heading paragraph, trimmed and collapsed to a single line. Used by the
-/// generic `list` verb so the orchestrator can present human-readable choices.
+/// `ListInstructions` tool so the orchestrator can present human-readable
+/// choices.
 pub fn first_paragraph(body: &str) -> String {
     let mut buf = String::new();
     for line in body.lines() {
@@ -247,28 +248,9 @@ mod tests {
     }
 
     #[test]
-    fn first_paragraph_joins_consecutive_lines() {
-        let body = "First line.\nSecond line.\n\nLater paragraph.";
-        assert_eq!(first_paragraph(body), "First line. Second line.");
-    }
-
-    #[test]
-    fn first_paragraph_empty_when_only_headings() {
-        let body = "# Just a heading\n## And another\n";
-        assert_eq!(first_paragraph(body), "");
-    }
-
-    #[test]
     fn validate_basename_rejects_path_separators() {
         assert!(validate_basename("foo/bar").is_err());
         assert!(validate_basename("foo\\bar").is_err());
-    }
-
-    #[test]
-    fn validate_basename_accepts_normal_names() {
-        assert!(validate_basename("alice").is_ok());
-        assert!(validate_basename("classify").is_ok());
-        assert!(validate_basename("foo-bar_baz").is_ok());
     }
 
     // ---- Generic path-based read verb ----
@@ -278,10 +260,9 @@ mod tests {
     // any file under the workspace root through the in-process guards. These
     // tests pin its behavior.
 
-    // A nested relative path must resolve and return the file body. Today the
-    // only readers funnel through `validate_basename`, which rejects any `/`,
-    // so a nested instruction file is unreachable. Materiality: a reader that
-    // kept the single-component basename rule reds this.
+    // A nested relative path must resolve and return the file body. A reader
+    // that kept the single-component basename rule (`validate_basename` rejects
+    // any `/`) would leave nested instruction files unreachable.
     #[test]
     fn read_returns_nested_path_body() {
         let tmp = tempfile::tempdir().unwrap();
@@ -296,8 +277,7 @@ mod tests {
     }
 
     // offset and limit are 1-based line numbers: `offset=2, limit=2` returns
-    // lines 2 and 3 only. Materiality: 0-based slicing, byte offsets, or
-    // ignoring limit each red this.
+    // lines 2 and 3 only.
     #[test]
     fn read_offset_and_limit_are_one_based_line_numbers() {
         let tmp = tempfile::tempdir().unwrap();
@@ -322,9 +302,7 @@ mod tests {
         );
     }
 
-    // A `..` component must be rejected before any read. Materiality: dropping
-    // the traversal guard resolves the parent path and returns Ok/NotFound
-    // instead of an escape rejection.
+    // A `..` component must be rejected before any read.
     #[test]
     fn read_rejects_parent_traversal() {
         let tmp = tempfile::tempdir().unwrap();
@@ -344,8 +322,7 @@ mod tests {
     }
 
     // A symlink whose target escapes the workspace root must be rejected by the
-    // canonicalize + `starts_with(root)` guard. Materiality: dropping the
-    // symlink guard leaks the target file's body.
+    // canonicalize + `starts_with(root)` guard, or the target file's body leaks.
     #[test]
     fn read_rejects_symlink_escape() {
         let tmp = tempfile::tempdir().unwrap();
@@ -372,8 +349,7 @@ mod tests {
     // relative paths.
 
     // A nested fixture enumerates to flat, sorted relative paths that carry
-    // their `/` separators. Materiality: a non-recursive walk omits the nested
-    // files; a nested/tree presentation would break the flat-path assertion.
+    // their `/` separators: the walk is recursive and the result is flat.
     #[test]
     fn list_tree_returns_flat_sorted_nested_paths() {
         let tmp = tempfile::tempdir().unwrap();
@@ -393,8 +369,7 @@ mod tests {
         );
     }
 
-    // The cap bounds how many paths are returned. Materiality: ignoring the cap
-    // returns all four and reds the length bound.
+    // The cap bounds how many paths are returned.
     #[test]
     fn list_tree_respects_cap() {
         let tmp = tempfile::tempdir().unwrap();

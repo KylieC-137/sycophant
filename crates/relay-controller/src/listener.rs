@@ -1,7 +1,7 @@
 //! Per-listener credential classes.
 //!
 //! Each external listener serves exactly one credential class: 9091 accepts
-//! only person tokens, 9092 only channel-adapter ServiceAccount tokens, 9090
+//! only person tokens, 9092 only channel ServiceAccount tokens, 9090
 //! (internal) only harness SA tokens. A per-class interceptor stamps the
 //! listener kind onto the request extensions so handlers branch on the
 //! stamped class and never on the credential's shape.
@@ -14,8 +14,8 @@ use tonic::service::{Interceptor, InterceptorLayer};
 pub enum ListenerClass {
     /// A person token (OIDC subject) on the app/terminal-client listener.
     PersonToken,
-    /// An `adapter-<channel>` ServiceAccount token on the adapter listener.
-    AdapterToken,
+    /// A `ch-<channel>` ServiceAccount token on the channel listener.
+    ChannelToken,
 }
 
 /// Layer stamping `class` on every request's extensions. It verifies
@@ -53,7 +53,7 @@ mod tests {
                 .unwrap();
             Ok::<_, std::convert::Infallible>(resp)
         });
-        let mut svc = class_layer(ListenerClass::AdapterToken).layer(inner);
+        let mut svc = class_layer(ListenerClass::ChannelToken).layer(inner);
         let resp = svc
             .ready()
             .await
@@ -62,6 +62,6 @@ mod tests {
             .await
             .unwrap();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(&bytes[..], b"AdapterToken");
+        assert_eq!(&bytes[..], b"ChannelToken");
     }
 }

@@ -7,21 +7,19 @@
 use std::sync::Arc;
 
 use proto_common::{
-    channel_outbound, ChannelOutbound, ChannelSend, SendServerNotificationRequest,
-    SendServerNotificationResponse, SendServerRequestAndAwaitRequest,
-    SendServerRequestAndAwaitResponse, SubscribeRequest, TurnState, UserMessage,
+    channel_stream_outbound, ChannelStreamOutbound, ChannelStreamSend,
+    SendServerNotificationRequest, SendServerNotificationResponse,
+    SendServerRequestAndAwaitRequest, SendServerRequestAndAwaitResponse, SubscribeRequest,
+    TurnState, TurnStateEvent, UserMessage,
 };
 use relay_proto::relay_internal_server::RelayInternal;
-use relay_proto::{
-    DeliverOutboundRequest, DeliverOutboundResponse, DeliverStreamItemRequest,
-    DeliverStreamItemResponse,
-};
+use relay_proto::{DeliverStreamItemRequest, DeliverStreamItemResponse};
 use shared::auth::{extract_bearer_token, TokenVerifier};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-use crate::state::{GatewayState, ServerRequestError, ServerRequestOutcome};
+use crate::state::GatewayState;
 
 /// Default server-side wait cap for `SendServerRequestAndAwait` when the
 /// caller passes 0.
@@ -83,30 +81,17 @@ impl RelayInternal for InternalService {
     ) -> Result<Response<SendServerNotificationResponse>, Status> {
         let workspace = self.verify_caller(&request).await?;
         let req = request.into_inner();
-        if req.channel_id.is_empty() {
-            return Err(Status::invalid_argument("channel_id required"));
-        }
         if req.method.is_empty() {
             return Err(Status::invalid_argument("method required"));
         }
-        match self.state.channel_binding(&req.channel_id).await {
-            Some((_, _, bound)) if bound == workspace => {}
-            Some(_) => {
-                return Err(Status::permission_denied(
-                    "channel_id is bound to a different workspace",
-                ));
-            }
-            None => {
-                return Ok(Response::new(SendServerNotificationResponse {
-                    delivered: false,
-                }));
-            }
-        }
-        let delivered = self
+        let delivered = match self
             .state
-            .send_server_notification(&req.channel_id, &req.method, req.params_json)
+            .send_server_notification(&workspace, &req.method, req.params_json)
             .await
-            .is_ok();
+        {
+            Ok(()) => true,
+            Err(_) => false,
+        };
         Ok(Response::new(SendServerNotificationResponse { delivered }))
     }
 
@@ -116,9 +101,6 @@ impl RelayInternal for InternalService {
     ) -> Result<Response<SendServerRequestAndAwaitResponse>, Status> {
         let workspace = self.verify_caller(&request).await?;
         let req = request.into_inner();
-        if req.channel_id.is_empty() {
-            return Err(Status::invalid_argument("channel_id required"));
-        }
         if req.request_id.is_empty() {
             return Err(Status::invalid_argument(
                 "request_id required (notifications use SendServerNotification)",
@@ -127,154 +109,162 @@ impl RelayInternal for InternalService {
         if req.method.is_empty() {
             return Err(Status::invalid_argument("method required"));
         }
-        match self.state.channel_binding(&req.channel_id).await {
-            Some((_, _, bound)) if bound == workspace => {}
-            Some(_) => {
-                return Err(Status::permission_denied(
-                    "channel_id is bound to a different workspace",
-                ));
-            }
-            None => {
-                return Ok(Response::new(SendServerRequestAndAwaitResponse {
-                    result_json: String::new(),
-                    error: None,
-                    timed_out: false,
-                    unknown_channel: true,
-                    unsupported_method: false,
-                }));
-            }
-        }
-        let secs = clamp_await_secs(req.timeout_seconds);
-        let timeout = std::time::Duration::from_secs(secs as u64);
+        let timeout_secs = clamp_await_secs(req.timeout_seconds);
         match self
             .state
             .send_server_request_and_await(
-                &req.channel_id,
+                &workspace,
                 &req.request_id,
                 &req.method,
                 req.params_json,
-                timeout,
+                std::time::Duration::from_secs(timeout_secs as u64),
             )
             .await
         {
-            Ok(ServerRequestOutcome::Result(s)) => {
+            Ok(crate::state::ServerRequestOutcome::Result(result_json)) => {
                 Ok(Response::new(SendServerRequestAndAwaitResponse {
-                    result_json: s,
+                    result_json,
                     error: None,
                     timed_out: false,
-                    unknown_channel: false,
+                    unknown_channel_stream: false,
                     unsupported_method: false,
                 }))
             }
-            Ok(ServerRequestOutcome::Error(e)) => {
+            Ok(crate::state::ServerRequestOutcome::Error(e)) => {
                 Ok(Response::new(SendServerRequestAndAwaitResponse {
                     result_json: String::new(),
                     error: Some(e),
                     timed_out: false,
-                    unknown_channel: false,
+                    unknown_channel_stream: false,
                     unsupported_method: false,
                 }))
             }
-            Err(ServerRequestError::Timeout) => {
+            Err(crate::state::ServerRequestError::UnsupportedMethod) => {
+                Ok(Response::new(SendServerRequestAndAwaitResponse {
+                    result_json: String::new(),
+                    error: None,
+                    timed_out: false,
+                    unknown_channel_stream: false,
+                    unsupported_method: true,
+                }))
+            }
+            Err(crate::state::ServerRequestError::Timeout) => {
                 Ok(Response::new(SendServerRequestAndAwaitResponse {
                     result_json: String::new(),
                     error: None,
                     timed_out: true,
-                    unknown_channel: false,
+                    unknown_channel_stream: false,
                     unsupported_method: false,
                 }))
             }
-            Err(ServerRequestError::UnknownChannel) => {
+            Err(crate::state::ServerRequestError::UnknownChannelStream) | Err(_) => {
                 Ok(Response::new(SendServerRequestAndAwaitResponse {
                     result_json: String::new(),
                     error: None,
                     timed_out: false,
-                    unknown_channel: true,
+                    unknown_channel_stream: true,
                     unsupported_method: false,
                 }))
             }
-            Err(ServerRequestError::UnsupportedMethod) => {
-                Ok(Response::new(SendServerRequestAndAwaitResponse {
-                    result_json: String::new(),
-                    error: None,
-                    timed_out: false,
-                    unknown_channel: false,
-                    unsupported_method: true,
-                }))
-            }
-            Err(ServerRequestError::SendFailed) | Err(ServerRequestError::Disconnected) => Err(
-                Status::aborted("channel disconnected before client responded"),
-            ),
         }
     }
 
-    async fn deliver_outbound(
+    async fn deliver_reply(
         &self,
-        request: Request<DeliverOutboundRequest>,
-    ) -> Result<Response<DeliverOutboundResponse>, Status> {
+        request: Request<relay_proto::DeliverReplyRequest>,
+    ) -> Result<Response<relay_proto::DeliverReplyResponse>, Status> {
         let workspace = self.verify_caller(&request).await?;
         let req = request.into_inner();
-        if req.channel_id.is_empty() {
-            return Err(Status::invalid_argument("channel_id required"));
-        }
-        // Turn state is keyed by the subject that minted the channel, not
-        // by the workspace: two subjects in one workspace must not read each
-        // other's phase. Subject and workspace come from one read, so an
-        // unregister between them cannot leave the subject empty while the
-        // workspace check has already passed.
-        let subject = match self.state.channel_binding(&req.channel_id).await {
-            Some((_, subject, bound)) if bound == workspace => subject,
-            Some(_) => {
-                return Err(Status::permission_denied(
-                    "channel_id is bound to a different workspace",
-                ));
-            }
-            None => {
-                return Ok(Response::new(DeliverOutboundResponse { delivered: false }));
-            }
-        };
-
-        // Ordering guarantee: enqueue the reply BEFORE applying turn_state,
-        // so a client that renders a SendMessage then a TurnState sees the
-        // assistant reply land before the indicator clears.
-        let mut delivered = true;
-        if let Some(reply) = req.reply {
-            let send = ChannelOutbound {
-                command: Some(channel_outbound::Command::SendMessage(ChannelSend {
-                    content: reply.content,
+        tracing::info!(conversation_id = %req.conversation_id, workspace = %workspace, "deliver_reply received from harness");
+        let send = ChannelStreamOutbound {
+            command: Some(channel_stream_outbound::Command::SendMessage(
+                ChannelStreamSend {
+                    content: req.content,
                     conversation_id: req.conversation_id.clone(),
-                })),
-            };
-            delivered &= self.state.send_to_channel(&req.channel_id, send).await;
-        }
-
-        if let Some(turn_state) = req.turn_state {
-            let state = TurnState::try_from(turn_state.state).unwrap_or(TurnState::Unspecified);
-            let applied = if state == TurnState::Failed {
-                self.state
-                    .set_and_broadcast_turn_failed(
-                        &req.channel_id,
-                        &subject,
-                        &turn_state.conversation_id,
-                        &turn_state.reason,
-                        &turn_state.code,
-                    )
-                    .await
-            } else {
-                self.state
-                    .set_and_broadcast_turn_state(
-                        &req.channel_id,
-                        &subject,
-                        &turn_state.conversation_id,
-                        state,
-                    )
-                    .await
-            };
-            delivered &= applied;
-        }
-
-        Ok(Response::new(DeliverOutboundResponse { delivered }))
+                },
+            )),
+        };
+        let delivered = self.state.send_to_workspace(&workspace, send).await > 0;
+        tracing::info!(conversation_id = %req.conversation_id, workspace = %workspace, delivered = delivered, "deliver_reply fanned out");
+        Ok(Response::new(relay_proto::DeliverReplyResponse {
+            delivered,
+        }))
     }
+
+    async fn deliver_turn_state(
+        &self,
+        request: Request<relay_proto::DeliverTurnStateRequest>,
+    ) -> Result<Response<relay_proto::DeliverTurnStateResponse>, Status> {
+        let workspace = self.verify_caller(&request).await?;
+        let req = request.into_inner();
+        let Some(turn_state) = req.turn_state else {
+            return Err(Status::invalid_argument("turn_state required"));
+        };
+        tracing::info!(conversation_id = %turn_state.conversation_id, workspace = %workspace, "deliver_turn_state received from harness");
+        let subject = if req.subject.is_empty() {
+            // Backward compat: resolve subject from channel_stream_id if provided
+            match self
+                .state
+                .channel_stream_binding(&req.channel_stream_id)
+                .await
+            {
+                Some((_, subject, bound)) if bound == workspace => subject,
+                _ => String::new(),
+            }
+        } else {
+            req.subject
+        };
+        let state = TurnState::try_from(turn_state.state).unwrap_or(TurnState::Unspecified);
+
+        // Record the turn state for poll recovery.
+        if state == TurnState::Failed {
+            self.state
+                .record_turn_state(
+                    &subject,
+                    &turn_state.conversation_id,
+                    crate::state::TurnStateRecord {
+                        state,
+                        reason: turn_state.reason.clone(),
+                        code: turn_state.code.clone(),
+                    },
+                )
+                .await;
+        } else if !subject.is_empty() {
+            self.state
+                .record_turn_state(
+                    &subject,
+                    &turn_state.conversation_id,
+                    crate::state::TurnStateRecord {
+                        state,
+                        reason: String::new(),
+                        code: String::new(),
+                    },
+                )
+                .await;
+        }
+
+        // Build the outbound frame and fan out to all workspace channel streams.
+        let conv_id = turn_state.conversation_id.clone();
+        let msg = ChannelStreamOutbound {
+            command: Some(channel_stream_outbound::Command::TurnState(
+                TurnStateEvent {
+                    state: turn_state.state,
+                    conversation_id: turn_state.conversation_id,
+                    reason: turn_state.reason,
+                    code: turn_state.code,
+                    ..Default::default()
+                },
+            )),
+        };
+        let delivered = self.state.send_to_workspace(&workspace, msg).await > 0;
+        tracing::info!(conversation_id = %conv_id, workspace = %workspace, delivered = delivered, "deliver_turn_state fanned out");
+        Ok(Response::new(relay_proto::DeliverTurnStateResponse {
+            delivered,
+        }))
+    }
+
+    // deliver_outbound is kept for backward compatibility but no longer called
+    // by the harness. It's removed from the service trait so this is dead code.
 
     async fn deliver_stream_item(
         &self,
@@ -282,31 +272,15 @@ impl RelayInternal for InternalService {
     ) -> Result<Response<DeliverStreamItemResponse>, Status> {
         let workspace = self.verify_caller(&request).await?;
         let req = request.into_inner();
-        if req.channel_id.is_empty() {
-            return Err(Status::invalid_argument("channel_id required"));
-        }
-        match self.state.channel_binding(&req.channel_id).await {
-            Some((_, _, bound)) if bound == workspace => {}
-            Some(_) => {
-                return Err(Status::permission_denied(
-                    "channel_id is bound to a different workspace",
-                ));
-            }
-            None => {
-                return Ok(Response::new(DeliverStreamItemResponse {
-                    delivered: false,
-                }));
-            }
-        }
         let Some(item) = req.item else {
             return Err(Status::invalid_argument("item required"));
         };
         // Pure relay: wrap the StreamItem verbatim, no payload inspection or
         // collapsing. The harness is the sole egress authority.
-        let frame = ChannelOutbound {
-            command: Some(channel_outbound::Command::StreamItem(item)),
+        let frame = ChannelStreamOutbound {
+            command: Some(channel_stream_outbound::Command::StreamItem(item)),
         };
-        let delivered = self.state.send_to_channel(&req.channel_id, frame).await;
+        let delivered = self.state.send_to_workspace(&workspace, frame).await > 0;
         Ok(Response::new(DeliverStreamItemResponse { delivered }))
     }
 }
@@ -353,17 +327,9 @@ mod tests {
     }
 
     #[test]
-    fn clamp_await_zero_returns_default() {
+    fn clamp_await_defaults_zero_caps_the_ceiling_passes_the_rest() {
         assert_eq!(clamp_await_secs(0), DEFAULT_AWAIT_SECS);
-    }
-
-    #[test]
-    fn clamp_await_caps_at_ceiling() {
         assert_eq!(clamp_await_secs(10_000), MAX_AWAIT_SECS);
-    }
-
-    #[test]
-    fn clamp_await_passes_through_in_range() {
         assert_eq!(clamp_await_secs(42), 42);
     }
 
@@ -408,7 +374,7 @@ mod tests {
                 UserMessage {
                     content: vec![],
                     sender: "u".into(),
-                    reply_channel: Some("chan".into()),
+                    reply_channel_stream: Some("chan".into()),
                     conversation_id: "ws.c".into(),
                     grants: vec![],
                 },
@@ -422,13 +388,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_server_notification_unknown_channel_reports_not_delivered() {
+    async fn send_server_notification_unknown_channel_stream_reports_not_delivered() {
         let service = service_for(make_state(), "ws");
         let resp = service
             .send_server_notification(authed(SendServerNotificationRequest {
-                channel_id: "ghost".into(),
                 method: "RevealPath".into(),
                 params_json: "{}".into(),
+                workspace: "ws".into(),
             }))
             .await
             .unwrap()
@@ -437,133 +403,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_server_notification_cross_workspace_channel_denied() {
-        let state = make_state();
-        let (tx, _rx) = mpsc::channel(4);
-        // Channel owned by "other".
-        let id = mint_person(&state, "subject-other", "other", tx).await;
-        let service = service_for(state, "ws");
-        let err = service
-            .send_server_notification(authed(SendServerNotificationRequest {
-                channel_id: id,
-                method: "RevealPath".into(),
-                params_json: "{}".into(),
-            }))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
-    }
-
-    #[tokio::test]
-    async fn send_server_request_unknown_channel_sets_unknown_flag() {
+    async fn send_server_request_unknown_channel_stream_sets_unknown_flag() {
         let service = service_for(make_state(), "ws");
         let resp = service
             .send_server_request_and_await(authed(SendServerRequestAndAwaitRequest {
-                channel_id: "ghost".into(),
                 request_id: "r".into(),
                 method: "AskUser".into(),
                 params_json: "{}".into(),
                 timeout_seconds: 1,
+                workspace: "ws".into(),
             }))
             .await
             .unwrap()
             .into_inner();
-        assert!(resp.unknown_channel);
+        assert!(resp.unknown_channel_stream);
     }
 
     #[tokio::test]
-    async fn send_server_request_cross_workspace_channel_denied() {
-        let state = make_state();
-        let (tx, _rx) = mpsc::channel(4);
-        // Channel owned by "other"; caller authenticates as "ws".
-        let id = mint_person(&state, "subject-other", "other", tx).await;
-        let service = service_for(state, "ws");
-        let err = service
-            .send_server_request_and_await(authed(SendServerRequestAndAwaitRequest {
-                channel_id: id,
-                request_id: "r".into(),
-                method: "AskUser".into(),
-                params_json: "{}".into(),
-                timeout_seconds: 1,
-            }))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
-    }
-
-    #[tokio::test]
-    async fn deliver_outbound_enqueues_reply_then_turn_state_in_order() {
+    async fn deliver_reply_fans_out_to_workspace() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(8);
-        let id = mint_person(&state, "subject-ws", "ws", tx).await;
+        let _id = mint_person(&state, "subject-ws", "ws", tx).await;
         let service = service_for(state, "ws");
         let resp = service
-            .deliver_outbound(authed(DeliverOutboundRequest {
-                channel_id: id.clone(),
+            .deliver_reply(authed(relay_proto::DeliverReplyRequest {
                 conversation_id: "ws.conv".into(),
-                reply: Some(relay_proto::ChannelReply {
-                    content: vec![ContentBlock {
-                        block: Some(proto_common::content_block::Block::Text(
-                            proto_common::TextBlock { text: "hi".into() },
-                        )),
-                    }],
-                }),
-                turn_state: Some(TurnStateEvent {
-                    state: TurnState::Idle as i32,
-                    conversation_id: "ws.conv".into(),
-                    reason: String::new(),
-                    code: String::new(),
-                    ..Default::default()
-                }),
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert!(resp.delivered);
-        // First frame must be the SendMessage reply, then the TurnState.
-        let first = rx.recv().await.unwrap();
-        match first.command {
-            Some(channel_outbound::Command::SendMessage(send)) => {
-                assert_eq!(send.conversation_id, "ws.conv");
-                assert_eq!(
-                    send.content,
-                    vec![ContentBlock {
-                        block: Some(proto_common::content_block::Block::Text(
-                            proto_common::TextBlock { text: "hi".into() }
-                        )),
-                    }],
-                    "reply carries the complete output even when zero stream deltas were read"
-                );
-            }
-            other => panic!("reply must be enqueued before turn_state, got {other:?}"),
-        }
-        let second = rx.recv().await.unwrap();
-        match second.command {
-            Some(channel_outbound::Command::TurnState(e)) => {
-                assert_eq!(e.state, TurnState::Idle as i32);
-            }
-            other => panic!("expected TurnState second, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn deliver_outbound_turn_state_only_applies_without_reply() {
-        let state = make_state();
-        let (tx, mut rx) = mpsc::channel(8);
-        let id = mint_person(&state, "subject-ws", "ws", tx).await;
-        let service = service_for(state.clone(), "ws");
-        let resp = service
-            .deliver_outbound(authed(DeliverOutboundRequest {
-                channel_id: id.clone(),
-                conversation_id: "ws.conv".into(),
-                reply: None,
-                turn_state: Some(TurnStateEvent {
-                    state: TurnState::Working as i32,
-                    conversation_id: "ws.conv".into(),
-                    reason: String::new(),
-                    code: String::new(),
-                    ..Default::default()
-                }),
+                content: vec![ContentBlock {
+                    block: Some(proto_common::content_block::Block::Text(
+                        proto_common::TextBlock { text: "hi".into() },
+                    )),
+                }],
             }))
             .await
             .unwrap()
@@ -572,7 +441,36 @@ mod tests {
         let frame = rx.recv().await.unwrap();
         assert!(matches!(
             frame.command,
-            Some(channel_outbound::Command::TurnState(_))
+            Some(channel_stream_outbound::Command::SendMessage(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn deliver_turn_state_applies_working() {
+        let state = make_state();
+        let (tx, mut rx) = mpsc::channel(8);
+        let id = mint_person(&state, "subject-ws", "ws", tx).await;
+        let service = service_for(state.clone(), "ws");
+        let resp = service
+            .deliver_turn_state(authed(relay_proto::DeliverTurnStateRequest {
+                channel_stream_id: id.clone(),
+                turn_state: Some(TurnStateEvent {
+                    state: TurnState::Working as i32,
+                    conversation_id: "ws.conv".into(),
+                    reason: String::new(),
+                    code: String::new(),
+                    ..Default::default()
+                }),
+                subject: "subject-ws".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(resp.delivered);
+        let frame = rx.recv().await.unwrap();
+        assert!(matches!(
+            frame.command,
+            Some(channel_stream_outbound::Command::TurnState(_))
         ));
         let rec = state
             .turn_state_record("subject-ws", "ws.conv")
@@ -582,16 +480,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deliver_outbound_failed_state_carries_reason_and_code() {
+    async fn deliver_turn_state_failed_carries_reason_and_code() {
         let state = make_state();
         let (tx, mut rx) = mpsc::channel(8);
         let id = mint_person(&state, "subject-ws", "ws", tx).await;
         let service = service_for(state.clone(), "ws");
         service
-            .deliver_outbound(authed(DeliverOutboundRequest {
-                channel_id: id.clone(),
-                conversation_id: "ws.conv".into(),
-                reply: None,
+            .deliver_turn_state(authed(relay_proto::DeliverTurnStateRequest {
+                channel_stream_id: id.clone(),
                 turn_state: Some(TurnStateEvent {
                     state: TurnState::Failed as i32,
                     conversation_id: "ws.conv".into(),
@@ -599,12 +495,13 @@ mod tests {
                     code: "14".into(),
                     ..Default::default()
                 }),
+                subject: "subject-ws".into(),
             }))
             .await
             .unwrap();
         let frame = rx.recv().await.unwrap();
         match frame.command {
-            Some(channel_outbound::Command::TurnState(e)) => {
+            Some(channel_stream_outbound::Command::TurnState(e)) => {
                 assert_eq!(e.state, TurnState::Failed as i32);
                 assert_eq!(e.reason, "inference job died");
                 assert_eq!(e.code, "14");
@@ -620,70 +517,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deliver_outbound_unknown_channel_reports_not_delivered() {
-        let service = service_for(make_state(), "ws");
-        let resp = service
-            .deliver_outbound(authed(DeliverOutboundRequest {
-                channel_id: "ghost".into(),
-                conversation_id: "ws.c".into(),
-                reply: None,
-                turn_state: None,
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert!(!resp.delivered);
-    }
-
-    #[tokio::test]
-    async fn deliver_outbound_reply_send_failure_reports_not_delivered() {
-        let state = make_state();
-        let (tx, rx) = mpsc::channel(8);
-        let id = mint_person(&state, "subject-ws", "ws", tx).await;
-        // Drop the receiver so the reply send fails; the channel stays registered.
-        drop(rx);
-        let service = service_for(state, "ws");
-        let resp = service
-            .deliver_outbound(authed(DeliverOutboundRequest {
-                channel_id: id,
-                conversation_id: "ws.conv".into(),
-                reply: Some(relay_proto::ChannelReply { content: vec![] }),
-                turn_state: None,
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert!(!resp.delivered);
-    }
-
-    #[tokio::test]
-    async fn deliver_outbound_turn_state_send_failure_reports_not_delivered() {
-        let state = make_state();
-        let (tx, rx) = mpsc::channel(8);
-        let id = mint_person(&state, "subject-ws", "ws", tx).await;
-        // Drop the receiver so the turn-state broadcast fails; the channel stays registered.
-        drop(rx);
-        let service = service_for(state, "ws");
-        let resp = service
-            .deliver_outbound(authed(DeliverOutboundRequest {
-                channel_id: id,
-                conversation_id: "ws.conv".into(),
-                reply: None,
-                turn_state: Some(TurnStateEvent {
-                    state: TurnState::Idle as i32,
-                    conversation_id: "ws.conv".into(),
-                    reason: String::new(),
-                    code: String::new(),
-                    ..Default::default()
-                }),
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert!(!resp.delivered);
-    }
-
-    #[tokio::test]
     async fn deliver_stream_item_wraps_verbatim_unchanged() {
         use proto_common::{item_start, stream_item, ItemStart, StreamItem, ToolUseItem};
         let state = make_state();
@@ -693,7 +526,6 @@ mod tests {
         // A tool-use start frame with a distinctive envelope; the gateway must
         // forward the StreamItem's bytes unchanged (no inspection/collapsing).
         let item = StreamItem {
-            workspace_seq: 7,
             event_id: "ev-1".into(),
             item_id: "tc-1".into(),
             conversation_id: "ws.conv".into(),
@@ -707,7 +539,7 @@ mod tests {
         };
         let resp = service
             .deliver_stream_item(authed(DeliverStreamItemRequest {
-                channel_id: id,
+                channel_stream_id: id,
                 item: Some(item.clone()),
             }))
             .await
@@ -716,7 +548,7 @@ mod tests {
         assert!(resp.delivered);
         let frame = rx.recv().await.unwrap();
         match frame.command {
-            Some(channel_outbound::Command::StreamItem(got)) => {
+            Some(channel_stream_outbound::Command::StreamItem(got)) => {
                 // Round-trip unchanged: the relayed item equals the input.
                 assert_eq!(got, item);
             }
@@ -725,50 +557,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deliver_stream_item_unknown_channel_reports_not_delivered() {
-        let service = service_for(make_state(), "ws");
+    async fn deliver_stream_item_fans_out_to_workspace_not_cross_workspace() {
+        let state = make_state();
+        let (tx_other, mut rx_other) = mpsc::channel(4);
+        // Channel stream owned by "other" workspace.
+        let _id = mint_person(&state, "subject-other", "other", tx_other).await;
+        let service = service_for(state, "ws");
+        // Verifier authenticates as "ws", so fan-out goes to "ws" channel streams only.
+        // There are none, so nothing is delivered.
         let resp = service
             .deliver_stream_item(authed(DeliverStreamItemRequest {
-                channel_id: "ghost".into(),
+                channel_stream_id: String::new(),
                 item: Some(proto_common::StreamItem::default()),
             }))
             .await
             .unwrap()
             .into_inner();
         assert!(!resp.delivered);
-    }
-
-    #[tokio::test]
-    async fn deliver_stream_item_cross_workspace_channel_denied() {
-        let state = make_state();
-        let (tx, _rx) = mpsc::channel(4);
-        let id = mint_person(&state, "subject-other", "other", tx).await;
-        let service = service_for(state, "ws");
-        let err = service
-            .deliver_stream_item(authed(DeliverStreamItemRequest {
-                channel_id: id,
-                item: Some(proto_common::StreamItem::default()),
-            }))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
-    }
-
-    #[tokio::test]
-    async fn deliver_outbound_cross_workspace_channel_denied() {
-        let state = make_state();
-        let (tx, _rx) = mpsc::channel(4);
-        let id = mint_person(&state, "subject-other", "other", tx).await;
-        let service = service_for(state, "ws");
-        let err = service
-            .deliver_outbound(authed(DeliverOutboundRequest {
-                channel_id: id,
-                conversation_id: "other.c".into(),
-                reply: None,
-                turn_state: None,
-            }))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(
+            rx_other.try_recv().is_err(),
+            "other workspace channel stream must not receive"
+        );
     }
 }

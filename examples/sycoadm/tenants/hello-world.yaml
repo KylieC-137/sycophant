@@ -1,0 +1,12 @@
+# Capacity is the memory quota. It is set on first provision and not resized
+# after.
+tenant:
+  name: hello-world
+  capacity: 12Gi
+
+# In-cluster headscale on plain HTTP :8080. The operator reaches headscale by
+# `sycoadm connect --tenant hello-world` (port-forward + tailscale up); the
+# tailnet channel joins it at the Service DNS name.
+headscale:
+  enabled: true
+  serverUrl: http://localhost:8080

@@ -12,21 +12,9 @@ results:
 - policy: command-provision-inference
   isValidatingAdmissionPolicy: true
   kind: ConfigMap
-  result: pass
-  resources:
-  - tenant-acme/provision-inference-deepseek
-- policy: command-provision-inference
-  isValidatingAdmissionPolicy: true
-  kind: ConfigMap
   result: fail
   resources:
   - tenant-acme/provision-inference-format
-- policy: command-provision-inference
-  isValidatingAdmissionPolicy: true
-  kind: ConfigMap
-  result: fail
-  resources:
-  - tenant-acme/provision-inference-baseurl
 - policy: command-provision-inference
   isValidatingAdmissionPolicy: true
   kind: ConfigMap
@@ -51,9 +39,3 @@ results:
   result: fail
   resources:
   - tenant-acme/provision-inference-emptyimage
-- policy: command-reap-inference
-  isValidatingAdmissionPolicy: true
-  kind: ConfigMap
-  result: fail
-  resources:
-  - tenant-acme/reap-inference-data

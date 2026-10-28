@@ -1,3 +1,16 @@
 {{- with .Values.tenant }}
-{{ include "commands.command" (dict "name" "provision-tenant" "namespace" "sycophant-system" "data" (dict "tenant" .name "capacity" .capacity "owner" .owner "owner-hash" .ownerHash)) }}
+{{- $data := dict "tenant" .name "capacity" .capacity "owner" .owner "owner-hash" .ownerHash }}
+{{- /* Flatten the 7 allowed headscale keys into the command data.
+       image, tag and pullPolicy are tenant chart defaults, not command data.
+       Keys not in this list are silently dropped, matching channel-provision.yaml
+       behavior. */ -}}
+{{- $hs := $.Values.headscale | default dict }}
+{{- range $k := list "enabled" "serverUrl" "magicDns" "baseDomain" "storageClass" }}
+{{- if hasKey $hs $k }}{{ $_ := set $data (printf "headscale.%s" $k) (get $hs $k | toString) }}{{ end }}
+{{- end }}
+{{- $acme := $hs.acme | default dict }}
+{{- range $k := list "enabled" "email" }}
+{{- if hasKey $acme $k }}{{ $_ := set $data (printf "headscale.acme.%s" $k) (get $acme $k | toString) }}{{ end }}
+{{- end }}
+{{ include "commands.command" (dict "name" "provision-tenant" "namespace" "sycophant-system" "data" $data) }}
 {{- end }}

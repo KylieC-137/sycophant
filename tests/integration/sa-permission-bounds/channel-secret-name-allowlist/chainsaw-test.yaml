@@ -1,0 +1,188 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: channel-secret-name-allowlist
+spec:
+  description: |
+    The ServiceAccount the channel chart renders for `tailnet` may create only
+    the identity Secret the chart renders for it, and only in its own namespace.
+
+    The ServiceAccount, its Role and RoleBinding, and the identity Secret name
+    (the channel container's TS_KUBE_SECRET) all come from the channel chart
+    rendered for `name=tailnet` into the test's tenant namespace. The rendered
+    Role grants `create` on every Secret, so RBAC admits each attempt below and
+    the cluster's Secret-name allowlist VAP is what refuses.
+
+    Mutation guard: an allowlist VAP that matches a ServiceAccount prefix other
+    than the rendered one, or admits a fixed name other than the rendered identity
+    Secret, lets an off-list create through and a refusal step below reds.
+  bindings:
+    - name: tenant_ns
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
+    # A neighbouring tenant. Never created: impersonation needs no real SA,
+    # and the point is that the namespace segment of the username is what
+    # the policy reads.
+    - name: foreign_ns
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
+    # Eval'd by every step: renders the channel chart for tailnet into
+    # $TENANT_NS and sets SA (the channel pod's ServiceAccount) and IDENTITY (its
+    # TS_KUBE_SECRET), leaving the render in $RENDER.
+    - name: channel_names
+      value: |
+        REPO_ROOT=$(git rev-parse --show-toplevel)
+        RENDER=$(mktemp)
+        helm template t "$REPO_ROOT/charts/sycophant-channel" -n "$TENANT_NS" \
+          --set name=tailnet --set-json 'command={"loginServer":"http://headscale:8080"}' > "$RENDER"
+        names=$(python3 -c '
+        import sys, yaml
+        deps = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d and d["kind"] == "Deployment"]
+        assert len(deps) == 1, "want one channel Deployment"
+        spec = deps[0]["spec"]["template"]["spec"]
+        env = {e["name"]: e.get("value") for c in spec["containers"] for e in c.get("env") or []}
+        print(spec["serviceAccountName"], env.get("TS_KUBE_SECRET") or "")
+        ' "$RENDER")
+        SA=${names% *}
+        IDENTITY=${names#* }
+        [ -n "$SA" ] && [ -n "$IDENTITY" ] || { echo "no ServiceAccount or TS_KUBE_SECRET in the tailnet channel render" >&2; exit 1; }
+  steps:
+    - name: create-tenant-ns
+      use:
+        template: ../../step-templates/tenant.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+    - name: install-rendered-channel-identity
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: FOREIGN_NS
+                value: ($foreign_ns)
+              - name: CHANNEL_NAMES
+                value: ($channel_names)
+            content: |
+              set -euo pipefail
+              eval "$CHANNEL_NAMES"
+              objs=$(mktemp)
+              python3 - "$RENDER" "$SA" "$TENANT_NS" "$FOREIGN_NS" > "$objs" <<'PY'
+              import sys, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+              sa, ns, foreign = sys.argv[2:5]
+              bindings = [d for d in docs if d["kind"] == "RoleBinding"
+                          and any(s.get("name") == sa for s in d.get("subjects") or [])]
+              roles = [d for d in docs if d["kind"] == "Role"
+                       and d["metadata"]["name"] in {b["roleRef"]["name"] for b in bindings}]
+              assert roles, "the channel chart rendered no Role bound to its ServiceAccount"
+              out = [d for d in docs if d["kind"] == "ServiceAccount" and d["metadata"]["name"] == sa] + roles + bindings
+              for d in out:
+                  d["metadata"]["namespace"] = ns
+              # The same Role bound to a same-named SA of a neighbouring tenant,
+              # so the cross-namespace attempt clears RBAC and the VAP refuses it.
+              out.append({"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
+                          "metadata": {"name": "foreign-channel-sa", "namespace": ns},
+                          "roleRef": bindings[0]["roleRef"],
+                          "subjects": [{"kind": "ServiceAccount", "name": sa, "namespace": foreign}]})
+              yaml.safe_dump_all(out, sys.stdout)
+              PY
+              kubectl apply -f "$objs"
+    - name: wait-for-vap-cache-refresh
+      try:
+        - sleep:
+            duration: 5s
+    # Runs before the accept below and claims the SAME name, so the only thing
+    # that can refuse it is the namespace clause.
+    - name: a-same-named-channel-sa-from-another-namespace-is-refused
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: FOREIGN_NS
+                value: ($foreign_ns)
+              - name: CHANNEL_NAMES
+                value: ($channel_names)
+            content: |
+              set -euo pipefail
+              eval "$CHANNEL_NAMES"
+              kubectl create secret generic "$IDENTITY" --from-literal=identity=fake -n "$TENANT_NS" \
+                --as="system:serviceaccount:${FOREIGN_NS}:${SA}"
+            check:
+              ($error != null): true
+              (contains($stderr, 'in its own namespace')): true
+    - name: channel-sa-may-create-the-rendered-identity-secret
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: CHANNEL_NAMES
+                value: ($channel_names)
+            content: |
+              set -euo pipefail
+              eval "$CHANNEL_NAMES"
+              kubectl create secret generic "$IDENTITY" --from-literal=identity=fake -n "$TENANT_NS" \
+                --as="system:serviceaccount:${TENANT_NS}:${SA}"
+            check:
+              ($error == null): true
+    - name: channel-sa-cannot-create-an-off-list-secret
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: CHANNEL_NAMES
+                value: ($channel_names)
+            content: |
+              set -euo pipefail
+              eval "$CHANNEL_NAMES"
+              name=ch-telegram-identity
+              if [ "$name" = "$IDENTITY" ]; then
+                echo "the rendered identity Secret is '$IDENTITY', a name this test expects off the list" >&2
+                exit 1
+              fi
+              if err=$(kubectl create secret generic "$name" --from-literal=identity=fake -n "$TENANT_NS" \
+                  --as="system:serviceaccount:${TENANT_NS}:${SA}" 2>&1); then
+                echo "channel SA ${SA} created off-list Secret ${name}" >&2
+                exit 1
+              fi
+              case "$err" in
+                *"may only create the tailnet-identity Secret"*) ;;
+                *) echo "create ${name} failed for a reason other than admission: ${err}" >&2; exit 1 ;;
+              esac
+    - name: forbidden-name-with-generate-name-rejected
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+              - name: CHANNEL_NAMES
+                value: ($channel_names)
+            content: |
+              set -euo pipefail
+              eval "$CHANNEL_NAMES"
+              cat <<EOF | kubectl create -f - -n "$TENANT_NS" --as="system:serviceaccount:${TENANT_NS}:${SA}"
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                generateName: evil-
+              type: Opaque
+              data:
+                k: dg==
+              EOF
+            check:
+              ($error != null): true
+              (contains($stderr, 'may only create the tailnet-identity Secret')): true
+    - name: cluster-admin-can-still-create-arbitrary-secrets
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -euo pipefail
+              kubectl create secret generic cluster-admin-secret \
+                --from-literal=k=v -n "$TENANT_NS"
+            check:
+              ($error == null): true

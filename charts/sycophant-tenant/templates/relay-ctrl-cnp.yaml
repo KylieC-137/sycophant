@@ -27,26 +27,26 @@ spec:
         - ports:
             - port: "9090"
               protocol: TCP
-    # Adapter port (9092) — platform adapters that hold their own signing
-    # identity. Key equals value throughout: an empty or under-specified
+    # Principal port (9092) — principal-class channel pods that hold their own
+    # signing identity. Key equals value throughout: an empty or under-specified
     # Cilium endpoint selector matches every endpoint, which is fail-open.
     # Never keyed on sycophant.md/channel, which is an instance name.
     - fromEndpoints:
         - matchLabels:
-            app.kubernetes.io/component: adapter
-            sycophant.md/adapter-class: principal
+            app.kubernetes.io/component: channel
+            sycophant.md/channel-class: principal
             app.kubernetes.io/part-of: sycophant
       toPorts:
         - ports:
             - port: "9092"
               protocol: TCP
-    # App port (9091) — the transport-class adapter pipe, and nothing else.
-    # A bare component match would admit every adapter, platform adapters
+    # App port (9091) — the transport-class channel pipe, and nothing else.
+    # A bare component match would admit every channel pod, principal ones
     # included.
     - fromEndpoints:
         - matchLabels:
-            app.kubernetes.io/component: adapter
-            sycophant.md/adapter-class: transport
+            app.kubernetes.io/component: channel
+            sycophant.md/channel-class: transport
             app.kubernetes.io/part-of: sycophant
       toPorts:
         - ports:

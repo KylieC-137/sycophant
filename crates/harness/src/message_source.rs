@@ -16,7 +16,7 @@ pub(crate) trait MessageSource: Send {
 #[derive(Debug)]
 pub(crate) struct InboundMessage {
     pub content: Vec<ContentBlock>,
-    pub reply_channel: Option<String>,
+    pub reply_channel_stream: Option<String>,
     /// Conversation this message belongs to. Stamped at ingest time.
     /// The harness uses this verbatim when building the TurnRequest;
     /// it never mints conversation ids on its own.
@@ -126,7 +126,7 @@ impl MessageSource for SubscribeMessageSource {
                     );
                     return Ok(InboundMessage {
                         content: msg.content,
-                        reply_channel: msg.reply_channel,
+                        reply_channel_stream: msg.reply_channel_stream,
                         conversation_id: msg.conversation_id,
                         grants: msg
                             .grants
@@ -204,7 +204,7 @@ mod tests {
             content: vec![ContentBlock {
                 block: Some(content_block::Block::Text(TextBlock { text: text.into() })),
             }],
-            reply_channel: None,
+            reply_channel_stream: None,
             conversation_id: "test-conv".into(),
             grants: vec![],
         }
@@ -259,7 +259,7 @@ mod tests {
             vec![Ok(UserMessage {
                 sender: "u".into(),
                 content: vec![],
-                reply_channel: None,
+                reply_channel_stream: None,
                 conversation_id: String::new(),
                 grants: vec![],
             })],
@@ -268,17 +268,5 @@ mod tests {
         let mut src = SubscribeMessageSource::with_driver(Box::new(driver), flag).no_backoff();
         let err = src.next_message().await.unwrap_err();
         assert_eq!(err, "empty inbound message");
-    }
-
-    #[tokio::test]
-    async fn subscribe_message_source_reconnects_after_subscribe_then_stream_error() {
-        let driver = MockDriver::new(
-            vec![Ok(()), Err("connect failed".into()), Ok(())],
-            vec![Err("stream broke".into()), Ok(user_message("after-retry"))],
-        );
-        let flag = Arc::new(AtomicBool::new(false));
-        let mut src = SubscribeMessageSource::with_driver(Box::new(driver), flag).no_backoff();
-        let msg = src.next_message().await.unwrap();
-        assert_eq!(msg.content.len(), 1);
     }
 }

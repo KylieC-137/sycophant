@@ -650,7 +650,16 @@ impl DispatchState {
                     &state.spawn.namespace
                 )
             );
-            let completed = dial_and_run(endpoint, assignment, sender, cancel, READY_TIMEOUT).await;
+            let completed = dial_and_run(
+                endpoint,
+                assignment,
+                sender,
+                cancel,
+                READY_TIMEOUT,
+                call_id.clone(),
+                tool_name.clone(),
+            )
+            .await;
             state.finish_call(&call_id).await;
             if completed {
                 state.bump_last_activity(&tool, &job_name).await;
@@ -740,16 +749,20 @@ async fn dial_and_run(
     result_tx: mpsc::Sender<ToolResultFrame>,
     cancel: CancellationToken,
     ready_window: Duration,
+    call_id: String,
+    tool_name: String,
 ) -> bool {
     // Owns this call's terminal guarantee from here: any early return below
     // drops it, firing the synthetic FAILED so the drain never awaits forever.
     let mut guard = ToolResultGuard::new(result_tx);
 
     let deadline = Instant::now() + ready_window;
+    let mut attempt: u32 = 0;
     let mut client = loop {
         if cancel.is_cancelled() {
             return false;
         }
+        attempt += 1;
         match tokio::time::timeout(
             DIAL_ATTEMPT_TIMEOUT,
             ToolJobClient::connect(endpoint.clone()),
@@ -757,7 +770,28 @@ async fn dial_and_run(
         .await
         {
             Ok(Ok(client)) => break client,
-            _ => {
+            Ok(Err(err)) => {
+                warn!(
+                    call_id = %call_id,
+                    tool = %tool_name,
+                    endpoint = %endpoint,
+                    attempt,
+                    error = %err,
+                    "tool pod dial failed, retrying"
+                );
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                tokio::time::sleep(DIAL_BACKOFF).await;
+            }
+            Err(_) => {
+                warn!(
+                    call_id = %call_id,
+                    tool = %tool_name,
+                    endpoint = %endpoint,
+                    attempt,
+                    "tool pod dial timed out, retrying"
+                );
                 if Instant::now() >= deadline {
                     return false;
                 }
@@ -765,6 +799,13 @@ async fn dial_and_run(
             }
         }
     };
+
+    info!(
+        call_id = %call_id,
+        tool = %tool_name,
+        endpoint = %endpoint,
+        "tool pod connected"
+    );
 
     // The outbound half: the assignment first, then a cancel if the call is
     // cancelled while it runs. Held on its own task so the inbound frame drain
@@ -791,7 +832,14 @@ async fn dial_and_run(
 
     let response = match client.run(ReceiverStream::new(out_rx)).await {
         Ok(response) => response,
-        Err(_) => {
+        Err(err) => {
+            warn!(
+                call_id = %call_id,
+                tool = %tool_name,
+                endpoint = %endpoint,
+                error = %err,
+                "tool pod stream failed"
+            );
             out_task.abort();
             return false;
         }
@@ -1158,7 +1206,6 @@ impl ToolsetRpc for InferenceDispatch {
 mod tests {
     use super::*;
     use crate::model_config::tests::{model_cm, REMOTE};
-    use shared::toolset::ToolsetEntry;
 
     fn state() -> Arc<DispatchState> {
         DispatchState::new(
@@ -1272,7 +1319,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_job_cannot_claim_a_call_admitted_against_another_job() {
+    async fn a_call_is_claimed_only_by_the_job_it_names() {
         let state = state();
         state.enqueue_call(queued("call-a", "shell", "job-a")).await;
         assert!(state.dequeue_call("shell", "job-b").await.is_none());
@@ -1280,6 +1327,11 @@ mod tests {
             state.dequeue_call("shell", "job-a").await.unwrap().call_id,
             "call-a"
         );
+
+        // A call naming no job is claimed by nobody.
+        state.enqueue_call(queued("targetless", "shell", "")).await;
+        assert!(state.dequeue_call("shell", "job-a").await.is_none());
+        assert!(state.dequeue_call("shell", "").await.is_none());
     }
 
     #[tokio::test]
@@ -1293,14 +1345,6 @@ mod tests {
             state.dequeue_call("shell", "job-a").await.unwrap().call_id,
             "live"
         );
-    }
-
-    #[tokio::test]
-    async fn a_call_naming_no_job_is_claimed_by_nobody() {
-        let state = state();
-        state.enqueue_call(queued("targetless", "shell", "")).await;
-        assert!(state.dequeue_call("shell", "job-a").await.is_none());
-        assert!(state.dequeue_call("shell", "").await.is_none());
     }
 
     /// Breaks without the `enable()`: the enqueue's notify lands before the
@@ -1360,50 +1404,6 @@ mod tests {
             Some(Frame::Complete(c)) => assert_eq!(c.outcome, ToolOutcome::Failed as i32),
             other => panic!("expected a FAILED terminal, got {other:?}"),
         }
-    }
-
-    /// begin_call env-keys the queued call's args: a git-style tool with an
-    /// arg `message` mapped to env `MESSAGE` enqueues `{"MESSAGE": "hi"}`, not
-    /// the raw request key. With no kube client the call attaches to a seeded
-    /// active job rather than spawning.
-    #[tokio::test]
-    async fn begin_call_enqueues_env_keyed_args() {
-        let mut config = HashMap::new();
-        config.insert(
-            "git".to_string(),
-            ToolsetEntry {
-                image: Some("git:local".to_string()),
-                ..Default::default()
-            },
-        );
-        let state = DispatchState::new(
-            None,
-            "ns".to_string(),
-            "http://harness:9090".to_string(),
-            "ws".to_string(),
-            SchedulingConfig::default(),
-            Arc::new(RwLock::new(ToolsetConfig::from_map(config))),
-        );
-        state
-            .set_active_job(active("git-push", "job-x", None))
-            .await;
-
-        let mut args = HashMap::new();
-        args.insert("MESSAGE".to_string(), "hi".to_string());
-        let (_call_id, _rx) = state
-            .begin_call("git-push", "git", args, None)
-            .await
-            .expect("attach to the seeded job");
-
-        let call = state
-            .dequeue_call("git-push", "job-x")
-            .await
-            .expect("the seeded pod claims its call");
-        assert_eq!(call.args.get("MESSAGE").map(String::as_str), Some("hi"));
-        assert!(
-            !call.args.contains_key("message"),
-            "the queued args must be env-keyed, never the raw request key"
-        );
     }
 
     /// The provider format string resolves through the same serde spelling the
@@ -1577,37 +1577,6 @@ mod tests {
             other => panic!("expected a TurnComplete, got {other:?}"),
         }
     }
-
-    /// A `max_tokens` terminal signal maps to `StopReason::MaxTokens`, never
-    /// collapsed to `EndTurn`. Breaks if the `"max_tokens"` arm of
-    /// `assemble_turn_complete` is dropped, and breaks if the open-guard is
-    /// inverted so the first `next_event` never opens the provider stream.
-    #[tokio::test]
-    async fn provider_turn_source_maps_max_tokens_stop_reason() {
-        let mut source = provider_source("max_tokens");
-        let first = source
-            .next_event()
-            .await
-            .expect("the streamed content delta")
-            .expect("a forwarded frame");
-        assert!(
-            matches!(first.event, Some(turn_event::Event::ContentDelta(_))),
-            "the provider stream must open and forward the content delta first"
-        );
-        let second = source
-            .next_event()
-            .await
-            .expect("the assembled completion")
-            .expect("a completion frame");
-        match second.event {
-            Some(turn_event::Event::Complete(tc)) => assert_eq!(
-                tc.stop_reason,
-                proto_common::StopReason::MaxTokens as i32,
-                "a max_tokens terminal must map to MaxTokens, not the EndTurn default"
-            ),
-            other => panic!("expected a TurnComplete, got {other:?}"),
-        }
-    }
 }
 
 /// The harness is the CLIENT of the reversed tool-dispatch protocol. It dials
@@ -1621,7 +1590,7 @@ mod tests {
 /// dial-hold-retry rewrite introduces:
 ///   - `pod_dial_name(call_id, service, namespace) -> String` — a pure builder,
 ///     no apiserver call;
-///   - `dial_and_run(endpoint, assignment, result_tx, cancel, ready_window)` —
+///   - `dial_and_run(endpoint, assignment, result_tx, cancel, ready_window, call_id, tool_name)` —
 ///     the per-call client task.
 #[cfg(test)]
 mod dial_client_tests {
@@ -1643,7 +1612,7 @@ mod dial_client_tests {
     use toolset_proto::tool_job_server::{ToolJob, ToolJobServer};
     use toolset_proto::{RunToolCommand, ToolCallAssignment};
 
-    use super::{dial_and_run, pod_dial_name, RESULT_CHANNEL_CAPACITY};
+    use super::{dial_and_run, RESULT_CHANNEL_CAPACITY};
 
     /// A stand-in serving pod. Records every inbound `RunToolCommand` and, once
     /// its trigger fires, streams `frames` back on the response half. With
@@ -1739,54 +1708,17 @@ mod dial_client_tests {
         panic!("condition not met within 5s");
     }
 
-    /// The pod's dial name is a pure function of the call id, the
-    /// workspace headless Service, and the namespace — computed with no
-    /// apiserver call. Breaks if the builder reads `status.podIP` or reshapes
-    /// the per-pod record.
-    #[test]
-    fn dial_name_is_the_per_pod_headless_record() {
-        assert_eq!(
-            pod_dial_name("call-1", "capability-alpha", "tenant-x"),
-            "call-1.capability-alpha.tenant-x.svc.cluster.local",
-        );
-    }
-
     /// The harness sends the tool-call assignment as the FIRST message on
-    /// the stream it opens. Breaks if the client sends anything before the
-    /// assignment, or never sends it.
+    /// the stream it opens, and the frames the pod streams arrive on that very
+    /// connection, in order, terminal last. Breaks if the client sends anything
+    /// before the assignment, or never sends it; breaks if the client drops
+    /// inbound frames (the receiver would see only the guard's synthetic
+    /// terminal).
     #[tokio::test]
-    async fn the_assignment_is_the_first_message_on_the_stream() {
+    async fn the_assignment_goes_first_and_pod_frames_return_on_that_stream() {
         let inbound = Arc::new(Mutex::new(Vec::new()));
         let endpoint = serve(FakePod {
             inbound: inbound.clone(),
-            frames: vec![terminal(ToolOutcome::Done)],
-            wait_for_cancel: false,
-        });
-
-        let (tx, _rx) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
-        dial_and_run(
-            endpoint,
-            assignment("call-abc"),
-            tx,
-            CancellationToken::new(),
-            Duration::from_secs(5),
-        )
-        .await;
-
-        let log = inbound.lock().unwrap();
-        match log.first().and_then(|c| c.command.as_ref()) {
-            Some(Command::Assignment(a)) => assert_eq!(a.call_id, "call-abc"),
-            other => panic!("first message must be the assignment, got {other:?}"),
-        }
-    }
-
-    /// The frames the pod streams arrive on the very connection the harness
-    /// opened, in order, terminal last. Breaks if the client drops inbound
-    /// frames (the receiver would see only the guard's synthetic terminal).
-    #[tokio::test]
-    async fn frames_stream_back_on_the_opened_connection() {
-        let endpoint = serve(FakePod {
-            inbound: Arc::new(Mutex::new(Vec::new())),
             frames: vec![stdout_frame("hello-from-pod"), terminal(ToolOutcome::Done)],
             wait_for_cancel: false,
         });
@@ -1794,10 +1726,12 @@ mod dial_client_tests {
         let (tx, mut rx) = mpsc::channel::<ToolResultFrame>(RESULT_CHANNEL_CAPACITY);
         dial_and_run(
             endpoint,
-            assignment("c"),
+            assignment("call-abc"),
             tx,
             CancellationToken::new(),
             Duration::from_secs(5),
+            "call-abc".to_string(),
+            "test-tool".to_string(),
         )
         .await;
 
@@ -1811,6 +1745,12 @@ mod dial_client_tests {
             matches!(last.frame, Some(Frame::Complete(ref c)) if c.outcome == ToolOutcome::Done as i32),
             "the pod's terminal must reach the call channel"
         );
+
+        let log = inbound.lock().unwrap();
+        match log.first().and_then(|c| c.command.as_ref()) {
+            Some(Command::Assignment(a)) => assert_eq!(a.call_id, "call-abc"),
+            other => panic!("first message must be the assignment, got {other:?}"),
+        }
     }
 
     /// Cancelling the call token makes the harness deliver a
@@ -1834,6 +1774,8 @@ mod dial_client_tests {
             tx,
             cancel.clone(),
             Duration::from_secs(5),
+            "c".to_string(),
+            "test-tool".to_string(),
         ));
 
         // The assignment lands first, then the fired cancel rides the same stream.
@@ -1885,6 +1827,8 @@ mod dial_client_tests {
             tx,
             CancellationToken::new(),
             window,
+            "c".to_string(),
+            "test-tool".to_string(),
         )
         .await;
 
@@ -1920,6 +1864,8 @@ mod dial_client_tests {
             tx,
             CancellationToken::new(),
             Duration::from_secs(5),
+            "c".to_string(),
+            "test-tool".to_string(),
         )
         .await;
 

@@ -79,12 +79,6 @@ fn sh(script: &str) -> tokio::process::Command {
 
 // A child that exits non-zero terminates the stream with a ToolComplete carrying
 // that exact exit code and flagged as an error.
-//
-// Materiality: the terminal error flag is `exit_code != 0 || image_error`.
-// Flipping `!=` to `==` makes a non-zero exit read as non-error (`is_error`
-// reds); flipping the `||` to `&&` drops the exit-code term entirely (with no
-// image error, `is_error` reds). Losing the real exit code (e.g. the terminal
-// hardcoding 0) reds the `exit_code == 7` assertion.
 #[tokio::test]
 async fn non_zero_exit_terminal_carries_the_code_and_is_error() {
     let cancel = CancellationToken::new();
@@ -103,10 +97,6 @@ async fn non_zero_exit_terminal_carries_the_code_and_is_error() {
 
 // A child that exits zero terminates the stream with a non-error ToolComplete
 // carrying exit code 0.
-//
-// Materiality: this pins the success branch of `exit_code != 0 || image_error`.
-// A terminal that hardcodes a non-zero/`-1` exit reds `exit_code == 0`; one that
-// always flags an error reds `!is_error`.
 #[tokio::test]
 async fn zero_exit_terminal_is_not_an_error() {
     let cancel = CancellationToken::new();
@@ -122,10 +112,6 @@ async fn zero_exit_terminal_is_not_an_error() {
 
 // Cancelling a blocked child mid-run terminates the stream with the killed
 // sentinel: exit code -1 and an error terminal.
-//
-// Materiality: the terminal reads `if aborted { -1 } else { .. }`. A mutant that
-// changes the aborted sentinel away from -1 (e.g. to 0) reds `exit_code == -1`
-// and, because a zero exit is not an error, reds `is_error` too.
 #[tokio::test]
 async fn cancelled_run_terminal_is_the_killed_sentinel() {
     let cancel = CancellationToken::new();
@@ -149,10 +135,6 @@ async fn cancelled_run_terminal_is_the_killed_sentinel() {
 
 // A run that overruns its deadline terminates with the killed sentinel and a
 // timeout notice on stderr.
-//
-// Materiality: exit code -1 pins the aborted (timed-out) sentinel branch;
-// requiring the "timed out" stderr frame pins the timeout-notice emission —
-// deleting that block leaves no such frame and reds the stderr assertion.
 #[tokio::test]
 async fn timed_out_run_terminal_is_the_killed_sentinel_with_a_notice() {
     let cancel = CancellationToken::new();
@@ -180,10 +162,8 @@ async fn timed_out_run_terminal_is_the_killed_sentinel_with_a_notice() {
 // A child that signals its own death (no cancel, no timeout) has no exit code;
 // the terminal falls back to the -1 sentinel.
 //
-// Materiality: with `aborted` false, the terminal is
-// `status.and_then(|s| s.code()).unwrap_or(-1)`. A signal-killed child yields
-// `code() == None`, so the fallback is the only source of the value. Changing
-// the `unwrap_or(-1)` default (e.g. to 0) reds `exit_code == -1`.
+// A signal-killed child yields `code() == None`, so the `unwrap_or(-1)`
+// fallback is the only source of the value.
 #[tokio::test]
 async fn signal_killed_child_terminal_falls_back_to_minus_one() {
     let cancel = CancellationToken::new();
@@ -202,11 +182,6 @@ async fn signal_killed_child_terminal_falls_back_to_minus_one() {
 
 // A command that cannot be spawned terminates with an error terminal at the -1
 // sentinel and a scrubbed stdout error frame instead of any tool output.
-//
-// Materiality: the spawn-failure path emits `ToolComplete { is_error: true,
-// exit_code: -1 }`. Changing that sentinel exit code (e.g. to 0) reds
-// `exit_code == -1`; dropping the error frame reds the "execution error"
-// assertion.
 #[tokio::test]
 async fn spawn_failure_terminal_is_the_error_sentinel() {
     let cancel = CancellationToken::new();
@@ -233,11 +208,9 @@ async fn spawn_failure_terminal_is_the_error_sentinel() {
 // An unassemblable image reference on stdout flags the terminal as an error even
 // when the child exits zero.
 //
-// Materiality: an image-marker line whose scratch file is unreadable sets the
-// producer's `image_error` flag, which the terminal folds in via
-// `exit_code != 0 || image_error`. Dropping the `image_error = true` assignment,
-// or replacing the `||` with `&&`, leaves the zero-exit terminal non-error and
-// reds `is_error`.
+// An image-marker line whose scratch file is unreadable sets the producer's
+// `image_error` flag, which the terminal folds in via
+// `exit_code != 0 || image_error`.
 #[tokio::test]
 async fn unassemblable_image_marker_flags_the_terminal_error_on_zero_exit() {
     let cancel = CancellationToken::new();
@@ -262,11 +235,6 @@ async fn unassemblable_image_marker_flags_the_terminal_error_on_zero_exit() {
 
 // When stdout reaches EOF while stderr keeps emitting, the still-open stderr
 // pipe's later lines still stream — the loop follows either pipe, not both.
-//
-// Materiality: the pump loop runs `while stdout_open || stderr_open`. Flipping
-// the `||` to `&&` exits the loop the instant stdout EOFs, dropping every stderr
-// line the child writes afterward — the "err-after-stdout-eof" frame never
-// arrives and this test reds.
 #[tokio::test]
 async fn asymmetric_pipe_eof_still_streams_the_open_pipe() {
     let cancel = CancellationToken::new();

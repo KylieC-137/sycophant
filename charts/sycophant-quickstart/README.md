@@ -85,11 +85,11 @@ helm install sycophant-quickstart . -n <your-ns> --wait --timeout=10m
 ```
 
 Then provision one or more tenants from a values file
-([`examples/sycoadm/tenants/e2e-test.yaml`](../../examples/sycoadm/tenants/e2e-test.yaml)); re-run
+([`examples/sycoadm/tenants/hello-world.yaml`](../../examples/sycoadm/tenants/hello-world.yaml)); re-run
 to upgrade the tenant in place:
 
 ```sh
-sycoadm tenant up -f examples/sycoadm/tenants/e2e-test.yaml --set tenant.name=acme
+sycoadm tenant up -f examples/sycoadm/tenants/hello-world.yaml --set tenant.name=acme
 ```
 
 ## Uninstall

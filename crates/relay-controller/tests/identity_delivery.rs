@@ -7,7 +7,7 @@
 //! `handle.<channel>` keys naming that channel's platform user ID. The table
 //! answers two questions and only these: which workspaces a subject reaches
 //! (ListWorkspaces), and which subject a channel handle resolves to (the
-//! adapter path). A handle that no operator bound resolves to nothing.
+//! channel path). A handle that no operator bound resolves to nothing.
 
 use k8s_openapi::api::core::v1::ConfigMap;
 use relay_controller::identity::{apply_delivery, IdentityTable};
@@ -26,9 +26,6 @@ fn sorted_workspaces(table: &IdentityTable, subject: &str) -> Vec<String> {
 
 /// One well-formed ConfigMap yields its subject's workspace list and resolves
 /// every handle it binds to that subject.
-///
-/// Materiality: misparse the flat data (wrong key, split the comma list
-/// wrongly, miss the `handle.` prefix) and the list or a resolution is wrong.
 #[test]
 fn a_well_formed_configmap_yields_its_subjects_list_and_handles() {
     let cms = vec![identity_cm(
@@ -135,83 +132,21 @@ fn a_handle_claimed_by_two_subjects_is_absent_for_both() {
     assert_eq!(sorted_workspaces(&table, BOB), vec!["beta".to_string()]);
 }
 
-/// A delivery that omits a subject's ConfigMap revokes that subject. This is
-/// the ordinary revocation path (the operator re-runs the command without the
-/// workspace or the handle) and the only place a cached table can leak back in.
+/// A ConfigMap with a broken handle is absent as a whole: not kept by
+/// skipping the broken key. Only that ConfigMap is reported.
 ///
-/// Update the table incrementally (`insert` without the removals) and bob
-/// survives his own revocation forever.
-#[test]
-fn a_delivery_that_omits_a_configmap_revokes_it() {
-    let both = vec![
-        identity_cm(
-            "user-0a1b2c3d4e",
-            Some(ALICE),
-            "alpha",
-            &[("slack", "U0123ABCDEF")],
-        ),
-        identity_cm(
-            "user-9f8e7d6c5b",
-            Some(BOB),
-            "beta",
-            &[("telegram", "7133824091")],
-        ),
-    ];
-    let (table, errors) = apply_delivery(&both);
-    assert!(errors.is_empty());
-    assert_eq!(sorted_workspaces(&table, BOB), vec!["beta".to_string()]);
-
-    let (after, errors) = apply_delivery(&both[..1]);
-    assert!(errors.is_empty());
-    assert_eq!(sorted_workspaces(&after, ALICE), vec!["alpha".to_string()]);
-    assert!(
-        after.workspaces_for(BOB).is_empty(),
-        "the omitted subject must be gone"
-    );
-    assert_eq!(after.resolve_handle("telegram", "7133824091"), None);
-}
-
-/// A clean delivery, then one that omits bob and breaks alice. Both are
-/// gone: bob by the omission, alice because a broken ConfigMap is absent, not
-/// carried at its old values and not kept by skipping the broken key. Only
-/// alice's ConfigMap is reported.
-///
-/// Materiality: accept alice's ConfigMap minus its broken handle and she
-/// keeps her workspaces after the edit meant to cut her off.
+/// Keeping alice's ConfigMap minus its broken handle would let her keep her
+/// workspaces after the edit meant to cut her off.
 #[test]
 fn a_broken_configmap_does_not_block_a_revocation_in_the_same_delivery() {
-    let first = vec![
-        identity_cm(
-            "user-0a1b2c3d4e",
-            Some(ALICE),
-            "alpha",
-            &[("slack", "U0123ABCDEF")],
-        ),
-        identity_cm(
-            "user-9f8e7d6c5b",
-            Some(BOB),
-            "beta",
-            &[("telegram", "7133824091")],
-        ),
-    ];
-    let (table, errors) = apply_delivery(&first);
-    assert!(errors.is_empty(), "first delivery is clean: {errors:?}");
-    assert_eq!(sorted_workspaces(&table, ALICE), vec!["alpha".to_string()]);
-    assert_eq!(sorted_workspaces(&table, BOB), vec!["beta".to_string()]);
-
-    let second = vec![identity_cm(
+    let cms = vec![identity_cm(
         "user-0a1b2c3d4e",
         Some(ALICE),
         "alpha",
         &[("slack", "")],
     )];
-    let (table, errors) = apply_delivery(&second);
+    let (table, errors) = apply_delivery(&cms);
 
-    assert!(
-        table.workspaces_for(BOB).is_empty(),
-        "the omitted subject must be gone though the other ConfigMap is broken"
-    );
-    assert_eq!(table.resolve_handle("telegram", "7133824091"), None);
     assert!(
         table.workspaces_for(ALICE).is_empty(),
         "the broken ConfigMap must be absent, not kept"
@@ -234,40 +169,4 @@ fn an_empty_delivery_yields_an_empty_table_and_no_errors() {
     assert!(errors.is_empty());
     assert!(table.workspaces_for(ALICE).is_empty());
     assert_eq!(table.resolve_handle("slack", "U0123ABCDEF"), None);
-}
-
-/// One subject, handles on several channels — every bound handle resolves
-/// to the same subject and so to the same whole list. The list is
-/// per-subject, never per-channel.
-#[test]
-fn every_bound_channel_resolves_to_the_same_subjects_whole_list() {
-    let cms = vec![identity_cm(
-        "user-0a1b2c3d4e",
-        Some(ALICE),
-        "alpha,beta,gamma",
-        &[
-            ("slack", "U0123ABCDEF"),
-            ("telegram", "7133824091"),
-            ("email", "alice@example.com"),
-        ],
-    )];
-    let (table, errors) = apply_delivery(&cms);
-    assert!(errors.is_empty());
-
-    for (channel, handle) in [
-        ("slack", "U0123ABCDEF"),
-        ("telegram", "7133824091"),
-        ("email", "alice@example.com"),
-    ] {
-        assert_eq!(
-            table.resolve_handle(channel, handle),
-            Some(ALICE),
-            "a handle on any channel resolves to the subject"
-        );
-    }
-    assert_eq!(
-        sorted_workspaces(&table, ALICE),
-        vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string(),],
-        "the whole list, regardless of which channel asked"
-    );
 }

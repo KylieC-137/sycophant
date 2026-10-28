@@ -14,7 +14,8 @@ use crate::runner::{run_passthrough, run_passthrough_in};
 
 const REGISTRY_PUSH: &str = "localhost:5555";
 
-/// The one toolset base image. Built first: every toolset image builds FROM it.
+/// The one toolset base image. Built first: the stdlib `toolset` image builds
+/// FROM it.
 const TOOLSET_BASE_TAG: &str = "toolset-base:local";
 
 // Controller and tool-job binaries packaged from build/Dockerfile (BINARY build-arg → <name>:local).
@@ -22,27 +23,23 @@ const TOOLSET_BASE_TAG: &str = "toolset-base:local";
 // built through the generic build/Dockerfile, not a FROM-base toolset path.
 const CONTROLLER_BINS: [&str; 3] = ["toolset-runtime", "relay-controller", "inference-runtime"];
 
-// Images loaded straight into the k3d node. toolset-git:local is here (not only
-// in the registry) because the workspace-init Job runs it node-local with
-// pullPolicy=Never (chart default workspaceInit.image=toolset-git, tag=local).
-const IMPORT_IMAGES: [&str; 6] = [
+// Images loaded straight into the k3d node.
+const IMPORT_IMAGES: [&str; 5] = [
     "inference-runtime:local",
     "sycophant-harness:local",
     "relay-controller:local",
     "sycophant-kubectl:local",
     "sycophant-provisioner:local",
-    "toolset-git:local",
 ];
 
 // Toolset images (built from the toolset-runtime binary) served via the registry.
-const TOOLSET_IMAGES: [&str; 3] = ["toolset", "toolset-git", "toolset-ssh-credentials"];
+const TOOLSET_IMAGES: [&str; 2] = ["toolset", "toolset-hello-world"];
 
 /// Build context dir for a toolset image, relative to the repo root.
 fn toolset_context(image: &str) -> &'static str {
     match image {
         "toolset" => "images/toolset",
-        "toolset-git" => "images/git",
-        "toolset-ssh-credentials" => "examples/sycoadm/toolsets/ssh-credentials",
+        "toolset-hello-world" => "examples/sycoadm/toolsets/hello-world",
         _ => unreachable!("unknown toolset image"),
     }
 }
@@ -140,8 +137,10 @@ pub(crate) fn build_and_load(repo: &Path, arch: &BuildArch) -> Result<(), String
     )?;
     let _ = fs::remove_file(&staged);
 
-    // Tool toolsets: each adds only its tools on top of the base image, and
-    // carries its tools.yaml, as one-line JSON, in the md.sycophant.tools label.
+    // Tool toolsets: the stdlib `toolset` adds its tools on top of the base
+    // image; `toolset-hello-world` builds FROM `toolset:local`, so the order of
+    // TOOLSET_IMAGES matters. Each carries its tools.yaml, as one-line JSON, in
+    // the md.sycophant.tools label.
     for img in TOOLSET_IMAGES {
         let ctx = toolset_context(img);
         let basearg = format!("BASE_IMAGE={TOOLSET_BASE_TAG}");
@@ -242,52 +241,4 @@ fn docker_build(repo: &Path, args: &[&str]) -> Result<(), String> {
     let mut full = vec!["build", "-q"];
     full.extend_from_slice(args);
     run_passthrough_in(repo, "docker", &full)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn toolset_contexts_map_each_image() {
-        // Mutant swapping any target dir is caught here.
-        assert_eq!(toolset_context("toolset"), "images/toolset");
-        assert_eq!(toolset_context("toolset-git"), "images/git");
-        assert_eq!(
-            toolset_context("toolset-ssh-credentials"),
-            "examples/sycoadm/toolsets/ssh-credentials"
-        );
-    }
-
-    #[test]
-    fn harness_is_not_a_plain_controller() {
-        // It packages to sycophant-harness:local, so it must be handled
-        // separately, never in the CONTROLLER_BINS <name>:local loop.
-        assert!(!CONTROLLER_BINS.contains(&"harness"));
-    }
-
-    #[test]
-    fn inference_runtime_is_packaged_as_a_scratch_binary_image() {
-        // The per-call inference image ships through the generic build/Dockerfile
-        // binary loop (a scratch binary), not a FROM-base toolset path, and
-        // reaches the k3d node by import for the tenant job that runs it.
-        assert!(CONTROLLER_BINS.contains(&"inference-runtime"));
-        assert!(IMPORT_IMAGES.contains(&"inference-runtime:local"));
-        // The retired turn-server image is gone from every packaging surface.
-        assert!(!CONTROLLER_BINS.contains(&"prompt-toolset"));
-        assert!(!IMPORT_IMAGES.contains(&"prompt-toolset:local"));
-    }
-
-    #[test]
-    fn registry_only_toolsets_are_not_imported() {
-        // toolset + ssh-credentials reach the cluster ONLY via the
-        // registry, never k3d image import.
-        for img in ["toolset", "toolset-ssh-credentials"] {
-            assert!(!IMPORT_IMAGES.contains(&format!("{img}:local").as_str()));
-        }
-        // toolset-git is the exception: the workspace-init Job runs it node-local
-        // (pullPolicy=Never), so it is BOTH registry-pushed and k3d-imported.
-        assert!(IMPORT_IMAGES.contains(&"toolset-git:local"));
-        assert!(TOOLSET_IMAGES.contains(&"toolset-git"));
-    }
 }

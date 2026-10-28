@@ -1,0 +1,31 @@
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: protect-extra
+policies:
+  - ../protect-security-idp-delete/policy.yaml
+resources:
+  - res.yaml
+userinfo: ../capability-job-gate-as-harness/user-harness-research.yaml
+variables: ../capability-job-gate-as-harness/values.yaml
+results:
+  - policy: cluster-protect-security
+    kind: NetworkPolicy
+    result: fail
+    resources: [tenant-offline/attacker-netpol]
+  - policy: cluster-protect-security
+    kind: CiliumNetworkPolicy
+    result: fail
+    resources: [tenant-offline/attacker-cnp]
+  - policy: cluster-protect-security
+    kind: Role
+    result: fail
+    resources: [tenant-offline/attacker-role]
+  - policy: cluster-protect-security
+    kind: ServiceAccount
+    result: fail
+    resources: [tenant-offline/attacker-ws-sa]
+  - policy: cluster-protect-security
+    kind: ConfigMap
+    result: fail
+    resources: [tenant-offline/ws-shadow-capability-grants, tenant-offline/identity-shadow]

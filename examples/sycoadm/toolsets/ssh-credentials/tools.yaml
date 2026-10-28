@@ -1,2 +1,0 @@
-tool.test-cmd.description: "Run the toolset self-test and return its output. Used by integration tests to verify the toolset execution and result-handling pipeline."
-tool.test-cred.description: "Read the credential at the default grant path and return its bytes. Used by integration tests to verify pathless grant delivery."

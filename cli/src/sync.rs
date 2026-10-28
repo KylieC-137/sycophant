@@ -18,6 +18,7 @@ pub(crate) fn extract_assets(scope: &Scope) -> Result<(), String> {
         ("sycophant-gvisor", &assets::GVISOR_CHART),
         ("sycophant-dex", &assets::DEX_CHART),
         ("kyverno-crds", &assets::KYVERNO_CRDS_CHART),
+        ("sycophant-objectstore", &assets::OBJECTSTORE_CHART),
     ] {
         extract(&scope.chart_dir(name), embedded)?;
     }

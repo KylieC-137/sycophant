@@ -53,11 +53,49 @@ Sycophant uses Chainsaw integration tests against a live cluster to validate sec
 
 Sycophant ships as Helm charts. There are two ways in.
 
-**CLI — local, secure by default.** The `sycoadm` CLI stands up a local [k3d](https://k3d.io) cluster with the full capability stack ([see Requirements](#requirements)) already wired in:
+**CLI — local, secure by default.** The `sycoadm` CLI stands up a local [k3d](https://k3d.io) cluster with the full capability stack ([see Requirements](#requirements)) already wired in, then installs the hello-world pieces in [`examples/sycoadm/`](examples/sycoadm/). You need Docker, k3d, Go, a Rust toolchain with the `aarch64-unknown-linux-musl` target, jq, helm, kubectl, Tailscale, and the GGUF model at `~/.cache/sycophant/weights/Qwen3.5-2B-Q4_K_M.gguf`.
 
 ```sh
+make sycoadm syco
+export PATH="$PWD/target:$PATH"
+
+# Create the cluster. Prompts for an operator email and password; idempotent.
+# Every `up` below prompts for that password and waits for its installer.
 sycoadm setup
+
+sycoadm tenant up -f examples/sycoadm/tenants/hello-world.yaml
+sycoadm inference up -f examples/sycoadm/inference/qwen3-5-2b.yaml
+sycoadm toolset up -f examples/sycoadm/toolsets/hello-world/values.yaml
+
+# The demo secret the workspace grants as hello-world/demo-key. Keep it on one
+# line: the scrubber redacts single-line values.
+printf '%s' 'hello-world-demo-secret-DO-NOT-USE' \
+  | sycoadm tenant secret set demo-ssh-key --ns tenant-hello-world
+
+sycoadm workspace up -f examples/sycoadm/workspaces/hello-world.yaml
+
+sycoadm instructions up -f examples/sycoadm/instructions/hello-world.yaml
+
+sycoadm channel up -f examples/sycoadm/channels/tailnet.yaml
+
+# Join the tailnet. Needs sudo; once per machine.
+sycoadm connect --tenant hello-world
+
+syco login --email e2e-operator@sycophant.local
+sycoadm user up -f examples/sycoadm/users/alice.yaml \
+  --set "user.subject=https://127.0.0.1:30443/dex#$(syco whoami | awk '/^Subject:/ {print $2}')"
+
+# Ask the agent to use ShowKernel and to WebFetch https://example.com (it fails:
+# the toolset has no egress). With --grant hello-world/demo-key, ask it to use
+# GetSecret on demo-ssh-key; the reply shows [REDACTED:demo-ssh-key].
+syco chat
+
+# Tear down one piece, or everything.
+sycoadm workspace down hello-world --tenant hello-world
+sycoadm destroy
 ```
+
+`sycoadm upgrade` never touches channels. A cluster that ran the old `app` channel replaces it after the upgrade with `sycoadm channel down app --tenant <tenant>` and the `channel up` above. The new channel joins the tailnet as a new node; nothing is migrated, and clients reconnect.
 
 **DevOps — your own cluster.** Install the charts with Helm. The `sycophant-quickstart` chart bundles the gVisor RuntimeClass and Kyverno CRDs, so one command gives you a working cluster:
 
@@ -80,13 +118,13 @@ helm install sycophant charts/sycophant-cluster \
 Three components, each with a single, well-defined job. The harness is the broker: the agent asks it for a tool or model by name. For a tool or a remote model, it spins up a throwaway job holding only the credentials and egress that call needs. A local model runs on a warm in-cluster service the harness dials directly, with no credential. Neither secrets nor egress reach the agent.
 
 <p align="center">
-  <img src="docs/architecture.svg" alt="Authenticated people and channel adapters (person or adapter tokens) reach a per-workspace harness through the relay-controller gateway. The harness runs the agent loop, owns the conversation log, and reads its capability catalog and instructions from read-only volumes. It reaches three capabilities on separate paths: a warm local-inference Service it dials directly with no credential, and a remote-inference Job and a tool Job, each an ephemeral gVisor sandbox the harness creates with only its own Secret and its own network egress. Only tool Jobs mount the workspace volume. Credentials exist only inside those Jobs, never with the agent." width="840" />
+  <img src="docs/architecture.svg" alt="Authenticated people and channels (person or channel tokens) reach a per-workspace harness through the relay-controller gateway. The harness runs the agent loop, owns the conversation log, and reads its capability catalog and instructions from read-only volumes. It reaches three capabilities on separate paths: a warm local-inference Service it dials directly with no credential, and a remote-inference Job and a tool Job, each an ephemeral gVisor sandbox the harness creates with only its own Secret and its own network egress. Only tool Jobs mount the workspace volume. Credentials exist only inside those Jobs, never with the agent." width="840" />
 </p>
 
 | Component | Role |
 | --- | --- |
 | **Harness** | The agent runtime and broker, one per workspace. Runs the agent loop, owns the conversation history, and reads its own instructions — the workspace's AGENTS.md, sub-agents, and skills — in-process from a read-only volume. Creates each tool call and remote model call as a gated, throwaway job with only the credentials and egress that call needs, and dials a warm local model directly. |
-| **Relay** | The client gateway. Authenticated people and channel adapters (person or adapter tokens) dial in through it to reach their agent, and it relays messages to and from the harness. |
+| **Relay** | The client gateway. Authenticated people and channels (person or channel tokens) dial in through it to reach their agent, and it relays messages to and from the harness. |
 | **Toolset** | The tool runtime. Runs one tool call inside a throwaway gVisor sandbox the harness creates and tears down. |
 
 Built as a Rust monorepo on gRPC (tonic/prost), Kubernetes CRDs (kube-rs), and Helm charts. The `sycoadm` CLI drives it. Images target Linux arm64 and amd64.
@@ -103,9 +141,26 @@ Sycophant runs on any conformant Kubernetes cluster. It relies on three cluster 
 
 ## Local development
 
-`make` with no arguments lists every target. The local target is a k3d cluster.
+`make` with no arguments lists every target. The local target is a k3d cluster. `scripts/e2e.sh` runs the quickstart above mechanically and asserts the security clauses.
 
-Charts live under [`charts/`](charts/) (`sycophant-quickstart` is the install bundle). Per-component design docs live under [`docs/`](docs/): [toolset](docs/toolset.md), [harness](docs/harness.md), [relay](docs/relay.md), and [secrets](docs/secrets.md).
+- **macOS stalls on fresh binaries.** XProtect scans each new binary on first run, and a large test binary can sit at 0% CPU for 10+ minutes while `syspolicyd` works. Wait it out; killing it restarts the scan. Adding your terminal under System Settings → Privacy & Security → Developer Tools skips the scans.
+- **Docker VM disk, not RAM, is the limit.** A near-full VM trips kubelet eviction and a Kyverno eviction storm that looks like a memory problem. Keep about 15 GB free; `sycoadm setup` refuses under 8 GB.
+- **A rebuilt image doesn't replace the running one.** k3d's containerd caches by `name:tag`. Remove the old one before re-importing:
+
+  ```sh
+  docker exec k3d-sycophant-server-0 ctr -n k8s.io image rm docker.io/library/<image>:local
+  k3d image import <image>:local --cluster sycophant
+  kubectl rollout restart deployment/<deployment> -n tenant-hello-world
+  ```
+
+- **Stale or broken conversation history.** A harness crash mid-tool-call can leave a log the model rejects (`tool_use without tool_result`). Delete the conversation volume and restart:
+
+  ```sh
+  kubectl delete pvc ws-hello-world-conversation -n tenant-hello-world
+  kubectl rollout restart deployment ws-hello-world -n tenant-hello-world
+  ```
+
+Charts live under [`charts/`](charts/) (`sycophant-quickstart` is the install bundle). The [examples](examples/sycoadm/) show how to write each piece.
 
 ## Security
 

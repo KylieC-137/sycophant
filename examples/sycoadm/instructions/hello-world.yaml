@@ -1,0 +1,6 @@
+# The folder resolves against this file's directory.
+# `sycoadm instructions up` replaces the workspace's instructions with exactly its files.
+instructions:
+  name: hello-world
+  tenant: hello-world
+  folder: hello-world

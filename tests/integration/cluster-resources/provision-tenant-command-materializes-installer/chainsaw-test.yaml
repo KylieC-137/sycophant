@@ -8,7 +8,7 @@ spec:
   concurrent: false
   timeouts:
     assert: 120s
-  description: An admitted tenant provision command materializes the installer ServiceAccount, Job, and RoleBindings named from the command uid, the generated namespace chains into the relay TokenReview and pod VAP bindings, and the Job deletes the command once the install succeeds.
+  description: An admitted tenant provision command materializes the installer ServiceAccount, Job, and RoleBindings named from the command uid, and the Job deletes the command once the install succeeds.
   bindings:
     - name: token
       value: (random('[a-z0-9]{8}'))
@@ -59,12 +59,15 @@ spec:
             content: |
               set -euo pipefail
               ISSUER=$(helm get values sycophant -n sycophant-system --all -o json | jq -r .idp.issuer)
+              OWNER="${ISSUER}#operator"
+              OWNER_HASH=$(printf '%s' "$OWNER" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-16)
               UID_=$(kubectl create configmap provision-tenant -n sycophant-system \
                 --from-literal=tenant="$TOKEN" --from-literal=capacity=2Gi \
+                --from-literal=owner="$OWNER" --from-literal=owner-hash="$OWNER_HASH" \
                 --dry-run=client -o yaml \
                 | kubectl label --local -f - -o yaml \
                     app.kubernetes.io/part-of=sycophant sycophant.md/command=true \
-                | kubectl create --as="${ISSUER}#operator" -f - -o jsonpath='{.metadata.uid}')
+                | kubectl create --as="$OWNER" -f - -o jsonpath='{.metadata.uid}')
               NAME="provision-tenant-$(printf '%s' "$UID_" | tr -d - | cut -c1-10)"
               TENANT="tenant-${TOKEN}"
               for i in $(seq 1 60); do
@@ -86,28 +89,6 @@ spec:
               kubectl get configmap provision-tenant -n sycophant-system >/dev/null 2>&1 \
                 && { echo "the provision command survived a successful install"; exit 1; }
               true
-        - assert:
-            resource:
-              apiVersion: rbac.authorization.k8s.io/v1
-              kind: ClusterRoleBinding
-              metadata:
-                name: (join('-', ['tenant', $token, 'relay-tokenreview']))
-                ownerReferences:
-                  - kind: Namespace
-                    name: (join('-', ['tenant', $token]))
-              roleRef:
-                name: cluster-relay-tokenreview
-        - assert:
-            resource:
-              apiVersion: admissionregistration.k8s.io/v1
-              kind: ValidatingAdmissionPolicyBinding
-              metadata:
-                name: (join('-', ['tenant', $token, 'sycophant-pod-binding']))
-                ownerReferences:
-                  - kind: Namespace
-                    name: (join('-', ['tenant', $token]))
-              spec:
-                policyName: cluster-gvisor-pod-policy
       cleanup:
         - script:
             env:

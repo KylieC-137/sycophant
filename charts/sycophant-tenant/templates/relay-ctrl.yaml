@@ -48,7 +48,7 @@ spec:
               cpu: 50m
               memory: 64Mi
             limits:
-              memory: 256Mi
+              memory: 64Mi
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -65,6 +65,8 @@ spec:
               value: "{{ .Values.idp.audience }}"
             - name: IDP_CERTIFICATE_AUTHORITY
               value: {{ .Values.idp.certificateAuthority | quote }}
+            - name: HEARTBEAT_INTERVAL_SECS
+              value: "{{ .Values.relay.heartbeatIntervalSecs }}"
           ports:
             # Internal listener (9090): K8s ServiceAccount tokens via
             # TokenReview. Reachable from in-cluster pods only via the
@@ -73,15 +75,15 @@ spec:
               containerPort: 9090
             # App listener (9091): person tokens, authenticated by
             # TokenReview and authorized per request by
-            # SubjectAccessReview. Admitted only from the app adapter
+            # SubjectAccessReview. Admitted only from the tailnet channel
             # pod by relay-ingress.
             - name: grpc-app
               containerPort: 9091
-            # Adapter listener (9092): adapter ServiceAccount tokens only,
+            # Channel listener (9092): channel ServiceAccount tokens only,
             # authenticated by an audience-pinned TokenReview and authorized
-            # by SubjectAccessReview. Admitted only from adapter-class:
+            # by SubjectAccessReview. Admitted only from channel-class:
             # principal pods by relay-ingress.
-            - name: grpc-adapter
+            - name: grpc-channel
               containerPort: 9092
           # Startup blocks on the identity watcher's initial sync. A
           # generous startupProbe avoids liveness flapping during that
@@ -132,15 +134,15 @@ spec:
     - name: grpc
       port: 9090
       targetPort: grpc-internal
-    # App port. Reachable only from the app adapter pod, per relay-ingress.
+    # App port. Reachable only from the tailnet channel pod, per relay-ingress.
     - name: grpc-app
       port: 9091
       targetPort: grpc-app
-    # Adapter port. Reachable only from adapter-class: principal pods,
+    # Channel port. Reachable only from channel-class: principal pods,
     # per relay-ingress.
-    - name: grpc-adapter
+    - name: grpc-channel
       port: 9092
-      targetPort: grpc-adapter
+      targetPort: grpc-channel
   selector:
     app.kubernetes.io/name: relay-controller
     app.kubernetes.io/part-of: sycophant

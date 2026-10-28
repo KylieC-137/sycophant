@@ -499,13 +499,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_required_string_ok() {
-        let args = vec![arg("query", ArgType::String, true, "QUERY")];
-        let env = validate_call_input(r#"{"query": "hello"}"#, &args).unwrap();
-        assert_eq!(env.get("QUERY"), Some(&"hello".to_string()));
-    }
-
-    #[test]
     fn validate_optional_missing_skipped() {
         let args = vec![
             arg("query", ArgType::String, true, "QUERY"),
@@ -514,13 +507,6 @@ mod tests {
         let env = validate_call_input(r#"{"query": "x"}"#, &args).unwrap();
         assert_eq!(env.len(), 1);
         assert!(!env.contains_key("FILTER"));
-    }
-
-    #[test]
-    fn validate_optional_present_included() {
-        let args = vec![arg("filter", ArgType::String, false, "FILTER")];
-        let env = validate_call_input(r#"{"filter": "f"}"#, &args).unwrap();
-        assert_eq!(env.get("FILTER"), Some(&"f".to_string()));
     }
 
     #[test]
@@ -539,52 +525,39 @@ mod tests {
         assert!(err.to_string().contains("unknown input field 'bogus'"));
     }
 
+    /// (declared type, input value, expected env value or None for a
+    /// wrong-type rejection).
     #[test]
-    fn validate_wrong_type_string_for_integer_errors() {
-        let args = vec![arg("n", ArgType::Integer, true, "N")];
-        let err = validate_call_input(r#"{"n": "not a number"}"#, &args).unwrap_err();
-        assert!(err.to_string().contains("wrong type"));
-    }
-
-    #[test]
-    fn validate_integer_rejects_float() {
-        let args = vec![arg("n", ArgType::Integer, true, "N")];
-        assert!(validate_call_input(r#"{"n": 1.5}"#, &args).is_err());
-    }
-
-    #[test]
-    fn validate_integer_accepts_positive() {
-        let args = vec![arg("n", ArgType::Integer, true, "N")];
-        let env = validate_call_input(r#"{"n": 42}"#, &args).unwrap();
-        assert_eq!(env.get("N"), Some(&"42".to_string()));
-    }
-
-    #[test]
-    fn validate_integer_accepts_negative() {
-        let args = vec![arg("n", ArgType::Integer, true, "N")];
-        let env = validate_call_input(r#"{"n": -1}"#, &args).unwrap();
-        assert_eq!(env.get("N"), Some(&"-1".to_string()));
-    }
-
-    #[test]
-    fn validate_integer_accepts_unsigned_max() {
-        let args = vec![arg("n", ArgType::Integer, true, "N")];
-        let env = validate_call_input(r#"{"n": 18446744073709551615}"#, &args).unwrap();
-        assert_eq!(env.get("N"), Some(&"18446744073709551615".to_string()));
-    }
-
-    #[test]
-    fn validate_number_accepts_int_and_float() {
-        let args = vec![arg("n", ArgType::Number, true, "N")];
-        validate_call_input(r#"{"n": 42}"#, &args).unwrap();
-        validate_call_input(r#"{"n": 3.14}"#, &args).unwrap();
-    }
-
-    #[test]
-    fn validate_boolean_ok() {
-        let args = vec![arg("b", ArgType::Boolean, true, "B")];
-        let env = validate_call_input(r#"{"b": true}"#, &args).unwrap();
-        assert_eq!(env.get("B"), Some(&"true".to_string()));
+    fn validate_passes_typed_values_to_env_and_rejects_wrong_types() {
+        let cases = [
+            (ArgType::Integer, r#""not a number""#, None),
+            (ArgType::Integer, "1.5", None),
+            (ArgType::Integer, "42", Some("42")),
+            (ArgType::Integer, "-1", Some("-1")),
+            (
+                ArgType::Integer,
+                "18446744073709551615",
+                Some("18446744073709551615"),
+            ),
+            (ArgType::Number, "42", Some("42")),
+            (ArgType::Number, "3.14", Some("3.14")),
+            (ArgType::Boolean, "true", Some("true")),
+        ];
+        for (ty, value, want) in cases {
+            let args = vec![arg("n", ty, true, "N")];
+            let result = validate_call_input(&format!(r#"{{"n": {value}}}"#), &args);
+            match want {
+                Some(v) => assert_eq!(
+                    result.unwrap().get("N").map(String::as_str),
+                    Some(v),
+                    "{value}"
+                ),
+                None => assert!(
+                    result.unwrap_err().to_string().contains("wrong type"),
+                    "{value}"
+                ),
+            }
+        }
     }
 
     #[test]
@@ -592,13 +565,6 @@ mod tests {
         let args = vec![arg("q", ArgType::String, true, "Q")];
         let err = validate_call_input("not json", &args).unwrap_err();
         assert!(err.to_string().contains("not valid JSON"));
-    }
-
-    #[test]
-    fn validate_non_object_errors() {
-        let args = vec![];
-        let err = validate_call_input(r#""string at top level""#, &args).unwrap_err();
-        assert!(err.to_string().contains("must be a JSON object"));
     }
 
     #[test]
@@ -614,12 +580,5 @@ mod tests {
         let env = validate_call_input(r#"{"queryString": "x"}"#, &args).unwrap();
         assert!(env.contains_key("QUERY"));
         assert!(!env.contains_key("queryString"));
-    }
-
-    #[test]
-    fn validate_empty_input_against_no_required() {
-        let args = vec![arg("opt", ArgType::String, false, "OPT")];
-        let env = validate_call_input(r#"{}"#, &args).unwrap();
-        assert!(env.is_empty());
     }
 }

@@ -1,11 +1,13 @@
-pub(crate) mod audit;
 pub(crate) mod build;
 pub(crate) mod command;
 pub(crate) mod common;
+pub(crate) mod connect;
 pub(crate) mod destroy;
 pub(crate) mod doctor;
 pub(crate) mod down;
+pub(crate) mod instructions;
 pub(crate) mod operator;
+pub(crate) mod registry;
 pub(crate) mod remove;
 pub(crate) mod secret;
 pub(crate) mod setup;

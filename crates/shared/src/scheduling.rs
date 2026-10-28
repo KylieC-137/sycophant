@@ -37,64 +37,9 @@ impl SchedulingConfig {
     }
 }
 
-/// Test fixtures for `SchedulingConfig`-shaped assertions in workspace
-/// crates. Gated by `#[cfg(any(test, feature = "test-fixtures"))]`: the
-/// crate's own tests see this directly, downstream test code activates the
-/// `test-fixtures` feature in its dev-dependency on `shared`.
-#[cfg(any(test, feature = "test-fixtures"))]
-pub mod testing {
-    use super::SchedulingConfig;
-    use k8s_openapi::api::core::v1::{PodSpec, Toleration};
-    use std::collections::BTreeMap;
-
-    pub fn no_scheduling() -> SchedulingConfig {
-        SchedulingConfig::default()
-    }
-
-    pub fn test_scheduling(workload: &str) -> SchedulingConfig {
-        SchedulingConfig {
-            node_selector: BTreeMap::from([("sycophant.md/workload".into(), workload.into())]),
-            tolerations: vec![Toleration {
-                key: Some("sycophant.md/workload".into()),
-                operator: Some("Equal".into()),
-                value: Some(workload.into()),
-                effect: Some("NoSchedule".into()),
-                ..Default::default()
-            }],
-        }
-    }
-
-    pub fn assert_scheduling(pod_spec: &PodSpec, workload: &str) {
-        let ns = pod_spec
-            .node_selector
-            .as_ref()
-            .expect("node_selector must be set");
-        assert_eq!(ns.get("sycophant.md/workload"), Some(&workload.to_string()));
-        assert_eq!(ns.len(), 1);
-
-        let tols = pod_spec
-            .tolerations
-            .as_ref()
-            .expect("tolerations must be set");
-        assert_eq!(tols.len(), 1);
-        assert_eq!(tols[0].key.as_deref(), Some("sycophant.md/workload"));
-        assert_eq!(tols[0].value.as_deref(), Some(workload));
-        assert_eq!(tols[0].operator.as_deref(), Some("Equal"));
-        assert_eq!(tols[0].effect.as_deref(), Some("NoSchedule"));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn default_is_empty() {
-        let config = SchedulingConfig::default();
-        assert!(config.is_empty());
-        assert!(config.node_selector.is_empty());
-        assert!(config.tolerations.is_empty());
-    }
 
     #[test]
     fn load_from_yaml() {
@@ -130,12 +75,6 @@ tolerations:
     }
 
     #[test]
-    fn load_missing_file_returns_error() {
-        let result = SchedulingConfig::load("/nonexistent/path.yaml");
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn load_empty_yaml_gives_defaults() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), "{}").unwrap();
@@ -157,20 +96,26 @@ tolerations:
     }
 
     #[test]
-    fn is_empty_false_with_node_selector() {
-        let config = SchedulingConfig {
-            node_selector: BTreeMap::from([("k".into(), "v".into())]),
-            tolerations: vec![],
-        };
-        assert!(!config.is_empty());
-    }
-
-    #[test]
-    fn is_empty_false_with_tolerations() {
-        let config = SchedulingConfig {
-            node_selector: BTreeMap::new(),
-            tolerations: vec![Toleration::default()],
-        };
-        assert!(!config.is_empty());
+    fn is_empty_true_only_for_default() {
+        let cases = [
+            (SchedulingConfig::default(), true),
+            (
+                SchedulingConfig {
+                    node_selector: BTreeMap::from([("k".into(), "v".into())]),
+                    tolerations: vec![],
+                },
+                false,
+            ),
+            (
+                SchedulingConfig {
+                    node_selector: BTreeMap::new(),
+                    tolerations: vec![Toleration::default()],
+                },
+                false,
+            ),
+        ];
+        for (config, want) in cases {
+            assert_eq!(config.is_empty(), want, "{config:?}");
+        }
     }
 }

@@ -83,8 +83,8 @@ spec:
     # NOTE: The workspace ValidatingAdmissionPolicy cannot be guarded at
     # the admission layer — neither Kyverno nor an in-tree VAP will
     # enforce rules whose target is in the admissionregistration.k8s.io
-    # API group. Protection is RBAC-absence + chainsaw regression test
-    # (tests/integration/tenant-resource-protection/workspace-admission-rule-immutable).
+    # API group. Protection is RBAC-absence, pinned by the provision-write
+    # check in tests/unit/provision-installer.
     - expression: >-
         !(variables.group == "rbac.authorization.k8s.io"
           && variables.kind in ["Role", "RoleBinding"])

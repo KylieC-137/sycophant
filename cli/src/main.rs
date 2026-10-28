@@ -24,11 +24,14 @@ fn main() {
         Command::Destroy(_) => commands::destroy::run(),
         Command::Upgrade(cmd) => commands::upgrade::run(cmd),
         Command::Tenant(cmd) => commands::tenant::run(cmd),
+        Command::Connect(cmd) => commands::connect::run(cmd),
         Command::Toolset(cmd) => component("toolset", cmd),
         Command::Workspace(cmd) => component("workspace", cmd),
-        Command::User(cli::UserCmd {
-            sub: cli::UserSub::Up(c),
-        }) => commands::command::up("user", &c.values),
+        Command::Instructions(cmd) => component("instructions", cmd),
+        Command::User(cli::UserCmd { sub }) => match sub {
+            cli::UserSub::Up(c) => commands::command::up("user", &c.values),
+            cli::UserSub::Down(c) => commands::command::user_down(&c.subject, &c.tenant),
+        },
         Command::Inference(cmd) => component("inference", cmd),
         Command::Channel(cmd) => component("channel", cmd),
     };

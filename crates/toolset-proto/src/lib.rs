@@ -4,7 +4,6 @@ pub mod toolset {
     }
 }
 
-pub use harness_proto::{harness_control_client, harness_control_server};
 pub use proto_common::*;
 pub use toolset::v1::*;
 

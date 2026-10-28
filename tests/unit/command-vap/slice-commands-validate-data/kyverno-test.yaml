@@ -12,21 +12,9 @@ results:
   - policy: command-provision-workspace
     isValidatingAdmissionPolicy: true
     kind: ConfigMap
-    result: pass
-    resources:
-      - tenant-acme/provision-workspace-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  - policy: command-provision-workspace
-    isValidatingAdmissionPolicy: true
-    kind: ConfigMap
     result: fail
     resources:
       - tenant-acme/provision-workspace-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  - policy: command-provision-toolset
-    isValidatingAdmissionPolicy: true
-    kind: ConfigMap
-    result: pass
-    resources:
-      - tenant-acme/provision-toolset-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   - policy: command-provision-toolset
     isValidatingAdmissionPolicy: true
     kind: ConfigMap
@@ -51,18 +39,6 @@ results:
     result: fail
     resources:
       - tenant-acme/provision-user-2f1e2d3c4b
-  - policy: command-provision-user
-    isValidatingAdmissionPolicy: true
-    kind: ConfigMap
-    result: fail
-    resources:
-      - tenant-acme/provision-user-3f1e2d3c4b
-  - policy: command-provision-inference
-    isValidatingAdmissionPolicy: true
-    kind: ConfigMap
-    result: pass
-    resources:
-      - tenant-acme/provision-inference-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   - policy: command-provision-inference
     isValidatingAdmissionPolicy: true
     kind: ConfigMap
@@ -72,21 +48,9 @@ results:
   - policy: command-provision-channel
     isValidatingAdmissionPolicy: true
     kind: ConfigMap
-    result: pass
-    resources:
-      - tenant-acme/provision-channel-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  - policy: command-provision-channel
-    isValidatingAdmissionPolicy: true
-    kind: ConfigMap
     result: fail
     resources:
       - tenant-acme/provision-channel-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  - policy: command-provision-channel
-    isValidatingAdmissionPolicy: true
-    kind: ConfigMap
-    result: fail
-    resources:
-      - tenant-acme/provision-channel-yes
   - policy: command-provision-channel
     isValidatingAdmissionPolicy: true
     kind: ConfigMap
@@ -99,27 +63,18 @@ results:
     result: fail
     resources:
       - tenant-acme/provision-channel-nologin
-  - policy: command-provision-channel
+  - policy: command-reap-user
+    isValidatingAdmissionPolicy: true
+    kind: ConfigMap
+    result: pass
+    resources:
+      - tenant-acme/reap-user-306b623ce6
+  - policy: command-reap-user
     isValidatingAdmissionPolicy: true
     kind: ConfigMap
     result: fail
     resources:
-      - tenant-acme/provision-channel-emptylogin
-  - policy: command-provision-channel
-    isValidatingAdmissionPolicy: true
-    kind: ConfigMap
-    result: fail
-    resources:
-      - tenant-acme/provision-channel-magicdns
-  - policy: command-provision-channel
-    isValidatingAdmissionPolicy: true
-    kind: ConfigMap
-    result: fail
-    resources:
-      - tenant-acme/provision-channel-noserverurl
-  - policy: command-provision-channel
-    isValidatingAdmissionPolicy: true
-    kind: ConfigMap
-    result: fail
-    resources:
-      - tenant-acme/provision-channel-noacmeemail
+      - tenant-acme/reap-user-306b623ce
+      - tenant-acme/reap-user-306b623ce63
+      - tenant-acme/reap-user-306B623CE6
+      - tenant-acme/reap-user-306b623cgz

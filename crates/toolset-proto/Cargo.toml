@@ -6,7 +6,6 @@ edition.workspace = true
 [dependencies]
 prost.workspace = true
 proto-common.workspace = true
-harness-proto.workspace = true
 tonic.workspace = true
 
 [build-dependencies]

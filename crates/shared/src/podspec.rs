@@ -60,44 +60,22 @@ mod tests {
             .expect("sa-token projection")
     }
 
-    /// Kills podspec.rs:33 (mount.name field). A defaulted empty mount name
-    /// references no Volume, so the projected token never lands at the
-    /// mount path.
+    /// The projected token must carry exactly the requested single audience
+    /// and the fixed 3600s expiration. The mount must reference the Volume by
+    /// name, sit at the kubelet default path clients read from, and be
+    /// read-only.
     #[test]
-    fn mount_name_matches_volume_name() {
+    fn sa_token_volume_projects_audience_and_expiry_read_only_at_kubelet_path() {
         let (volume, mount) = sa_token_volume("relay-sa-token", "relay.internal");
+        let projection = token_projection(&volume);
+        assert_eq!(projection.audience.as_deref(), Some("relay.internal"));
+        assert_eq!(projection.expiration_seconds, Some(3600));
         assert_eq!(mount.name, "relay-sa-token");
         assert_eq!(mount.name, volume.name);
-    }
-
-    /// Kills podspec.rs:34 (mount.mount_path field). A defaulted empty path
-    /// would mount the token somewhere other than the kubelet default
-    /// location clients read from.
-    #[test]
-    fn mount_path_is_the_kubelet_default() {
-        let (_volume, mount) = sa_token_volume("relay-sa-token", "relay.internal");
         assert_eq!(
             mount.mount_path,
             "/var/run/secrets/kubernetes.io/serviceaccount"
         );
-    }
-
-    /// Kills podspec.rs:35 (mount.read_only field). Defaulting it to None
-    /// drops the read-only guarantee on the token mount.
-    #[test]
-    fn mount_is_read_only() {
-        let (_volume, mount) = sa_token_volume("relay-sa-token", "relay.internal");
         assert_eq!(mount.read_only, Some(true));
-    }
-
-    /// Strengthens the fixture: the projected token must carry exactly the
-    /// requested single audience and the fixed 3600s expiration, so a drift
-    /// on either value in the projection is caught.
-    #[test]
-    fn projected_token_carries_audience_and_fixed_expiration() {
-        let (volume, _mount) = sa_token_volume("relay-sa-token", "relay.internal");
-        let projection = token_projection(&volume);
-        assert_eq!(projection.audience.as_deref(), Some("relay.internal"));
-        assert_eq!(projection.expiration_seconds, Some(3600));
     }
 }

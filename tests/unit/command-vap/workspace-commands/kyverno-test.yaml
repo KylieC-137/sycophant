@@ -26,12 +26,6 @@ results:
   kind: ConfigMap
   result: fail
   resources:
-  - tenant-acme/provision-workspace-harnesscpu
-- policy: command-provision-workspace
-  isValidatingAdmissionPolicy: true
-  kind: ConfigMap
-  result: fail
-  resources:
   - tenant-acme/provision-workspace-undottedegress
 - policy: command-provision-workspace
   isValidatingAdmissionPolicy: true

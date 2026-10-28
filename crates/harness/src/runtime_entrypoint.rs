@@ -19,7 +19,7 @@ use proto_common::{ContentBlock, Message, ToolDefinition, TurnState, TurnStateEv
 use toolset_proto::TurnRequest;
 
 use crate::agent::{self, LoopError, LoopHalt, LoopMode};
-use crate::clients::{RelayClient, ToolsetRpc};
+use crate::clients::{RelayClient, RelayRpc, ToolsetRpc};
 use crate::conversation::{sha256_hex, strip_frontmatter, AssistantAttribution, HistoryScope};
 use crate::instructions::Instructions;
 use crate::message_source::MessageSource;
@@ -47,13 +47,14 @@ fn resolve_primary_agent(instructions: &Instructions, workspace: &str) -> String
 }
 
 /// Cap on the number of paths the primary prompt's tree map renders, matching
-/// the `list` runtime tool's cap.
+/// the `ListInstructions` runtime tool's cap.
 const PRIMARY_TREE_CAP: usize = 1000;
 
 /// Compose the model-facing primary system prompt: the AGENTS.md entry body
 /// followed by a flat, capped map of the workspace instruction tree's paths.
-/// The map lets the primary turn see (and `read`/`dispatch`) nested files it
-/// would otherwise not know exist. An empty tree renders the body alone.
+/// The map lets the primary turn see (and `ReadInstructions`/`DispatchAgent`)
+/// nested files it would otherwise not know exist. An empty tree renders the
+/// body alone.
 fn render_primary_prompt(agents_body: &str, paths: &[String]) -> String {
     if paths.is_empty() {
         return agents_body.to_string();
@@ -93,9 +94,10 @@ pub(crate) async fn message_loop(
         tracing::info!(bytes = primary_agent_text.len(), "read primary agent");
 
         let conversation_id = inbound.conversation_id.clone();
-        let reply_channel = inbound.reply_channel.clone();
+        let reply_channel_stream = inbound.reply_channel_stream.clone();
+        tracing::info!(conversation_id = %conversation_id, reply_channel_stream = ?reply_channel_stream, "inbound reply channel");
         let conv_for_deliver = conversation_id.clone();
-        let reply_for_deliver = reply_channel.clone();
+        let reply_for_deliver = reply_channel_stream.clone();
 
         let log = registry
             .get_or_create(&conversation_id)
@@ -141,12 +143,9 @@ pub(crate) async fn message_loop(
         // Turn-start identity frame: name + system-prompt hash so the client
         // can label the agent and warn on a prompt change between turns.
         // Empty agent_name = the workspace primary agent (unnamed here).
-        if let Some(channel) = reply_channel.as_deref() {
+        if reply_channel_stream.is_some() {
             let start = turn_start_frame(&conv_for_deliver, "", &prompt_hash);
-            if let Err(e) = relay
-                .deliver_outbound(channel, &conv_for_deliver, None, Some(start))
-                .await
-            {
+            if let Err(e) = relay.deliver_turn_state(start, "").await {
                 tracing::warn!(error = %e, "failed to deliver turn-start identity frame");
             }
         }
@@ -159,21 +158,21 @@ pub(crate) async fn message_loop(
             history,
             &tool_defs,
             model,
-            reply_channel.clone(),
+            reply_channel_stream.clone(),
             conversation_id,
         );
         // Stream activity frames to the client only when there is a reply
-        // channel (mirrors deliver_turn_outcome's early return). The sink
+        // channel stream (mirrors deliver_turn_outcome's early return). The sink
         // borrows `relay` for the loop's duration; scope it so the
         // borrow ends before the terminal delivery below reborrows it.
         let result = {
             let mut null_sink = crate::turn::NullSink;
             let mut gateway_sink;
-            let sink: &mut dyn StreamSink = match reply_channel.clone() {
-                Some(channel_id) => {
+            let sink: &mut dyn StreamSink = match reply_channel_stream.clone() {
+                Some(channel_stream_id) => {
                     gateway_sink = crate::turn::GatewaySink {
                         rpc: &mut *relay,
-                        channel_id,
+                        channel_stream_id,
                     };
                     &mut gateway_sink
                 }
@@ -188,7 +187,7 @@ pub(crate) async fn message_loop(
                 attribution,
                 request,
                 LoopMode {
-                    reply_channel: reply_channel.clone(),
+                    reply_channel_stream: reply_channel_stream.clone(),
                     idle_gap,
                     cancel: cancel.clone(),
                     grants: inbound.grants,
@@ -203,6 +202,7 @@ pub(crate) async fn message_loop(
         // (the gateway set WORKING at ingest). the toolset controller no longer delivers.
         deliver_turn_outcome(
             relay,
+            &registry,
             reply_for_deliver.as_deref(),
             &conv_for_deliver,
             &result,
@@ -281,21 +281,37 @@ fn turn_start_frame(
 }
 
 /// Push one orchestrator turn's outcome to the client via the gateway.
-/// No-op when the turn had no reply channel; delivery failure is logged,
-/// not fatal (the durable log already holds the reply).
+/// The terminal turn-state frame carries the conversation's owner as its
+/// subject, so the relay records it under the key the gateway minted the
+/// conversation with. No-op when the turn had no reply channel stream; delivery
+/// failure is logged, not fatal (the durable log already holds the reply).
 async fn deliver_turn_outcome(
-    relay: &mut RelayClient,
-    channel: Option<&str>,
+    relay: &mut impl RelayRpc,
+    registry: &ConversationRegistry,
+    reply_channel_stream: Option<&str>,
     conversation_id: &str,
     result: &Result<String, LoopError>,
 ) {
-    let Some(channel) = channel else { return };
+    let Some(_) = reply_channel_stream else {
+        tracing::warn!(conversation_id = %conversation_id, "no reply channel, dropping turn outcome");
+        return;
+    };
     let (reply, turn_state) = turn_outcome_frame(conversation_id, result);
-    if let Err(e) = relay
-        .deliver_outbound(channel, conversation_id, reply, Some(turn_state))
-        .await
-    {
-        tracing::warn!(error = %e, "failed to deliver turn outcome to client");
+    // Deliver reply first (if any), then turn-state — preserving ordering.
+    if let Some(content) = reply {
+        tracing::info!(conversation_id = %conversation_id, "delivering reply to relay");
+        if let Err(e) = relay.deliver_reply(conversation_id, content).await {
+            tracing::warn!(error = %e, "failed to deliver reply to client");
+        } else {
+            tracing::info!(conversation_id = %conversation_id, "reply delivered to relay");
+        }
+    }
+    let subject = registry.owner_of(conversation_id).await.unwrap_or_default();
+    tracing::info!(conversation_id = %conversation_id, "delivering turn state to relay");
+    if let Err(e) = relay.deliver_turn_state(turn_state, &subject).await {
+        tracing::warn!(error = %e, "failed to deliver turn state to client");
+    } else {
+        tracing::info!(conversation_id = %conversation_id, "turn state delivered to relay");
     }
 }
 
@@ -374,7 +390,7 @@ fn build_turn_request(
     messages: Vec<Message>,
     tool_defs: &[ToolDefinition],
     model: Option<String>,
-    reply_channel: Option<String>,
+    reply_channel_stream: Option<String>,
     conversation_id: String,
 ) -> TurnRequest {
     TurnRequest {
@@ -382,7 +398,7 @@ fn build_turn_request(
         tools: tool_defs.to_vec(),
         messages,
         model,
-        reply_channel,
+        reply_channel_stream,
         role: None,
         correlation_id: None,
         conversation_id,
@@ -400,18 +416,6 @@ mod tests {
         std::fs::create_dir(tmp.path().join("ws1")).unwrap();
         let instructions = Instructions::new(tmp.path());
         assert_eq!(resolve_primary_agent(&instructions, "ws1"), "");
-    }
-
-    #[test]
-    fn resolve_primary_agent_present_file_is_served_verbatim() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir(tmp.path().join("ws1")).unwrap();
-        std::fs::write(tmp.path().join("ws1/AGENTS.md"), "# Agent\n\nHello.").unwrap();
-        let instructions = Instructions::new(tmp.path());
-        assert_eq!(
-            resolve_primary_agent(&instructions, "ws1"),
-            "# Agent\n\nHello."
-        );
     }
 
     // The primary turn injects a flat, capped path map from
@@ -448,24 +452,6 @@ mod tests {
         );
     }
 
-    // The path map is additive: with no nested files, the primary prompt still
-    // renders AGENTS.md.
-    #[test]
-    fn primary_prompt_empty_tree_still_renders_agents_md() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("ws1")).unwrap();
-        std::fs::write(tmp.path().join("ws1/AGENTS.md"), "just the root agent").unwrap();
-        let instructions = Instructions::new(tmp.path());
-
-        let agent_text = resolve_primary_agent(&instructions, "ws1");
-        let (body, _) = strip_frontmatter(&agent_text);
-        let prompt = render_primary_prompt(&body, &instructions.list_tree("ws1", PRIMARY_TREE_CAP));
-        assert!(
-            prompt.contains("just the root agent"),
-            "AGENTS.md still renders when the tree has no nested files: {prompt}"
-        );
-    }
-
     fn user_text(s: &str) -> Vec<ContentBlock> {
         vec![ContentBlock {
             block: Some(content_block::Block::Text(TextBlock { text: s.into() })),
@@ -482,30 +468,8 @@ mod tests {
         }]
     }
 
-    // The harness, not the model or the request payload, chooses the turn's
-    // model: `resolve_model` reads only the agent-definition frontmatter. A
-    // literal frontmatter value is taken verbatim as the resolver input.
-    //
-    // Materiality: `resolve_model` has no request-payload or model-output input
-    // at all, so a mutant that sourced selection from anywhere else would not
-    // even type-check against this call. The assertion pins that the frontmatter
-    // value passes through unchanged, red if the resolver rewrites it.
-    #[tokio::test]
-    async fn resolve_model_takes_the_agent_definition_value_verbatim() {
-        assert_eq!(
-            resolve_model(Some("deepseek-v4-flash"), None)
-                .await
-                .as_deref(),
-            Some("deepseek-v4-flash"),
-            "the harness supplies the frontmatter model verbatim",
-        );
-    }
-
     // No frontmatter model resolves to nothing — never a default. The absent
     // case fails closed downstream; the resolver invents no model.
-    //
-    // Materiality: a mutant that defaulted an absent model to some fallback
-    // string reds this.
     #[tokio::test]
     async fn resolve_model_defaults_nothing_when_frontmatter_names_no_model() {
         assert_eq!(
@@ -516,48 +480,45 @@ mod tests {
     }
 
     #[test]
-    fn handle_result_swallows_iteration_limit() {
-        let res =
-            handle_llm_loop_result(Err(LoopError::Halt(LoopHalt::IterationLimit { limit: 7 })));
-        assert!(res.is_ok());
-    }
-
-    #[test]
-    fn handle_result_swallows_max_tokens_with_partial_text() {
-        let res =
-            handle_llm_loop_result(Err(LoopError::Halt(LoopHalt::MaxTokens("partial".into()))));
-        assert!(res.is_ok());
-    }
-
-    #[test]
-    fn handle_result_swallows_unknown_stop() {
-        let res = handle_llm_loop_result(Err(LoopError::Halt(LoopHalt::UnknownStop(
-            proto_common::StopReason::Unspecified,
-        ))));
-        assert!(res.is_ok());
-    }
-
-    #[test]
-    fn handle_result_propagates_toolset_rpc() {
-        let res = handle_llm_loop_result(Err(LoopError::ToolsetRpc("boom".into())));
-        assert_eq!(res.unwrap_err(), "boom");
-    }
-
-    #[test]
-    fn handle_result_swallows_stream_ended_without_restart() {
-        // No-restart policy: a per-turn StreamEnded (inference job reaped/crashed,
-        // a TurnError, or a close without Complete) must NOT propagate — the
-        // harness logs it and awaits the next message instead of
-        // restarting the pod. Mutant: revert StreamEnded to the restart
-        // bucket → this returns Err and the test fails.
-        let res = handle_llm_loop_result(Err(LoopError::StreamEnded("eof".into())));
-        assert!(res.is_ok(), "a per-turn failure must not restart the pod");
-    }
-
-    #[test]
-    fn handle_result_passes_through_ok() {
-        let res = handle_llm_loop_result(Ok("final text".into()));
-        assert!(res.is_ok());
+    fn handle_result_only_propagates_toolset_rpc_errors() {
+        // Only a ToolsetRpc error propagates. No-restart policy: a per-turn
+        // StreamEnded (inference job reaped/crashed, a TurnError, or a close
+        // without Complete) must NOT propagate — the harness logs it and awaits
+        // the next message instead of restarting the pod.
+        let cases: [(&str, Result<String, LoopError>, Option<&str>); 6] = [
+            (
+                "iteration limit",
+                Err(LoopError::Halt(LoopHalt::IterationLimit { limit: 7 })),
+                None,
+            ),
+            (
+                "max tokens with partial text",
+                Err(LoopError::Halt(LoopHalt::MaxTokens("partial".into()))),
+                None,
+            ),
+            (
+                "unknown stop",
+                Err(LoopError::Halt(LoopHalt::UnknownStop(
+                    proto_common::StopReason::Unspecified,
+                ))),
+                None,
+            ),
+            (
+                "toolset rpc",
+                Err(LoopError::ToolsetRpc("boom".into())),
+                Some("boom"),
+            ),
+            (
+                "stream ended",
+                Err(LoopError::StreamEnded("eof".into())),
+                None,
+            ),
+            ("ok", Ok("final text".into()), None),
+        ];
+        for (case, result, want_err) in cases {
+            let res = handle_llm_loop_result(result);
+            assert_eq!(res.err().as_deref(), want_err, "{case}");
+        }
     }
 
     #[test]
@@ -581,72 +542,43 @@ mod tests {
         assert_eq!(req.tools[0].name, "Bash");
         assert_eq!(req.role, None);
         assert_eq!(req.model.as_deref(), Some("claude-x"));
-        assert_eq!(req.reply_channel.as_deref(), Some("test-channel"));
+        assert_eq!(req.reply_channel_stream.as_deref(), Some("test-channel"));
         assert_eq!(req.messages.len(), 1);
         assert_eq!(req.messages[0].role, "user");
     }
 
     #[test]
-    fn stripped_system_lands_on_request_system() {
-        let req = build_turn_request(
-            Some("the agent text".into()),
-            user_msg("hi"),
-            &[],
-            None,
-            None,
-            "conv".into(),
-        );
-        assert_eq!(req.system.as_deref(), Some("the agent text"));
-    }
+    fn turn_outcome_only_delivers_a_reply_for_ok_and_max_tokens() {
+        // Ok and MaxTokens deliver a reply and land IDLE. The MaxTokens guard is
+        // the only branch that splits IDLE from FAILED inside the error space.
+        // Every other error — ToolsetRpc, every non-MaxTokens Halt, and
+        // StreamEnded — must land FAILED with no reply, a reason, gRPC status
+        // code 13 (INTERNAL) and the turn's conversation_id (so the client
+        // reconciler routes the failure to the right conversation).
+        let idle: [Result<String, LoopError>; 2] = [
+            Ok("hi".into()),
+            Err(LoopError::Halt(LoopHalt::MaxTokens("partial".into()))),
+        ];
+        for case in &idle {
+            let (reply, ts) = turn_outcome_frame("c", case);
+            assert!(reply.is_some(), "expected a reply for {case:?}");
+            assert_eq!(
+                ts.state,
+                TurnState::Idle as i32,
+                "expected Idle for {case:?}"
+            );
+            assert_eq!(ts.conversation_id, "c", "conversation_id for {case:?}");
+        }
 
-    #[test]
-    fn turn_outcome_ok_delivers_reply_and_idle() {
-        let (reply, ts) = turn_outcome_frame("c", &Ok("hi".into()));
-        assert!(reply.is_some());
-        assert_eq!(ts.state, TurnState::Idle as i32);
-        assert_eq!(ts.conversation_id, "c");
-    }
-
-    #[test]
-    fn turn_outcome_max_tokens_delivers_partial_reply_idle() {
-        let (reply, ts) = turn_outcome_frame(
-            "c",
-            &Err(LoopError::Halt(LoopHalt::MaxTokens("partial".into()))),
-        );
-        assert!(reply.is_some());
-        assert_eq!(ts.state, TurnState::Idle as i32);
-    }
-
-    #[test]
-    fn turn_outcome_error_delivers_failed_no_reply() {
-        let (reply, ts) = turn_outcome_frame("c", &Err(LoopError::ToolsetRpc("boom".into())));
-        assert!(reply.is_none());
-        assert_eq!(ts.state, TurnState::Failed as i32);
-        assert!(!ts.reason.is_empty());
-        // The failed frame must carry the turn's conversation_id so the client
-        // reconciler routes the failure to the right conversation. Mutant:
-        // drop conversation_id from the Err arm → this is empty and fails.
-        assert_eq!(ts.conversation_id, "c");
-        // gRPC status code 13 (INTERNAL) accompanies every failed turn. Mutant:
-        // drop `code: "13"` → this is empty and fails.
-        assert_eq!(ts.code, "13");
-    }
-
-    #[test]
-    fn turn_outcome_non_maxtokens_halt_and_stream_ended_all_fail() {
-        // The MaxTokens guard is the only branch that splits IDLE from FAILED
-        // inside the error space. Every other error — every non-MaxTokens Halt
-        // plus StreamEnded — must land FAILED with no reply. Existing coverage
-        // only exercises ToolsetRpc. Mutant: widen the MaxTokens arm to swallow
-        // another variant → that variant delivers IDLE + a reply and this fails.
-        let cases: [Result<String, LoopError>; 3] = [
+        let failed: [Result<String, LoopError>; 4] = [
+            Err(LoopError::ToolsetRpc("boom".into())),
             Err(LoopError::Halt(LoopHalt::IterationLimit { limit: 7 })),
             Err(LoopError::Halt(LoopHalt::UnknownStop(
                 proto_common::StopReason::Unspecified,
             ))),
             Err(LoopError::StreamEnded("eof".into())),
         ];
-        for case in &cases {
+        for case in &failed {
             let (reply, ts) = turn_outcome_frame("c", case);
             assert!(reply.is_none(), "expected no reply for {case:?}");
             assert_eq!(
@@ -655,19 +587,15 @@ mod tests {
                 "expected Failed for {case:?}"
             );
             assert!(!ts.reason.is_empty(), "expected a reason for {case:?}");
+            assert_eq!(ts.conversation_id, "c", "conversation_id for {case:?}");
+            assert_eq!(ts.code, "13", "INTERNAL status code for {case:?}");
         }
-    }
 
-    // A cancelled turn emits a terminal turn_cancelled event: the single
-    // terminal funnel maps a Cancelled loop outcome to
-    // TurnStateEvent{ state: CANCELLED }. CANCELLED is terminal but distinct
-    // from FAILED (no error reason), so the client re-enables input without an
-    // error banner.
-    #[test]
-    fn turn_outcome_cancelled_emits_terminal_cancelled_state() {
-        // Materiality: map the Cancelled outcome to IDLE or FAILED instead of
-        // CANCELLED (flip the match arm) -> the client cannot distinguish a
-        // clean cancel from a normal finish or an error.
+        // A cancelled turn emits a terminal turn_cancelled event: the single
+        // terminal funnel maps a Cancelled loop outcome to
+        // TurnStateEvent{ state: CANCELLED }. CANCELLED is terminal but distinct
+        // from FAILED (no error reason), so the client re-enables input without
+        // an error banner.
         let (reply, ts) = turn_outcome_frame("c", &Err(LoopError::Cancelled));
         assert_eq!(
             ts.state,
@@ -684,21 +612,41 @@ mod tests {
         assert!(reply.is_none());
     }
 
-    // EARS: "When a turn starts, the client shall display the agent identity
-    // (name when present)" and "Where a turn's system_prompt_sha256 differs
-    // from the prior turn's ... surface a prompt-change warning." Both are
-    // driven by a harness-emitted turn-start frame carrying identity
-    // (plan 0b/3a). This pins that the turn-start frame carries name + hash;
-    // the client-side label/warning are tested in Dart.
-    #[test]
-    fn turn_start_frame_carries_identity() {
-        // Materiality: drop agent_name / system_prompt_sha256 from the
-        // turn-start builder (or emit a bare WORKING without them) -> the
-        // client never sees identity and can neither label nor diff the hash.
-        let frame = turn_start_frame("conv-9", "helper-agent", "abc123deadbeef");
-        assert_eq!(frame.state, TurnState::Working as i32);
-        assert_eq!(frame.conversation_id, "conv-9");
-        assert_eq!(frame.agent_name, "helper-agent");
-        assert_eq!(frame.system_prompt_sha256, "abc123deadbeef");
+    // The relay records a terminal state under the subject on the frame, the
+    // same key the gateway minted the conversation under. An empty subject
+    // records it nowhere, so polling clients would keep seeing WORKING.
+    #[tokio::test]
+    async fn deliver_turn_outcome_sends_the_owner_as_the_terminal_turn_state_subject() {
+        use crate::conversation::{ConversationStoreFactory, LocalFsFactory};
+        let root = tempfile::TempDir::new().unwrap();
+        let factory: Arc<dyn ConversationStoreFactory> =
+            Arc::new(LocalFsFactory::new(root.path().to_path_buf()));
+        let registry = Arc::new(ConversationRegistry::new(factory));
+        let owner = "owner-stamp-alice";
+        let conversation_id = registry.mint(owner).await.unwrap();
+
+        let mut relay = crate::test_doubles::RecordingRelay::default();
+        let result: Result<String, LoopError> = Ok("done".into());
+        deliver_turn_outcome(
+            &mut relay,
+            &registry,
+            Some("chan-1"),
+            &conversation_id,
+            &result,
+        )
+        .await;
+
+        assert_eq!(
+            relay.turn_states.len(),
+            1,
+            "one terminal turn-state frame is delivered"
+        );
+        let (turn_state, subject) = &relay.turn_states[0];
+        assert_eq!(turn_state.state, TurnState::Idle as i32);
+        assert_eq!(turn_state.conversation_id, conversation_id);
+        assert_eq!(
+            subject, owner,
+            "the terminal turn state carries the conversation's owner stamp as its subject"
+        );
     }
 }

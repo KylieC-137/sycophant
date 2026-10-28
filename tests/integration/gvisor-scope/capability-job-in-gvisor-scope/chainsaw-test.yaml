@@ -14,14 +14,14 @@ spec:
       2. a capability-job volume-kind allowlist rule in that VAP restricting
          volumes to the six-kind safe set, and
       3. the component selector of the `cluster-runtime-class` mutate, which must
-         be exactly [adapter, capability-job].
+         be exactly [channel, capability-job].
 
     Pure chart-render property. Both the VAP and the runtime-class mutate render
     with the Kyverno CRD api-version present.
 
     Mutation guard: dropping `capability-job` from the VAP gVisor branch, omitting
     the capability-job volume allowlist rule, or adding any component beyond
-    `adapter` and `capability-job` to the runtime-class selector each fail an
+    `channel` and `capability-job` to the runtime-class selector each fail an
     assertion below.
   steps:
     - name: render-and-assert-pod-layer
@@ -82,7 +82,7 @@ spec:
               sels = list(component_values(rcs[0]))
               assert sels, "no component matchExpression found in cluster-runtime-class"
               sel = sels[0]
-              assert set(sel) == {"adapter", "capability-job"}, \
-                  f"runtime-class selector must be exactly [adapter, capability-job], got: {sel}"
+              assert set(sel) == {"channel", "capability-job"}, \
+                  f"runtime-class selector must be exactly [channel, capability-job], got: {sel}"
               print("OK")
               PY

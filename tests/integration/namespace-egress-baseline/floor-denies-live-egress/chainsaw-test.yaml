@@ -15,8 +15,8 @@ spec:
         Cilium v1.19.3 an empty `egress: []` list is rejected (Valid=False) and
         the policy is inert. This is a fast pre-check that a rejected floor is
         caught before the pod probe.
-      - A probe pod carrying the workspace-init component label (the label the
-        floor is meant to cover) attempts egress to an external IP with a short
+      - A probe pod carrying the egress-floor-probe component label (a value no
+        allow policy selects) attempts egress to an external IP with a short
         timeout. The floor must deny it: the attempt fails, so the pod exits 0
         and reaches phase Succeeded. If the floor is inert or disarmed the pod
         reaches the host, exits non-zero, and lands in phase Failed, failing
@@ -83,8 +83,8 @@ spec:
                 value: ($tenant_ns)
             content: |
               set -euo pipefail
-              # A pod selected by no allow policy, carrying the workspace-init
-              # component label the floor must cover. Its command inverts the
+              # A pod selected by no allow policy, carrying the egress-floor-probe
+              # component label, a value no allow policy selects. Its command inverts the
               # sense of the probe: a DENIED egress makes wget fail, so the pod
               # exits 0 (Succeeded); a REACHED host exits 1 (Failed).
               kubectl apply -n "$TENANT_NS" -f - <<'POD'
@@ -93,7 +93,7 @@ spec:
               metadata:
                 name: egress-probe
                 labels:
-                  app.kubernetes.io/component: workspace-init
+                  app.kubernetes.io/component: egress-floor-probe
               spec:
                 restartPolicy: Never
                 securityContext:
@@ -127,10 +127,10 @@ spec:
 
               log=$(kubectl logs egress-probe -n "$TENANT_NS" 2>/dev/null || true)
               if [ "$phase" != "Succeeded" ]; then
-                echo "egress from an uncovered workspace-init pod was NOT denied by the floor (pod phase=[$phase], probe said: [$log]); the default-deny-egress floor is inert, disarmed, or absent"
+                echo "egress from an uncovered egress-floor-probe pod was NOT denied by the floor (pod phase=[$phase], probe said: [$log]); the default-deny-egress floor is inert, disarmed, or absent"
                 exit 1
               fi
-              echo "the floor denied egress from the uncovered workspace-init pod (probe: $log)"
+              echo "the floor denied egress from the uncovered egress-floor-probe pod (probe: $log)"
       finally:
         - script:
             env:

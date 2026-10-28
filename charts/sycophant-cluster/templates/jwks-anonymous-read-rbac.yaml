@@ -1,0 +1,29 @@
+# The object store verifies workspace pod tokens against the apiserver's
+# service-account key set without credentials of its own. The auth config lets
+# unauthenticated callers reach /openid/v1/jwks only; this grants them read on
+# that one path. The built-in system:service-account-issuer-discovery role is
+# not reused because it also covers the discovery document.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-jwks-anonymous-read
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+rules:
+  - nonResourceURLs: ["/openid/v1/jwks"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-jwks-anonymous-read
+  labels:
+    {{- include "sycophant.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-jwks-anonymous-read
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: system:unauthenticated

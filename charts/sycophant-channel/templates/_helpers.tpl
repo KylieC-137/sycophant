@@ -55,23 +55,3 @@ to the egress-entry depth (4).
         - port: "53"
           protocol: TCP
 {{- end -}}
-
-{{- /*
-The headscale settings as YAML, from the command's flat `headscale.*` keys with
-their defaults filled in. Command data is strings, so the booleans are read as
-"true" or "false". The headscale pod checksums this output to roll on a change.
-*/ -}}
-{{- define "sycophant.headscale" -}}
-{{- $m := .Values.command -}}
-{{- toYaml (dict
-  "enabled" (eq (index $m "headscale.enabled" | default "false") "true")
-  "image" (index $m "headscale.image" | default "headscale/headscale")
-  "tag" (index $m "headscale.tag" | default "0.28.0")
-  "pullPolicy" (index $m "headscale.pullPolicy" | default "IfNotPresent")
-  "serverUrl" (index $m "headscale.serverUrl" | default "")
-  "magicDns" (ne (index $m "headscale.magicDns" | default "true") "false")
-  "baseDomain" (index $m "headscale.baseDomain" | default "ts.local")
-  "acme" (dict
-    "enabled" (eq (index $m "headscale.acme.enabled" | default "false") "true")
-    "email" (index $m "headscale.acme.email" | default ""))) -}}
-{{- end -}}

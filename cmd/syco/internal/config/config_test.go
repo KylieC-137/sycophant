@@ -10,7 +10,7 @@ import (
 	"github.com/sycophant-md/sycophant/cmd/syco/internal/config"
 )
 
-// AC 3: Missing server exits non-zero with an error.
+// Missing server exits non-zero with an error.
 // The config resolver must return an error when no server is set in the active
 // profile and SYCO_SERVER is unset.
 func TestResolveConfig_MissingServer_ReturnsError(t *testing.T) {
@@ -33,7 +33,7 @@ workspace = "hello-world"
 	}
 }
 
-// AC 7: `syco session` prints active profile name and resolved values.
+// `syco session` prints active profile name and resolved values.
 // The config resolver must return the active profile name and its server/workspace.
 func TestResolveConfig_ReturnsProfileNameAndValues(t *testing.T) {
 	dir := t.TempDir()
@@ -61,7 +61,7 @@ workspace = "my-workspace"
 	}
 }
 
-// AC 8: `syco session workspace <ws>` writes workspace to active profile.
+// `syco session workspace <ws>` writes workspace to active profile.
 func TestSetWorkspace_WritesConfig(t *testing.T) {
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, "config.toml")
@@ -86,7 +86,7 @@ server = "relay.dev:9090"
 	}
 }
 
-// AC 9: `syco profile list` prints all named profiles.
+// `syco profile list` prints all named profiles.
 func TestListProfiles_ReturnsAllNames(t *testing.T) {
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, "config.toml")
@@ -118,7 +118,7 @@ server = "c:3"
 	}
 }
 
-// AC 10: `syco profile use <name>` sets [default].profile.
+// `syco profile use <name>` sets [default].profile.
 func TestUseProfile_SetsDefault(t *testing.T) {
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, "config.toml")
@@ -146,7 +146,7 @@ server = "b:2"
 	}
 }
 
-// AC 6: Expired token → "session expired, run syco login", exit non-zero.
+// Expired token → "session expired, run syco login", exit non-zero.
 func TestLoadToken_Expired_ReturnsError(t *testing.T) {
 	dir := t.TempDir()
 	// Create a credentials.toml with an expired JWT.
@@ -169,7 +169,7 @@ token = "`+expiredToken+`"
 	}
 }
 
-// AC 4: `syco logout` deletes token from active profile in credentials.toml.
+// `syco logout` deletes token from active profile in credentials.toml.
 func TestDeleteToken_RemovesEntry(t *testing.T) {
 	dir := t.TempDir()
 	credFile := filepath.Join(dir, "credentials.toml")
@@ -191,7 +191,7 @@ token = "`+validToken+`"
 	}
 }
 
-// AC 12: --continue looks up last conversation for current workspace from history.
+// --continue looks up last conversation for current workspace from history.
 func TestHistoryLastForWorkspace(t *testing.T) {
 	dir := t.TempDir()
 	histFile := filepath.Join(dir, "history")
@@ -209,38 +209,29 @@ func TestHistoryLastForWorkspace(t *testing.T) {
 	if entry.ConversationID != "eeee-ffff" {
 		t.Errorf("expected conversation 'eeee-ffff', got %q", entry.ConversationID)
 	}
-}
 
-// AC 12 (no prior conversation): --continue with no history exits non-zero.
-func TestHistoryLastForWorkspace_Empty_ReturnsError(t *testing.T) {
-	dir := t.TempDir()
-	histFile := filepath.Join(dir, "history")
+	// --continue with no prior conversation in history exits non-zero.
 	os.WriteFile(histFile, []byte(""), 0644)
-
-	_, err := config.HistoryLastForWorkspace(dir, "workspace-a")
-	if err == nil {
+	if _, err := config.HistoryLastForWorkspace(dir, "workspace-a"); err == nil {
 		t.Fatal("expected error for empty history, got nil")
 	}
 }
 
-// AC 14: --grant toolset/grant parses into (toolset, grant) pair.
+// --grant toolset/grant parses into (toolset, grant) pair.
 func TestParseGrant(t *testing.T) {
-	toolset, grant, err := config.ParseGrant("ssh-credentials/demo-key")
+	toolset, grant, err := config.ParseGrant("hello-world/demo-key")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if toolset != "ssh-credentials" {
-		t.Errorf("expected toolset 'ssh-credentials', got %q", toolset)
+	if toolset != "hello-world" {
+		t.Errorf("expected toolset 'hello-world', got %q", toolset)
 	}
 	if grant != "demo-key" {
 		t.Errorf("expected grant 'demo-key', got %q", grant)
 	}
-}
 
-// AC 14: invalid grant format (no slash) returns error.
-func TestParseGrant_Invalid(t *testing.T) {
-	_, _, err := config.ParseGrant("invalid-no-slash")
-	if err == nil {
+	// Invalid grant format (no slash) returns error.
+	if _, _, err := config.ParseGrant("invalid-no-slash"); err == nil {
 		t.Fatal("expected error for invalid grant format, got nil")
 	}
 }

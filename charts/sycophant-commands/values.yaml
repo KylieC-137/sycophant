@@ -18,9 +18,9 @@
 #                           # cpu, singleNodeException, chatTemplate
 
 # toolset:
-#   name: git
+#   name: hello-world
 #   tenant: acme
-#   image: ghcr.io/sycophant-md/git@sha256:...
+#   image: ghcr.io/sycophant-md/toolset-hello-world@sha256:...
 #   keepalive: false
 #   deadlineSeconds: 300
 #   env: {}                 # NAME: value
@@ -34,6 +34,13 @@
 #   storage: 5Gi
 #   grants: {}              # <toolset>: {<grant>: {secret, path, egress}}
 
+# instructions:
+#   name: hello-world       # the workspace
+#   tenant: acme
+#   folder: hello-world     # read by sycoadm only, never rendered:
+#                           # the instructions folder, relative to this file
+#   archive: ""             # set by sycoadm only, from the folder: a base64 gzip tar
+
 # user:
 #   tenant: acme
 #   subject: "https://dex.example.com/dex#alice"
@@ -41,22 +48,14 @@
 #   handles: {}              # <channel>: that platform's user ID, e.g. slack: U0123ABCDEF
 
 # channel:
-#   name: app
+#   name: tailnet
 #   tenant: acme
-#   kind: app               # only app today
 #   loginServer: http://headscale:8080
 #   image: tailscale/tailscale
 #   tag: stable
 #   pullPolicy: IfNotPresent
 #   hostname: relay
 #   authKeySecret: relay-tsnet-authkey
-#   storageClass: ""        # the headscale data PVC
-#   headscale:
-#     enabled: true
-#     serverUrl: http://localhost:8080
-#     image: headscale/headscale
-#     tag: "0.28.0"
-#     pullPolicy: IfNotPresent
-#     magicDns: true
-#     baseDomain: ts.local
-#     acme: {}              # enabled, email
+#   storageClass: ""
+#   NOTE: headscale itself is now in the tenant chart (headscale.* values in
+#   the tenant values file), not the channel chart.

@@ -1,60 +1,61 @@
-# Store IAM/OIDC trust for -s3.iam.config. Rendered from operator oidc values,
-# the same posture as the apiserver-trust half. With an oidc issuer it also
-# carries the STS signingKey — the HMAC secret SeaweedFS uses to forge STS
-# session tokens — so this rides a Secret, not a ConfigMap. The key is
-# lookup-preserved across renders (like the admin key in secret.yaml) so a helm
-# upgrade never rotates it out and invalidates outstanding sessions. The store
-# fetches the issuer's discovery document and JWKS at runtime to verify a
-# presented token, then mints a short-lived credential through native STS
-# AssumeRoleWithWebIdentity.
+# Store IAM/OIDC trust for -s3.iam.config. It carries only the cluster
+# trust: provider `cluster` accepts workspace pod tokens from the cluster
+# apiserver with audience sycophant-objectstore, and the
+# workspace-instructions-read role turns one into a 1-hour read-only credential
+# scoped to <bucket>/<token sub>/. The provider maps no default role, so a
+# cluster token reaches only a role whose trust names the cluster issuer. Its
+# key set is fetched from the apiserver over the mounted cluster root CA.
 #
-# With no oidc issuer the document is empty ({}): no provider, no role, no trust,
-# no signing key. The Secret always exists so the Deployment can mount
-# -s3.iam.config unconditionally; only its contents are gated.
-{{- $iam := "{}" }}
-{{- if and .Values.oidc .Values.oidc.issuer }}
-{{-   $signingKey := randBytes 32 }}
-{{-   $existing := (lookup "v1" "Secret" .Release.Namespace "seaweedfs-iam") }}
-{{-   if $existing }}
-{{-     $existingIam := index $existing.data "iam.json" | b64dec | fromJson }}
-{{-     if and $existingIam.sts $existingIam.sts.signingKey }}
-{{-       $signingKey = $existingIam.sts.signingKey }}
-{{-     end }}
+# The document carries the STS signingKey, the HMAC secret SeaweedFS uses to
+# sign STS session tokens, so it rides a Secret, not a ConfigMap. The key is
+# lookup-preserved across renders (like the admin key in secret.yaml) so a helm
+# upgrade never rotates it out and invalidates outstanding sessions.
+{{- $signingKey := randBytes 32 }}
+{{- $existing := (lookup "v1" "Secret" .Release.Namespace "seaweedfs-iam") }}
+{{- if $existing }}
+{{-   $existingIam := index $existing.data "iam.json" | b64dec | fromJson }}
+{{-   if and $existingIam.sts $existingIam.sts.signingKey }}
+{{-     $signingKey = $existingIam.sts.signingKey }}
 {{-   end }}
-{{-   $oidc := .Values.oidc }}
-{{-   $roleArn := "arn:aws:iam::role/instructions-writer" }}
-{{-   $providerConfig := dict
-        "issuer" $oidc.issuer
-        "jwksCacheTTLSeconds" (default 3600 $oidc.jwksCacheTTLSeconds)
-        "roleMapping" (dict "defaultRole" $roleArn) }}
-{{-   if $oidc.clientIds }}{{- $_ := set $providerConfig "clientIds" $oidc.clientIds }}{{- end }}
-{{-   if $oidc.clientId }}{{- $_ := set $providerConfig "clientId" $oidc.clientId }}{{- end }}
-{{-   if $oidc.jwksUri }}{{- $_ := set $providerConfig "jwksUri" $oidc.jwksUri }}{{- end }}
-{{-   $provider := dict "name" "operator-oidc" "type" "oidc" "enabled" true "config" $providerConfig }}
-{{-   $policy := dict "name" "instructions-write" "document" (dict
+{{- end }}
+{{- $clusterIssuer := "https://kubernetes.default.svc.cluster.local" }}
+{{- $readArn := "arn:aws:iam::role/workspace-instructions-read" }}
+{{- $clusterProvider := dict "name" "cluster" "type" "oidc" "enabled" true "config" (dict
+      "issuer" $clusterIssuer
+      "clientIds" (list "sycophant-objectstore")
+      "jwksUri" (printf "%s/openid/v1/jwks" $clusterIssuer)
+      "tlsCaCert" "/etc/seaweedfs/cluster-ca/ca.crt"
+      "roleMapping" dict) }}
+{{- $sub := "${jwt:sub}" }}
+{{- $readPolicy := dict "name" "instructions-read" "document" (dict
+      "Version" "2012-10-17"
+      "Statement" (list
+        (dict
+          "Effect" "Allow"
+          "Action" (list "s3:GetObject")
+          "Resource" (list (printf "arn:aws:s3:::sycophant-instructions/%s/*" $sub)))
+        (dict
+          "Effect" "Allow"
+          "Action" (list "s3:ListBucket")
+          "Resource" (list "arn:aws:s3:::sycophant-instructions")
+          "Condition" (dict "StringLike" (dict "s3:prefix" (printf "%s/*" $sub)))))) }}
+{{- $readRole := dict
+      "roleName" "workspace-instructions-read"
+      "roleArn" $readArn
+      "attachedPolicies" (list "instructions-read")
+      "trustPolicy" (dict
         "Version" "2012-10-17"
         "Statement" (list (dict
           "Effect" "Allow"
-          "Action" (list "s3:List*" "s3:Get*" "s3:Put*" "s3:DeleteObject")
-          "Resource" (list "arn:aws:s3:::sycophant-instructions" "arn:aws:s3:::sycophant-instructions/*")))) }}
-{{-   $role := dict
-        "roleName" "instructions-writer"
-        "roleArn" $roleArn
-        "attachedPolicies" (list "instructions-write")
-        "trustPolicy" (dict
-          "Version" "2012-10-17"
-          "Statement" (list (dict
-            "Effect" "Allow"
-            "Principal" (dict "Federated" "*")
-            "Action" (list "sts:AssumeRoleWithWebIdentity")
-            "Condition" (dict "StringEquals" (dict "oidc:iss" $oidc.issuer))))) }}
-{{-   $doc := dict
-        "sts" (dict "tokenDuration" "1h" "maxSessionLength" "12h" "issuer" "seaweedfs-sts" "signingKey" $signingKey)
-        "providers" (list $provider)
-        "policies" (list $policy)
-        "roles" (list $role) }}
-{{-   $iam = toJson $doc }}
-{{- end }}
+          "Principal" (dict "Federated" "*")
+          "Action" (list "sts:AssumeRoleWithWebIdentity")
+          "Condition" (dict "StringEquals" (dict "oidc:iss" $clusterIssuer)))))
+      "maxSessionDuration" 3600 }}
+{{- $iam := toJson (dict
+      "sts" (dict "tokenDuration" "1h" "maxSessionLength" "12h" "issuer" "seaweedfs-sts" "signingKey" $signingKey)
+      "providers" (list $clusterProvider)
+      "policies" (list $readPolicy)
+      "roles" (list $readRole)) }}
 apiVersion: v1
 kind: Secret
 metadata:

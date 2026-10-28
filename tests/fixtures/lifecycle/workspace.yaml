@@ -1,4 +1,4 @@
 workspace:
   name: ${WORKSPACE_NAME}
   tenant: ${WORKSPACE_TENANT}
-  toolsets: [stdlib, workspace-ro]
+  toolsets: [hello-world]

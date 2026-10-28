@@ -87,7 +87,7 @@ spec:
       volumes:
         - name: bindings
           configMap:
-            name: toolset-git
+            name: toolset-hello-world
       containers:
         - name: runtime
           image: registry.k8s.io/pause:3.9
@@ -115,7 +115,7 @@ spec:
             - name: BINDINGS
               valueFrom:
                 configMapKeyRef:
-                  name: toolset-git
+                  name: toolset-hello-world
                   key: bindings.yaml
 ---
 apiVersion: batch/v1
@@ -136,4 +136,4 @@ spec:
           image: registry.k8s.io/pause:3.9
           envFrom:
             - configMapRef:
-                name: toolset-git
+                name: toolset-hello-world

@@ -6,10 +6,9 @@ description: |
   tenant. Install once per cluster, same tier as cilium/kyverno/gvisor.
 
   The admin credential is generated into this namespace and never reaches a
-  tenant. Tenants receive only a read-only, prefix-scoped credential the
-  operator mints out of band. A CiliumNetworkPolicy locks the store in both
-  directions: ingress only from harness pods (any namespace) on the s3 port,
-  egress to cluster DNS plus, when an OIDC issuer is configured, that one
-  issuer and nothing else.
+  tenant. A workspace pod reads its own instructions folder with its own
+  service-account token, exchanged through STS for a short-lived read-only
+  credential; no stored credential exists for it. A CiliumNetworkPolicy locks the
+  store in both directions.
 version: 0.1.0
 appVersion: "0.1.0"

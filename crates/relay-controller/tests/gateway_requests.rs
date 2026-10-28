@@ -14,15 +14,15 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use tokio::sync::mpsc;
 
 use proto_common::{
-    channel_outbound, tool_result_frame, AwaitToolResultRequest, CallToolRequest,
-    CancelToolRequest, CancelTurnRequest, ChannelIngestRequest, ChannelReceiveRequest,
+    channel_stream_outbound, tool_result_frame, AwaitToolResultRequest, CallToolRequest,
+    CancelToolRequest, CancelTurnRequest, ChannelStreamIngestRequest, ChannelStreamReceiveRequest,
     ClientResponse, DeleteConversationRequest, GetConversationHistoryRequest, GetTurnStateRequest,
-    ListGrantsRequest, ListWorkspacesRequest, SetConversationNameRequest, ToolComplete,
-    ToolResultFrame, TurnState, UserMessage,
+    ListGrantsRequest, SetConversationNameRequest, ToolComplete, ToolResultFrame, TurnState,
+    UserMessage,
 };
 use relay_controller::capabilities::{CapabilityGrants, GRANTS_DATA_KEY};
 use relay_controller::gateway::GatewayService;
-use relay_controller::state::{ChannelOpener, GatewayState};
+use relay_controller::state::{ChannelStreamOpener, GatewayState, TurnStateRecord};
 use relay_proto::relay_gateway_server::RelayGateway;
 
 mod common;
@@ -55,13 +55,18 @@ async fn service_on(mock: MockHarness) -> (GatewayService, Arc<GatewayState>) {
     (GatewayService::new(state.clone()), state)
 }
 
-/// Mint a person channel for alice on alpha, as ChannelReceive would.
-async fn alice_channel(state: &GatewayState) -> String {
+/// Mint a person channel stream for alice on alpha, as ChannelStreamReceive would.
+async fn alice_channel_stream(state: &GatewayState) -> String {
     let (tx, rx) = mpsc::channel(4);
-    // Keep the receiver alive so the channel stays deliverable.
+    // Keep the receiver alive so the channel stream stays deliverable.
     std::mem::forget(rx);
     state
-        .mint_channel(ChannelOpener::Person, ALICE.into(), "alpha".into(), tx)
+        .mint_channel_stream(
+            ChannelStreamOpener::Person,
+            ALICE.into(),
+            "alpha".into(),
+            tx,
+        )
         .await
 }
 
@@ -72,9 +77,12 @@ fn turn_state(conversation_id: &str) -> GetTurnStateRequest {
     }
 }
 
-fn client_response(channel_id: &str, response: ClientResponse) -> ChannelIngestRequest {
-    ChannelIngestRequest {
-        channel_id: channel_id.into(),
+fn client_response(
+    channel_stream_id: &str,
+    response: ClientResponse,
+) -> ChannelStreamIngestRequest {
+    ChannelStreamIngestRequest {
+        channel_stream_id: channel_stream_id.into(),
         client_response: Some(response),
         ..Default::default()
     }
@@ -89,16 +97,6 @@ fn result_response(result_json: &str) -> ClientResponse {
 }
 
 // --- GetTurnState -------------------------------------------------------------
-
-#[tokio::test]
-async fn get_turn_state_rejects_empty_conversation_id() {
-    let (svc, _) = service().await;
-    let err = svc
-        .get_turn_state(bearer(ALICE_TOKEN, turn_state("")))
-        .await
-        .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
-}
 
 #[tokio::test]
 async fn get_turn_state_returns_idle_for_unknown_conversation() {
@@ -120,9 +118,18 @@ async fn get_turn_state_returns_idle_for_unknown_conversation() {
 #[tokio::test]
 async fn get_turn_state_reflects_recorded_failed_with_reason() {
     let (svc, state) = service().await;
-    let id = alice_channel(&state).await;
+    // Seed the recorded failure directly: the broadcast variant of this
+    // transition lives only in production wiring, not in this test path.
     state
-        .set_and_broadcast_turn_failed(&id, ALICE, "conv-7", "boom", "13")
+        .record_turn_state(
+            ALICE,
+            "conv-7",
+            TurnStateRecord {
+                state: TurnState::Failed,
+                reason: "boom".into(),
+                code: "13".into(),
+            },
+        )
         .await;
     let resp = svc
         .get_turn_state(bearer(ALICE_TOKEN, turn_state("conv-7")))
@@ -151,7 +158,7 @@ async fn get_turn_state_does_not_leak_across_subjects() {
     )
     .await;
     let svc = GatewayService::new(state.clone());
-    let id = alice_channel(&state).await;
+    let id = alice_channel_stream(&state).await;
     state
         .set_and_broadcast_turn_state(&id, ALICE, "conv", TurnState::Working)
         .await;
@@ -162,6 +169,56 @@ async fn get_turn_state_does_not_leak_across_subjects() {
         .unwrap()
         .into_inner();
     assert_eq!(resp.state, TurnState::Idle as i32);
+}
+
+/// Authenticates every internal caller as the harness of a fixed workspace,
+/// so `DeliverTurnState` reaches its handler without a kube client.
+struct FixedVerifier(&'static str);
+
+#[async_trait::async_trait]
+impl shared::auth::TokenVerifier for FixedVerifier {
+    async fn verify_token(&self, _token: &str) -> Result<String, tonic::Status> {
+        Ok(self.0.to_string())
+    }
+}
+
+/// The harness's terminal turn state, delivered under alice's subject,
+/// replaces the WORKING the gateway recorded at ingest: alice's next poll of
+/// the conversation sees the terminal state, not WORKING.
+#[tokio::test]
+async fn get_turn_state_returns_the_terminal_state_delivered_under_the_callers_subject() {
+    use relay_controller::internal::InternalService;
+    use relay_proto::relay_internal_server::RelayInternal;
+
+    let (svc, state) = service().await;
+    let id = alice_channel_stream(&state).await;
+    // As ChannelStreamIngest does when it accepts a message.
+    state
+        .set_and_broadcast_turn_state(&id, ALICE, "conv-9", TurnState::Working)
+        .await;
+
+    let internal = InternalService::new(state.clone(), Some(Arc::new(FixedVerifier("alpha"))));
+    let mut delivery = tonic::Request::new(relay_proto::DeliverTurnStateRequest {
+        turn_state: Some(proto_common::TurnStateEvent {
+            state: TurnState::Cancelled as i32,
+            conversation_id: "conv-9".into(),
+            ..Default::default()
+        }),
+        subject: ALICE.into(),
+        ..Default::default()
+    });
+    delivery
+        .metadata_mut()
+        .insert("authorization", "Bearer harness-sa".parse().unwrap());
+    internal.deliver_turn_state(delivery).await.unwrap();
+
+    let resp = svc
+        .get_turn_state(bearer(ALICE_TOKEN, turn_state("conv-9")))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.state, TurnState::Cancelled as i32);
+    assert_eq!(resp.conversation_id, "conv-9");
 }
 
 // --- The listener class -------------------------------------------------------
@@ -179,37 +236,26 @@ async fn get_turn_state_rejects_missing_extension() {
     assert!(err.message().contains("listener class"), "{err:?}");
 }
 
+// --- ChannelStreamIngest ------------------------------------------------------------
+
 #[tokio::test]
-async fn list_workspaces_rejects_missing_extension() {
+async fn channel_stream_ingest_rejects_unregistered_channel_stream() {
     let (svc, _) = service().await;
     let err = svc
-        .list_workspaces(bearer_unclassed(ALICE_TOKEN, ListWorkspacesRequest {}))
+        .channel_stream_ingest(bearer(ALICE_TOKEN, ChannelStreamIngestRequest::default()))
         .await
         .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::PermissionDenied);
-    assert!(err.message().contains("listener class"), "{err:?}");
-}
+    assert_eq!(
+        err.code(),
+        tonic::Code::InvalidArgument,
+        "empty channel_stream_id"
+    );
 
-// --- ChannelIngest ------------------------------------------------------------
-
-#[tokio::test]
-async fn channel_ingest_rejects_empty_channel_id() {
-    let (svc, _) = service().await;
     let err = svc
-        .channel_ingest(bearer(ALICE_TOKEN, ChannelIngestRequest::default()))
-        .await
-        .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
-}
-
-#[tokio::test]
-async fn channel_ingest_rejects_unregistered_channel() {
-    let (svc, _) = service().await;
-    let err = svc
-        .channel_ingest(bearer(
+        .channel_stream_ingest(bearer(
             ALICE_TOKEN,
-            ChannelIngestRequest {
-                channel_id: "never-minted".into(),
+            ChannelStreamIngestRequest {
+                channel_stream_id: "never-minted".into(),
                 user_message: Some(UserMessage {
                     sender: "u".into(),
                     ..Default::default()
@@ -223,14 +269,14 @@ async fn channel_ingest_rejects_unregistered_channel() {
 }
 
 #[tokio::test]
-async fn channel_ingest_rejects_both_payloads_set() {
+async fn channel_stream_ingest_rejects_both_payloads_or_an_empty_client_response() {
     let (svc, state) = service().await;
-    let id = alice_channel(&state).await;
+    let id = alice_channel_stream(&state).await;
     let err = svc
-        .channel_ingest(bearer(
+        .channel_stream_ingest(bearer(
             ALICE_TOKEN,
-            ChannelIngestRequest {
-                channel_id: id,
+            ChannelStreamIngestRequest {
+                channel_stream_id: id.clone(),
                 user_message: Some(UserMessage {
                     sender: "u".into(),
                     ..Default::default()
@@ -245,71 +291,49 @@ async fn channel_ingest_rejects_both_payloads_set() {
         ))
         .await
         .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
-}
+    assert_eq!(
+        err.code(),
+        tonic::Code::InvalidArgument,
+        "both payloads set"
+    );
 
-#[tokio::test]
-async fn channel_ingest_client_response_rejects_neither_result_nor_error() {
-    let (svc, state) = service().await;
-    let id = alice_channel(&state).await;
+    // A client_response carrying neither a result nor an error is malformed too.
     let err = svc
-        .channel_ingest(bearer(
+        .channel_stream_ingest(bearer(
             ALICE_TOKEN,
             client_response(&id, result_response("")),
         ))
         .await
         .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
-}
-
-/// A client_response for an unknown request is benign: the handler still
-/// acks, with an empty conversation_id since no conversation was routed.
-#[tokio::test]
-async fn channel_ingest_client_response_delivers_to_awaiter_and_acks_empty_conversation() {
-    let (svc, state) = service().await;
-    let id = alice_channel(&state).await;
-    let ack = svc
-        .channel_ingest(bearer(
-            ALICE_TOKEN,
-            client_response(&id, result_response("{\"ok\":true}")),
-        ))
-        .await
-        .unwrap()
-        .into_inner();
-    assert_eq!(ack.channel_id, id);
-    assert!(
-        ack.conversation_id.is_empty(),
-        "client_response path acks an empty conversation_id"
+    assert_eq!(
+        err.code(),
+        tonic::Code::InvalidArgument,
+        "neither result nor error"
     );
 }
 
-/// A method advertised on an ingest becomes dispatchable to the channel;
-/// otherwise send_server_notification refuses it as unsupported.
+/// A method advertised on an ingest becomes dispatchable to the channel stream;
+/// otherwise send_server_notification refuses it as unsupported. A later
+/// ingest with no supported_methods does not clobber it.
 #[tokio::test]
-async fn channel_ingest_advertised_supported_methods_become_usable() {
+async fn channel_stream_ingest_advertised_methods_persist_across_empty_ingests() {
     let (svc, state) = service().await;
-    let id = alice_channel(&state).await;
+    let id = alice_channel_stream(&state).await;
     let mut req = client_response(&id, result_response("{}"));
     req.supported_methods = vec!["RevealPath".into()];
-    svc.channel_ingest(bearer(ALICE_TOKEN, req)).await.unwrap();
+    svc.channel_stream_ingest(bearer(ALICE_TOKEN, req))
+        .await
+        .unwrap();
     assert!(
         state
-            .send_server_notification(&id, "RevealPath", "{}".into())
+            .send_server_notification("alpha", "RevealPath", "{}".into())
             .await
             .is_ok(),
         "advertised method must be usable"
     );
-}
 
-/// An ingest carrying no supported_methods keeps the set advertised before.
-#[tokio::test]
-async fn channel_ingest_empty_supported_methods_does_not_clobber() {
-    let (svc, state) = service().await;
-    let id = alice_channel(&state).await;
-    state
-        .update_supported_methods(&id, vec!["RevealPath".into()])
-        .await;
-    svc.channel_ingest(bearer(
+    // A later ingest carrying no supported_methods keeps the set advertised before.
+    svc.channel_stream_ingest(bearer(
         ALICE_TOKEN,
         client_response(&id, result_response("{}")),
     ))
@@ -317,23 +341,23 @@ async fn channel_ingest_empty_supported_methods_does_not_clobber() {
     .unwrap();
     assert!(
         state
-            .send_server_notification(&id, "RevealPath", "{}".into())
+            .send_server_notification("alpha", "RevealPath", "{}".into())
             .await
             .is_ok(),
         "empty supported_methods must not clobber prior set"
     );
 }
 
-// --- ChannelReceive -----------------------------------------------------------
+// --- ChannelStreamReceive -----------------------------------------------------------
 
 #[tokio::test]
-async fn channel_receive_emits_ack_then_idle_replay() {
+async fn channel_stream_receive_emits_ack_then_idle_replay() {
     let (svc, _) = service().await;
     let mut stream = svc
-        .channel_receive(bearer(
+        .channel_stream_receive(bearer(
             ALICE_TOKEN,
-            ChannelReceiveRequest {
-                adapter_hint: Some("cli:test".into()),
+            ChannelStreamReceiveRequest {
+                channel_hint: Some("cli:test".into()),
                 workspace: "alpha".into(),
                 sender: String::new(),
             },
@@ -342,14 +366,14 @@ async fn channel_receive_emits_ack_then_idle_replay() {
         .unwrap()
         .into_inner();
     let first = stream.next().await.unwrap().unwrap();
-    let channel_id = match first.command {
-        Some(channel_outbound::Command::Ack(a)) => a.channel_id,
+    let channel_stream_id = match first.command {
+        Some(channel_stream_outbound::Command::Ack(a)) => a.channel_stream_id,
         other => panic!("first frame must be Ack, got {other:?}"),
     };
-    assert!(!channel_id.is_empty());
+    assert!(!channel_stream_id.is_empty());
     let second = stream.next().await.unwrap().unwrap();
     match second.command {
-        Some(channel_outbound::Command::TurnState(e)) => {
+        Some(channel_stream_outbound::Command::TurnState(e)) => {
             assert_eq!(e.state, TurnState::Idle as i32);
             assert!(
                 e.conversation_id.is_empty(),
@@ -380,9 +404,25 @@ async fn set_conversation_name_rejects_over_max_chars() {
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
 }
 
+/// Each conversation RPC rejects an empty conversation_id at the gateway,
+/// never forwarded blind. The checks are separate per handler, so every RPC
+/// keeps its own row.
 #[tokio::test]
-async fn set_conversation_name_rejects_empty_id() {
+async fn conversation_rpcs_reject_an_empty_conversation_id() {
     let (svc, _) = service().await;
+    let req = CancelTurnRequest {
+        conversation_id: String::new(),
+        workspace: "alpha".into(),
+    };
+    let err = svc.cancel_turn(bearer(ALICE_TOKEN, req)).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument, "CancelTurn");
+
+    let err = svc
+        .get_turn_state(bearer(ALICE_TOKEN, turn_state("")))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument, "GetTurnState");
+
     let req = SetConversationNameRequest {
         conversation_id: String::new(),
         name: "fine".into(),
@@ -392,12 +432,12 @@ async fn set_conversation_name_rejects_empty_id() {
         .set_conversation_name(bearer(ALICE_TOKEN, req))
         .await
         .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
-}
+    assert_eq!(
+        err.code(),
+        tonic::Code::InvalidArgument,
+        "SetConversationName"
+    );
 
-#[tokio::test]
-async fn delete_conversation_rejects_empty_id() {
-    let (svc, _) = service().await;
     let req = DeleteConversationRequest {
         conversation_id: String::new(),
         workspace: "alpha".into(),
@@ -406,12 +446,12 @@ async fn delete_conversation_rejects_empty_id() {
         .delete_conversation(bearer(ALICE_TOKEN, req))
         .await
         .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
-}
+    assert_eq!(
+        err.code(),
+        tonic::Code::InvalidArgument,
+        "DeleteConversation"
+    );
 
-#[tokio::test]
-async fn get_conversation_history_rejects_empty_id() {
-    let (svc, _) = service().await;
     let req = GetConversationHistoryRequest {
         conversation_id: String::new(),
         limit: None,
@@ -422,20 +462,11 @@ async fn get_conversation_history_rejects_empty_id() {
         .get_conversation_history(bearer(ALICE_TOKEN, req))
         .await
         .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
-}
-
-/// A CancelTurn with no conversation_id is rejected at the gateway, never
-/// forwarded blind.
-#[tokio::test]
-async fn cancel_turn_rejects_empty_conversation_id() {
-    let (svc, _) = service().await;
-    let req = CancelTurnRequest {
-        conversation_id: String::new(),
-        workspace: "alpha".into(),
-    };
-    let err = svc.cancel_turn(bearer(ALICE_TOKEN, req)).await.unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        err.code(),
+        tonic::Code::InvalidArgument,
+        "GetConversationHistory"
+    );
 }
 
 /// Alice owns a conversation, just not this one. A cold cache must deny on
@@ -570,7 +601,7 @@ async fn load_alpha_grants(state: &GatewayState) {
         data: Some(
             [(
                 GRANTS_DATA_KEY.to_string(),
-                "alpha:\n  - name: ssh-credentials\n    grants:\n      github:\n        secret: k\n"
+                "alpha:\n  - name: hello-world\n    grants:\n      github:\n        secret: k\n"
                     .to_string(),
             )]
             .into(),
@@ -597,23 +628,6 @@ async fn list_grants_answers_the_verified_workspace_menu() {
         .unwrap()
         .into_inner();
     assert_eq!(resp.toolsets.len(), 1);
-    assert_eq!(resp.toolsets[0].toolset, "ssh-credentials");
+    assert_eq!(resp.toolsets[0].toolset, "hello-world");
     assert_eq!(resp.toolsets[0].grants, vec!["github".to_string()]);
-}
-
-#[tokio::test]
-async fn list_grants_for_a_menuless_workspace_is_empty_not_an_error() {
-    let (svc, state) = service().await;
-    load_alpha_grants(&state).await;
-    let resp = svc
-        .list_grants(bearer(
-            ALICE_TOKEN,
-            ListGrantsRequest {
-                workspace: "beta".into(),
-            },
-        ))
-        .await
-        .unwrap()
-        .into_inner();
-    assert!(resp.toolsets.is_empty());
 }

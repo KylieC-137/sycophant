@@ -115,7 +115,7 @@ the second install; decide whether to reject such names here instead.
 */ -}}
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-tenant" "system" true
   "command" (include "sycophant.provisionCommandName" .) "noun" "provision" "action" "provision"
-  "keys" (list "tenant" "capacity" "owner" "owner-hash")
+  "keys" (list "tenant" "capacity" "owner" "owner-hash" "headscale.enabled" "headscale.serverUrl" "headscale.magicDns" "headscale.baseDomain" "headscale.storageClass" "headscale.acme.enabled" "headscale.acme.email")
   "shape" `
 - expression: >-
     has(object.data) && 'tenant' in object.data &&
@@ -129,7 +129,57 @@ the second install; decide whether to reject such names here instead.
 - expression: >-
     has(object.data) && 'owner-hash' in object.data &&
     object.data['owner-hash'].matches('^[a-f0-9]{16}$')
-  message: "a provision command must carry an 'owner-hash' that is 16 lowercase hex characters"` ) }}
+  message: "a provision command must carry an 'owner-hash' that is 16 lowercase hex characters"
+
+# headscale booleans
+- expression: >-
+    !has(object.data) || ['headscale.enabled', 'headscale.magicDns', 'headscale.acme.enabled'].all(k,
+      !(k in object.data) || object.data[k] == '' || object.data[k] in ['true', 'false'])
+  messageExpression: >-
+    "a provision command's '" +
+    ['headscale.enabled', 'headscale.magicDns', 'headscale.acme.enabled'].filter(k,
+      k in object.data && object.data[k] != '' && !(object.data[k] in ['true', 'false']))[0] +
+    "' must be \"true\" or \"false\""
+
+# headscale.serverUrl required when enabled
+- expression: >-
+    !has(object.data) || object.data[?'headscale.enabled'].orValue('false') != 'true' ||
+    object.data[?'headscale.serverUrl'].orValue('') != ''
+  message: "a provision command with 'headscale.enabled' \"true\" must carry a non-empty 'headscale.serverUrl'"
+
+# headscale.serverUrl format (empty allowed)
+- expression: >-
+    !has(object.data) || !('headscale.serverUrl' in object.data) ||
+    object.data['headscale.serverUrl'] == '' ||
+    object.data['headscale.serverUrl'].matches('^https?://[a-zA-Z0-9._:/@?&=%~+-]+$')
+  message: "a provision command's 'headscale.serverUrl' must be an http or https URL"
+
+# headscale.acme.email required when acme.enabled
+- expression: >-
+    !has(object.data) || object.data[?'headscale.acme.enabled'].orValue('false') != 'true' ||
+    object.data[?'headscale.acme.email'].orValue('') != ''
+  message: "a provision command with 'headscale.acme.enabled' \"true\" must carry a non-empty 'headscale.acme.email'"
+
+# headscale.baseDomain: DNS name (empty allowed)
+- expression: >-
+    !has(object.data) || !('headscale.baseDomain' in object.data) ||
+    object.data['headscale.baseDomain'] == '' ||
+    object.data['headscale.baseDomain'].matches('^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$')
+  message: "a provision command's 'headscale.baseDomain' must be a DNS name"
+
+# headscale.storageClass: Kubernetes name (empty allowed)
+- expression: >-
+    !has(object.data) || !('headscale.storageClass' in object.data) ||
+    object.data['headscale.storageClass'] == '' ||
+    object.data['headscale.storageClass'].matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+  message: "a provision command's 'headscale.storageClass' must be a Kubernetes name"
+
+# headscale.acme.email: email (empty allowed)
+- expression: >-
+    !has(object.data) || !('headscale.acme.email' in object.data) ||
+    object.data['headscale.acme.email'] == '' ||
+    object.data['headscale.acme.email'].matches('^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$')
+  message: "a provision command's 'headscale.acme.email' must be a valid email address"` ) }}
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-workspace" "prefix" true
   "command" (include "sycophant.workspaceProvisionCommandName" .) "noun" "workspace" "action" "mint a workspace"
@@ -197,8 +247,34 @@ the second install; decide whether to reject such names here instead.
     size(variables.suffix) <= 49
   message: "a reap command name must be reap-workspace-<name> with a DNS-safe name of at most 49 characters"` ) }}
 ---
+{{- /*
+One workspace's instructions folder, carried whole as `archive` (a base64 gzip
+tar). No pattern runs over the archive: a CEL pass over a value near the 1 MiB
+object limit risks the policy's cost budget. The job checks the archive.
+*/}}
+{{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-instructions" "prefix" true
+  "command" (include "sycophant.instructionsProvisionCommandName" .) "noun" "instructions" "action" "deliver instructions"
+  "keys" (list "archive")
+  "shape" `
+- expression: >-
+    variables.suffix.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
+    size(variables.suffix) <= 49
+  message: "an instructions command name must be provision-instructions-<workspace> with a DNS-safe name of at most 49 characters"
+- expression: >-
+    has(object.data) && 'archive' in object.data
+  message: "an instructions command must carry an 'archive'"` ) }}
+---
+{{ include "sycophant.commandVap" (dict "ctx" . "name" "command-reap-instructions" "prefix" true
+  "command" "reap-instructions" "noun" "reap-instructions" "action" "remove instructions"
+  "keys" (list)
+  "shape" `
+- expression: >-
+    variables.suffix.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
+    size(variables.suffix) <= 49
+  message: "a reap command name must be reap-instructions-<workspace> with a DNS-safe name of at most 49 characters"` ) }}
+---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-user" "prefix" true
-  "command" (include "sycophant.userProvisionCommandName" .) "noun" "user" "action" "bind a framework user"
+  "command" (include "sycophant.userProvisionCommandName" .) "noun" "user" "action" "bind a user"
   "keys" (list "user" "workspaces")
   "keyPattern" `^handle\.[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
   "keyHelp" "handle.<channel>"
@@ -228,6 +304,14 @@ the second install; decide whether to reject such names here instead.
     !has(object.data) || object.data.all(k, !k.startsWith('handle.') ||
     (object.data[k] != '' && object.data[k].matches(r'^[^"\\\p{Cc}\x{2028}\x{2029}]+$')))
   message: "each handle value in a user command must be a non-empty platform user ID with no quote, backslash, or control character"` ) }}
+---
+{{ include "sycophant.commandVap" (dict "ctx" . "name" "command-reap-user" "prefix" true
+  "command" "reap-user" "noun" "reap-user" "action" "remove a user"
+  "keys" (list)
+  "shape" `
+- expression: >-
+    variables.suffix.matches('^[a-f0-9]{10}$')
+  message: "a reap command name must be reap-user-<handle> with a 10-character hex handle"` ) }}
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-toolset" "prefix" true
   "command" (include "sycophant.toolsetProvisionCommandName" .) "noun" "toolset" "action" "install a toolset"
@@ -362,40 +446,17 @@ data is flat strings.
     size(variables.suffix) <= 49
   message: "a reap command name must be reap-inference-<key> with a DNS-safe key of at most 49 characters"` ) }}
 ---
-{{- /*
-One channel per channel provision command: the chart renders its adapter
-`adapter-<name>` and, with headscale.enabled, the tenant's own headscale. Only
-the app kind exists, and its adapter cannot start without the headscale URL it
-joins. Booleans are "true" or "false", since command data is flat strings.
-*/}}
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-provision-channel" "prefix" true
   "command" (include "sycophant.channelProvisionCommandName" .) "noun" "channel" "action" "install a channel"
-  "keys" (list "storageClass" "kind" "image" "tag" "pullPolicy" "loginServer" "hostname" "authKeySecret" "headscale.enabled" "headscale.image" "headscale.tag" "headscale.pullPolicy" "headscale.serverUrl" "headscale.magicDns" "headscale.baseDomain" "headscale.acme.enabled" "headscale.acme.email")
+  "keys" (list "storageClass" "image" "tag" "pullPolicy" "loginServer" "hostname" "authKeySecret")
   "shape" `
 - expression: >-
     variables.suffix.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') &&
     size(variables.suffix) <= 50
   message: "a channel command name must be provision-channel-<name> with a DNS-safe name of at most 50 characters, so the release ch-<name> fits helm's 53"
 - expression: >-
-    has(object.data) && object.data.?kind.orValue('') == 'app' &&
-    object.data.?loginServer.orValue('') != ''
-  message: "a channel command must carry 'kind' app and a non-empty 'loginServer'"
-- expression: >-
-    !has(object.data) || ['headscale.enabled', 'headscale.magicDns', 'headscale.acme.enabled'].all(k,
-      !(k in object.data) || object.data[k] in ['true', 'false'])
-  messageExpression: >-
-    "a channel command's '" +
-    ['headscale.enabled', 'headscale.magicDns', 'headscale.acme.enabled'].filter(k,
-      k in object.data && !(object.data[k] in ['true', 'false']))[0] +
-    "' must be \"true\" or \"false\""
-- expression: >-
-    !has(object.data) || object.data[?'headscale.enabled'].orValue('false') != 'true' ||
-    object.data[?'headscale.serverUrl'].orValue('') != ''
-  message: "a channel command with 'headscale.enabled' \"true\" must carry a non-empty 'headscale.serverUrl'"
-- expression: >-
-    !has(object.data) || object.data[?'headscale.acme.enabled'].orValue('false') != 'true' ||
-    object.data[?'headscale.acme.email'].orValue('') != ''
-  message: "a channel command with 'headscale.acme.enabled' \"true\" must carry a non-empty 'headscale.acme.email'"` ) }}
+    has(object.data) && object.data.?loginServer.orValue('') != ''
+  message: "a channel command must carry a non-empty 'loginServer'"` ) }}
 ---
 {{ include "sycophant.commandVap" (dict "ctx" . "name" "command-reap-channel" "prefix" true
   "command" "reap-channel" "noun" "reap-channel" "action" "remove a channel"

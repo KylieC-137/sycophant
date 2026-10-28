@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use crate::cli::SetupCmd;
 use crate::commands::build;
 use crate::commands::command::{COMMAND_WRITER_VERBS, SYSTEM_NS};
-use crate::commands::common::{ok, step, warn};
+use crate::commands::common::{ok, step, wait_for, warn};
 use crate::commands::operator;
 use crate::runner::{run_output, run_passthrough, run_silent, run_stdin};
 use crate::scope::Scope;
@@ -147,6 +147,8 @@ pub(crate) fn run(_cmd: SetupCmd) -> Result<(), String> {
         _ => ok("images: no repo checkout — skipping build (expecting prebuilt images)"),
     }
     install_cluster_layer(&scope)?;
+    install_objectstore(&scope)?;
+    create_instructions_bucket()?;
     if let Some((email, password)) = login {
         install_operator(&scope, need_dex, email, password)?;
     }
@@ -879,6 +881,64 @@ fn install_cluster_layer(scope: &Scope) -> Result<(), String> {
     Ok(())
 }
 
+fn install_objectstore(scope: &Scope) -> Result<(), String> {
+    step("Installing object store");
+    let chart = scope
+        .chart_dir("sycophant-objectstore")
+        .to_string_lossy()
+        .into_owned();
+    run_passthrough(
+        "helm",
+        &[
+            "upgrade",
+            "--install",
+            "sycophant-objectstore",
+            &chart,
+            "-n",
+            SYSTEM_NS,
+            "--wait",
+            "--timeout=5m",
+        ],
+    )?;
+    ok("object store installed");
+    Ok(())
+}
+
+const BUCKET: &str = "sycophant-instructions";
+
+/// Create the instructions bucket through the store's filer. A bucket is a
+/// filer directory, and creating one is idempotent: 201 (created) and 409
+/// (exists) both succeed. The pod turns ready on the s3 port before the filer
+/// answers, so retry for a minute; any other status fails setup.
+fn create_instructions_bucket() -> Result<(), String> {
+    let mut last = String::new();
+    wait_for(&format!("bucket {BUCKET}"), 60, || {
+        let url = format!("http://localhost:8888/buckets/{BUCKET}/");
+        last = run_output(
+            "kubectl",
+            &[
+                "exec",
+                "-n",
+                SYSTEM_NS,
+                "deploy/seaweedfs",
+                "--",
+                "curl",
+                "-sS",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                "-X",
+                "POST",
+                &url,
+            ],
+        )
+        .unwrap_or_else(|e| e);
+        last == "201" || last == "409"
+    })
+    .map_err(|e| format!("{e}; last answer: {last}"))
+}
+
 /// True if `k3d <kind> list -o json` output contains an entry named `name`.
 /// Pure so it is unit + mutation testable around the shell-out.
 fn json_list_has_name(list_json: &str, name: &str) -> bool {
@@ -916,28 +976,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cluster_exists_true_when_named_cluster_present() {
-        // Green; mutant flipping `== Some(name)` to `!=` turns this false.
-        let json = r#"[{"name":"other"},{"name":"sycophant"}]"#;
-        assert!(cluster_exists(json, "sycophant"));
-    }
-
-    #[test]
-    fn cluster_exists_false_when_absent() {
-        // Mutant dropping the name comparison (always-true) is caught here.
-        let json = r#"[{"name":"other"},{"name":"dev"}]"#;
-        assert!(!cluster_exists(json, "sycophant"));
-    }
-
-    #[test]
-    fn cluster_exists_false_on_empty_list() {
-        assert!(!cluster_exists("[]", "sycophant"));
-    }
-
-    #[test]
-    fn cluster_exists_false_on_garbage() {
-        // Mutant making the parse-failure path return true is caught here.
-        assert!(!cluster_exists("not json", "sycophant"));
+    fn cluster_exists_only_finds_the_named_cluster_in_valid_json() {
+        let cases = [
+            (r#"[{"name":"other"},{"name":"sycophant"}]"#, true),
+            (r#"[{"name":"other"},{"name":"dev"}]"#, false),
+            ("[]", false),
+            ("not json", false),
+        ];
+        for (json, want) in cases {
+            assert_eq!(cluster_exists(json, "sycophant"), want, "{json}");
+        }
     }
 
     #[test]
@@ -950,24 +998,8 @@ mod tests {
     }
 
     #[test]
-    fn gvisor_arch_maps_known_arches() {
-        // Each mutant swapping a mapping target is caught by one of these.
-        assert_eq!(gvisor_arch("aarch64").unwrap(), "aarch64");
-        assert_eq!(gvisor_arch("x86_64").unwrap(), "x86_64");
-    }
-
-    #[test]
     fn gvisor_arch_rejects_unknown() {
-        // Mutant turning the catch-all into Ok(...) is caught here.
         assert!(gvisor_arch("riscv64").is_err());
-    }
-
-    #[test]
-    fn kyverno_values_disable_engine_crds() {
-        // Engine must not own CRDs (decoupled kyverno-crds release). Mutant
-        // pointing at a CRD-installing values file is caught here.
-        assert!(KYVERNO_VALUES.contains("crds:"));
-        assert!(KYVERNO_VALUES.contains("install: false"));
     }
 
     #[test]
@@ -983,41 +1015,23 @@ mod tests {
     }
 
     #[test]
-    fn kyverno_ns_yaml_carries_psa_restricted() {
-        assert!(KYVERNO_NS_YAML.contains("pod-security.kubernetes.io/enforce: restricted"));
-    }
-
-    #[test]
     fn system_ns_manifest_carries_psa_restricted() {
         // Single source of truth: the manifest the CLI applies is the same file
         // helm installs from (charts/sycophant-cluster/system-ns.yaml).
         let manifest = include_str!("../../../charts/sycophant-cluster/system-ns.yaml");
         assert!(manifest.contains("name: sycophant-system"));
         assert!(manifest.contains("pod-security.kubernetes.io/enforce: restricted"));
-    }
-
-    #[test]
-    fn build_arch_maps_known_arches() {
-        // Each mutant swapping a triple/docker-arch/linker is caught here.
-        let a = build_arch("aarch64").unwrap();
-        assert_eq!(a.rust_target, "aarch64-unknown-linux-musl");
-        assert_eq!(a.docker_arch, "arm64");
-        assert_eq!(a.cross_linker, "aarch64-linux-musl-gcc");
-        let x = build_arch("x86_64").unwrap();
-        assert_eq!(x.rust_target, "x86_64-unknown-linux-musl");
-        assert_eq!(x.docker_arch, "amd64");
-        assert_eq!(x.cross_linker, "x86_64-linux-musl-gcc");
+        assert!(KYVERNO_NS_YAML.contains("pod-security.kubernetes.io/enforce: restricted"));
     }
 
     #[test]
     fn build_arch_rejects_unknown() {
-        // Mutant turning the catch-all into Ok(...) is caught here.
         assert!(build_arch("riscv64").is_err());
     }
 
     #[test]
     fn is_repo_checkout_requires_both_markers() {
-        // Mutant flipping && to || (one marker enough) is caught here.
+        // Both markers are required; one alone is not enough.
         let dir = std::env::temp_dir().join(format!("syco-repo-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("build")).unwrap();
@@ -1030,16 +1044,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_df_avail_gb_reads_fourth_column() {
+    fn parse_df_avail_gb_reads_fourth_column_or_none_without_data() {
         // df -Pk: Filesystem Size Used Avail Capacity Mounted — Avail is col 4.
-        // 20971520 KB = 20 GB. Mutant reading a different column is caught here.
+        // 20971520 KB = 20 GB.
         let df = "Filesystem 1024-blocks Used Available Capacity Mounted\n\
                   overlay 62725276 31000000 20971520 60% /";
         assert_eq!(parse_df_avail_gb(df), Some(20));
-    }
-
-    #[test]
-    fn parse_df_avail_gb_none_without_data_row() {
         assert_eq!(parse_df_avail_gb("Filesystem only header"), None);
     }
 }

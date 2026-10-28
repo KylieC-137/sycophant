@@ -1,12 +1,14 @@
 # A workspace may name only models and toolsets already installed. demo-key is
 # secret-only: the key lands where ssh expects it and no network hole opens.
+# A grant's Secret stores its value under a key named after the Secret itself.
+# An optional `egress:` opens exactly one domain, with no subdomains.
 workspace:
   name: hello-world
-  tenant: e2e-test
-  toolsets: [stdlib, workspace-ro, ssh-credentials]
-  models: [deepseek-v4-flash, local]
+  tenant: hello-world
+  toolsets: [hello-world]
+  models: [qwen3-5-2b]
   grants:
-    ssh-credentials:
+    hello-world:
       demo-key:
         secret: demo-ssh-key
         path: /home/agent/.ssh/id_ed25519

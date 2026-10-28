@@ -20,10 +20,17 @@ pub(crate) enum Command {
     Destroy(DestroyCmd),
     Upgrade(UpgradeCmd),
     Tenant(TenantCmd),
+    /// Join this host to a tenant's headscale tailnet. Run after `tenant up`
+    /// provisions the tenant and its headscale instance
+    Connect(ConnectCmd),
     /// Install or remove one toolset through its provision and reap commands
     Toolset(ComponentCmd),
     /// Install or remove one workspace through its provision and reap commands
     Workspace(ComponentCmd),
+    /// Deliver or remove one workspace's instructions folder. `up` takes
+    /// exactly one -f naming the workspace, its tenant and the folder, and
+    /// replaces the folder's files in the store; `down` empties it
+    Instructions(ComponentCmd),
     User(UserCmd),
     /// Install or remove one model through its provision and reap commands
     Inference(ComponentCmd),
@@ -50,6 +57,16 @@ pub(crate) struct SetupCmd {}
 #[derive(Args)]
 pub(crate) struct DestroyCmd {}
 
+/// Join this host to a tenant's headscale tailnet. Port-forwards headscale,
+/// mints a pre-auth key, and runs `sudo tailscale up`.
+/// Run once after `sycoadm tenant up`.
+#[derive(Args)]
+pub(crate) struct ConnectCmd {
+    /// tenant name (e.g. `hello-world`; the namespace `tenant-<name>` is derived)
+    #[arg(long)]
+    pub tenant: String,
+}
+
 // --- upgrade (validate the cluster, upgrade it, re-provision every tenant) ---
 
 /// Validate the cluster, upgrade the cluster chart, then re-provision every
@@ -66,13 +83,9 @@ pub(crate) struct UpgradeCmd {
 
 // --- tenant ---
 
-/// Operate on a tenant. `--ns <name>` selects the namespace for secret and
-/// audit, and may appear anywhere on the line.
+/// Operate on a tenant
 #[derive(Args)]
 pub(crate) struct TenantCmd {
-    /// tenant namespace (secret and audit only)
-    #[arg(long, global = true)]
-    pub ns: Option<String>,
     #[command(subcommand)]
     pub sub: TenantSub,
 }
@@ -88,7 +101,6 @@ pub(crate) enum TenantSub {
     Down(TenantDown),
     Remove(TenantRemove),
     Secret(SecretCmd),
-    Audit(AuditCmd),
 }
 
 /// Suspend the tenant: scales it to zero, keeps all data. Prompts for the
@@ -131,6 +143,9 @@ pub(crate) enum SecretSub {
 pub(crate) struct SecretSet {
     /// secret name
     pub name: String,
+    /// tenant namespace
+    #[arg(long)]
+    pub ns: String,
 }
 
 /// List secrets
@@ -139,6 +154,9 @@ pub(crate) struct SecretList {
     /// emit JSON to stdout instead of human-readable list to stderr
     #[arg(long)]
     pub json: bool,
+    /// tenant namespace
+    #[arg(long)]
+    pub ns: String,
 }
 
 /// Delete a secret
@@ -146,23 +164,14 @@ pub(crate) struct SecretList {
 pub(crate) struct SecretDelete {
     /// secret name
     pub name: String,
-}
-
-// --- audit ---
-
-/// Audit a running workspace against the security clauses (gVisor isolation,
-/// secret scrubbing, egress containment, L7 DNS allowlist, credential isolation,
-/// tool execution, workspace SA). Probes the live sandbox — the workspace must
-/// already have been exercised by a tool-calling message so the toolset pod exists.
-#[derive(Args)]
-pub(crate) struct AuditCmd {
-    /// workspace name
-    pub workspace: String,
+    /// tenant namespace
+    #[arg(long)]
+    pub ns: String,
 }
 
 // --- provision commands rendered from a values file ---
 
-/// Install a framework user through its provision command
+/// Install or remove a user through its provision and reap commands
 #[derive(Args)]
 pub(crate) struct UserCmd {
     #[command(subcommand)]
@@ -176,6 +185,19 @@ pub(crate) enum UserSub {
     /// command of the same name is replaced; a rejected command or a failed
     /// install exits non-zero
     Up(Up),
+    Down(UserDown),
+}
+
+/// Remove a user: write its reap command as the operator and wait for
+/// the uninstall. Prompts for the operator password. A failed uninstall leaves
+/// the reap command and exits non-zero
+#[derive(Args)]
+pub(crate) struct UserDown {
+    /// the user's issuer-prefixed subject, <issuer>#<sub>
+    pub subject: String,
+    /// tenant name (the namespace is tenant-<name>)
+    #[arg(long)]
+    pub tenant: String,
 }
 
 /// The arguments of every `up`.

@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: attacker-netpol, namespace: tenant-offline}
+spec: {podSelector: {}}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: attacker-cnp, namespace: tenant-offline}
+spec: {endpointSelector: {}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: attacker-role, namespace: tenant-offline}
+rules: []
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: attacker-ws-sa, namespace: tenant-offline, labels: {sycophant.md/type: workspace-sa}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: ws-shadow-capability-grants, namespace: tenant-offline, labels: {sycophant.md/type: capability-grants}}
+data: {x: notion}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: identity-shadow, namespace: tenant-offline, labels: {sycophant.md/type: relay-identity}}
+data: {subject: x}

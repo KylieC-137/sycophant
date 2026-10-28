@@ -1,0 +1,68 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: channel-in-gvisor-scope
+spec:
+  description: |
+    A pod carrying the labels the channel chart renders on the tailnet channel's
+    pod template is stamped `runtimeClassName: gvisor` by Kyverno at admission,
+    even when the pod itself asks for no runtime class.
+
+    The pod is the `ch-tailnet` Deployment's pod template, rendered from the
+    channel chart for `name=tailnet` into the test's tenant namespace, with
+    `runtimeClassName` deleted. Its ServiceAccount is applied from the same
+    render so the pod clears the ServiceAccount admission check.
+
+    Mutation guard: a runtime-class mutate whose component selector does not
+    match the channel chart's pod labels leaves `runtimeClassName` unset, and
+    the pod VAP then refuses the pod or the assert below reds.
+  bindings:
+    - name: tenant_ns
+      value: (join('-', ['tenant', random('[a-z0-9]{8}')]))
+  steps:
+    - name: create-tenant-ns
+      use:
+        template: ../../step-templates/tenant.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+    - name: await-pod-admission-ready
+      use:
+        template: ../../step-templates/pod-admission-ready.yaml
+        with:
+          bindings:
+            - name: tenant_ns
+              value: ($tenant_ns)
+    - name: channel-pod-without-runtime-class-is-stamped-gvisor
+      try:
+        - script:
+            env:
+              - name: TENANT_NS
+                value: ($tenant_ns)
+            content: |
+              set -euo pipefail
+              REPO_ROOT=$(git rev-parse --show-toplevel)
+              render=$(mktemp); objs=$(mktemp)
+              helm template t "$REPO_ROOT/charts/sycophant-channel" -n "$TENANT_NS" \
+                --set name=tailnet --set-json 'command={"loginServer":"http://headscale:8080"}' > "$render"
+              python3 - "$render" "$TENANT_NS" > "$objs" <<'PY'
+              import sys, yaml
+              docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+              ns = sys.argv[2]
+              deps = [d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "ch-tailnet"]
+              assert deps, "the channel chart rendered no Deployment ch-tailnet for name=tailnet"
+              tpl = deps[0]["spec"]["template"]
+              spec = dict(tpl["spec"])
+              spec.pop("runtimeClassName", None)
+              sa = spec.get("serviceAccountName", "default")
+              sas = [d for d in docs if d["kind"] == "ServiceAccount" and d["metadata"]["name"] == sa]
+              for d in sas:
+                  d["metadata"]["namespace"] = ns
+              pod = {"apiVersion": "v1", "kind": "Pod", "spec": spec,
+                     "metadata": {"name": "ch-tailnet-probe", "namespace": ns, "labels": tpl["metadata"]["labels"]}}
+              yaml.safe_dump_all(sas + [pod], sys.stdout)
+              PY
+              kubectl create -f "$objs"
+              got=$(kubectl get pod ch-tailnet-probe -n "$TENANT_NS" -o jsonpath='{.spec.runtimeClassName}')
+              [ "$got" = gvisor ] || { echo "ch-tailnet pod runtimeClassName is '${got}', want gvisor" >&2; exit 1; }

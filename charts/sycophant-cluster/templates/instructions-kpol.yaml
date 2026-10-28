@@ -1,0 +1,65 @@
+{{- /*
+The instructions lifecycle: one workspace's instructions folder in the store,
+replaced from a provision command's archive or removed by a reap command. The
+jobs run no helm: they write the store's filer, then restart the workspace so
+its init container syncs the new folder.
+
+The archive is listed before anything else and refused, with no store call,
+when the listing warns (BusyBox tar strips a leading '/' or '../' with a
+notice and goes on), or names a link or anything but a file or directory.
+*/}}
+{{- define "sycophant.instructionsFolder" -}}
+FOLDER="http://seaweedfs.sycophant-system.svc:8888/buckets/sycophant-instructions/system:serviceaccount:$TENANT:ws-$NAME/"
+{{- end -}}
+
+{{- define "sycophant.instructionsRestart" -}}
+DEPLOY="$(kubectl get deployment "ws-$NAME" -n "$TENANT" --ignore-not-found -o name)"
+if [ -n "$DEPLOY" ]; then
+  kubectl rollout restart "deployment/ws-$NAME" -n "$TENANT"
+fi
+kubectl delete configmap "$COMMAND" -n "$TENANT"
+{{- end -}}
+
+{{- define "sycophant.instructionsInstallScript" -}}
+set -eu
+NAME="${COMMAND#provision-instructions-}"
+{{ include "sycophant.instructionsFolder" . }}
+{{ include "sycophant.commandFetch" . }}
+printf '%s' "$CM" | jq -r '.data.archive // empty' | base64 -d > /tmp/archive.tgz
+tar -tvzf /tmp/archive.tgz > /tmp/list 2> /tmp/list.err
+if [ -s /tmp/list.err ] || grep -q ' -> ' /tmp/list || grep -qv '^[-d]' /tmp/list; then
+  echo "the archive holds a link, a special file or a path outside its folder; nothing was changed" >&2
+  cat /tmp/list.err /tmp/list >&2
+  exit 1
+fi
+rm -rf /tmp/files
+mkdir /tmp/files
+tar -xzf /tmp/archive.tgz -C /tmp/files
+if [ -n "$(find /tmp/files -name '*[!A-Za-z0-9._-]*')" ]; then
+  echo "an archive name holds a character outside A-Z a-z 0-9 . _ -; nothing was changed" >&2
+  exit 1
+fi
+curl -fsS -X DELETE "${FOLDER}?recursive=true"
+cd /tmp/files
+find . -type f | while IFS= read -r f; do
+  curl -fsS -X PUT -T "$f" "$FOLDER${f#./}"
+done
+{{ include "sycophant.instructionsRestart" . }}
+{{- end -}}
+
+{{- define "sycophant.instructionsUninstallScript" -}}
+set -eu
+NAME="${COMMAND#reap-instructions-}"
+{{ include "sycophant.instructionsFolder" . }}
+curl -fsS -X DELETE "${FOLDER}?recursive=true"
+{{ include "sycophant.instructionsRestart" . }}
+{{- end -}}
+
+{{- if include "sycophant.renderKyverno" . }}
+---
+{{ include "sycophant.provisionInstaller" (dict "ctx" $ "kind" "instructions" "role" "instructions-job" "script" (include "sycophant.instructionsInstallScript" $)) }}
+---
+{{ include "sycophant.provisionUninstaller" (dict "ctx" $ "kind" "instructions" "role" "instructions-job" "script" (include "sycophant.instructionsUninstallScript" $)) }}
+---
+{{ include "sycophant.provisionReap" (dict "ctx" $ "kind" "instructions") }}
+{{- end }}

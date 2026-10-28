@@ -879,13 +879,13 @@ dependencies = [
  "bytes",
  "chrono",
  "futures",
+ "harness-proto",
  "http-body-util",
  "hyper",
  "hyper-util",
  "k8s-openapi",
  "kube",
  "model-provider",
- "prost",
  "proto-common",
  "relay-proto",
  "rustls",
@@ -910,7 +910,6 @@ dependencies = [
 name = "harness-proto"
 version = "0.1.0"
 dependencies = [
- "prost",
  "proto-common",
  "tonic",
  "tonic-build",
@@ -2680,7 +2679,6 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
- "shared",
 ]
 
 [[package]]
@@ -2923,7 +2921,6 @@ dependencies = [
 name = "toolset-proto"
 version = "0.1.0"
 dependencies = [
- "harness-proto",
  "prost",
  "proto-common",
  "tonic",

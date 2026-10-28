@@ -5,8 +5,8 @@ Three scopes, organized by what infrastructure they need:
 ```
 tests/
 ├── unit/         # No cluster. Sub-second policy logic checks (kyverno test).
-├── integration/  # Live cluster. Admission + RBAC + Kyverno chain (chainsaw).
-└── e2e/          # Live cluster + data plane. Currently inline in scripts/quickstart-test.sh.
+└── integration/  # Live cluster. Admission + RBAC + Kyverno chain (chainsaw).
+scripts/e2e.sh    # e2e: live cluster + data plane (`make test-e2e`). No tests/e2e/ directory.
 ```
 
 ## Quick start
@@ -66,22 +66,6 @@ Every test under `integration/` must route through actual sycophant code paths:
 4. **Deny tests pair with accept tests** under the same caller identity. A rule that denies everything passes a deny-only suite.
 
 5. **Mutate → validate → assert in one test.** Apply unlabeled, let mutate run, let validate run, assert the mutated state.
-
-## Mutation-removal smoke check
-
-`scripts/mutation-removal.sh <name>` deletes a sycophant policy from the live
-cluster, runs the chainsaw tests that should depend on it, and confirms they
-fail. If they still pass, the tests are performative.
-
-Mutations:
-
-| Name              | Removes                                            | Expected to break                                              |
-|-------------------|----------------------------------------------------|----------------------------------------------------------------|
-| harness-vap   | VAP `cluster-gvisor-pod-policy`             | All `harness-pod-shape/` tests                               |
-| protect-security  | ValidatingPolicy `cluster-protect-security`      | All `tenant-resource-protection/` |
-| tenant-tokenreview-crbs | GeneratingPolicy `tenant-rolebinding-generator` | `tenant-namespace-creation/tenant-tokenreview-crbs-generated` |
-
-The script restores the chart via `helm upgrade --install` after.
 
 ## Offline layer (kyverno test)
 

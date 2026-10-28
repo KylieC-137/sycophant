@@ -8,12 +8,10 @@ Kyverno rule rejecting the request).
 
 | Test                                  | What it proves                                                                |
 |---------------------------------------|-------------------------------------------------------------------------------|
-| provision-write-scope/                | provision-write creates Secrets but `get`s only adapter-state, and writes only in its bound namespace |
-| provision-identity-clusterrole-minimal/ | The provision-identity ClusterRole has no rules and no aggregation |
-| relay-ctrl-identity-rbac/         | The chart-rendered relay-controller Role reads the identity ConfigMaps read-only and spawns no workload |
-| relay-ctrl-no-secret-updates/     | the relay holds no Secret verbs at all: create, patch, and delete each fail, and get, list, and watch are denied |
-| adapter-secret-name-allowlist/    | an adapter may only create the Secret named adapter-state, and only in its own namespace |
-| workspace-sa-no-verbs/                | workspace SA has zero K8s API verbs                                           |
+| channel-secret-name-allowlist/    | a channel may only create the Secret named tailnet-identity, and only in its own namespace |
+
+The render-time bounds (provision-write, provision-identity, the relay-controller
+Role) live in `tests/unit/provision-installer/` and `tests/unit/tenant-chart/`.
 
 Belongs here: SA-impersonation probes (`kubectl --as` or `kubectl auth
 can-i`) asserting denied actions, regardless of which layer enforces.

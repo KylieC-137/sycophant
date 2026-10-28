@@ -798,8 +798,15 @@ mod tests {
     /// The pod carries `job-kind: inference`, the value the Job CREATE gate
     /// admits into the inference arm. A build that omits it or stamps another
     /// value is refused at admission.
+    ///
+    /// It also carries `sycophant.md/model` set to the model key the harness
+    /// dispatched, never the provider model string. The per-model egress
+    /// policy selects the inference pod by exactly this label, so a build that
+    /// stamps the provider model id here, or omits the label, matches no
+    /// provider-egress rule and leaves the job on the fail-closed baseline
+    /// floor.
     #[test]
-    fn inference_job_pod_carries_the_inference_job_kind_label() {
+    fn inference_job_pod_labels_its_kind_component_and_model_key() {
         let job = test_inference_job(None);
         let labels = pod_spec_labels(&job);
         assert_eq!(
@@ -812,18 +819,6 @@ mod tests {
                 .map(String::as_str),
             Some("capability-job"),
         );
-    }
-
-    /// The pod carries `sycophant.md/model` set to the model key the harness
-    /// dispatched, never the provider model string. The per-model egress
-    /// policy selects the inference pod by exactly this label, so a build that
-    /// stamps the provider model id here, or omits the label, matches no
-    /// provider-egress rule and leaves the job on the fail-closed baseline
-    /// floor.
-    #[test]
-    fn inference_job_pod_carries_the_model_key_label() {
-        let job = test_inference_job(None);
-        let labels = pod_spec_labels(&job);
         assert_eq!(
             labels.get("sycophant.md/model").map(String::as_str),
             Some("deepseek-v4-flash"),

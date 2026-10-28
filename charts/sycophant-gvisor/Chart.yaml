@@ -1,12 +1,12 @@
 apiVersion: v2
 name: sycophant-gvisor
 description: |
-  gVisor RuntimeClass for sycophant capability-job (and adapter) pods. Install once per
+  gVisor RuntimeClass for sycophant capability-job (and channel) pods. Install once per
   cluster. Pairs with operator-managed runsc binary install on each node
   (k3d ad-hoc today; see scripts/e2e.sh:install_gvisor for the reference
   recipe).
 
-  Capability-job (and adapter) pods get `runtimeClassName: gvisor` stamped on
+  Capability-job (and channel) pods get `runtimeClassName: gvisor` stamped on
   them at admission by the cluster-runtime-class Kyverno MutatingPolicy
   (`charts/sycophant-cluster/templates/runtime-class-kpol.yaml`).
   The harness and relay components run on the

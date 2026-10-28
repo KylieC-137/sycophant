@@ -48,7 +48,7 @@ test-unit: test-unit-rust test-unit-go test-unit-k8s ## All unit tests (hermetic
 
 .PHONY: test-unit-rust
 test-unit-rust: ## Inline #[cfg(test)] units across the workspace
-	cargo test --workspace --lib --bins
+	cargo test --workspace --lib --bins --no-fail-fast
 
 .PHONY: test-unit-go
 test-unit-go: ## Go unit tests for the syco CLI
@@ -67,17 +67,19 @@ test-unit-k8s: ## Render the two policy fixtures, run them, then the chart accep
 		--api-versions policies.kyverno.io/v1/ValidatingPolicy \
 		--show-only templates/protect-security-kpol.yaml \
 		> tests/unit/kyverno-policies/protect-security-idp-delete/policy.yaml
-	@kyverno test tests/unit/kyverno-policies
-	@bash tests/unit/command-vap/acceptance.sh
-	@bash tests/unit/provision-installer/acceptance.sh
-	@bash tests/unit/tenant-chart/acceptance.sh
+	@rc=0; \
+	kyverno test tests/unit/kyverno-policies || rc=1; \
+	for s in command-vap provision-installer tenant-chart; do \
+		bash tests/unit/$$s/acceptance.sh || rc=1; \
+	done; \
+	exit $$rc
 
 .PHONY: test-integration
 test-integration: test-integration-rust test-integration-k8s ## All integration tests (k8s leg needs a cluster)
 
 .PHONY: test-integration-rust
 test-integration-rust: ## crates/*/tests/ composition tests (hermetic, in-process servers)
-	cargo test --workspace --tests
+	cargo test --workspace --tests --no-fail-fast
 
 .PHONY: test-integration-k8s
 test-integration-k8s: ## Chainsaw suite against the local cluster
@@ -89,15 +91,12 @@ syco: ## Build the Go syco CLI binary
 
 .PHONY: sycoadm
 sycoadm: ## Build the Rust sycoadm operator CLI binary
-	cargo build -p sycoadm
+	CARGO_BUILD_JOBS=3 cargo build -p sycoadm --release
+	@cp target/release/sycoadm target/sycoadm
 
 .PHONY: test-e2e
 test-e2e: ## Full install, real turn, security audit, client in the loop (CLEAN=1 rebuilds the cluster)
 	bash scripts/e2e.sh $(if $(CLEAN),--clean)
-
-.PHONY: test-client
-test-client: ## Flutter client tests (e2e scaffolding; not a release gate)
-	cd client && flutter test
 
 .PHONY: mutants
 mutants: ## Mutation testing; advisory, read the report

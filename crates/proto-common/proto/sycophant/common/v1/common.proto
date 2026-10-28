@@ -146,36 +146,45 @@ message ListGrantsResponse {
   repeated ToolsetGrants toolsets = 1;
 }
 
-// --- Channel I/O ---
+// --- Channel stream I/O ---
 
-message ChannelAck {
-  // Server-minted opaque UUID. Echo on every ChannelIngest; valid only
-  // within the lifetime of the originating ChannelReceive /
-  // ChannelStream response stream.
-  string channel_id = 1;
+message ChannelStreamAck {
+  // Server-minted opaque UUID. Echo on every ChannelStreamIngest; valid only
+  // within the lifetime of the originating ChannelStreamReceive
+  // response stream.
+  string channel_stream_id = 1;
 }
 
-message ChannelOutbound {
+message ChannelStreamOutbound {
   oneof command {
-    ChannelAck ack = 1;
-    ChannelSend send_message = 2;
+    ChannelStreamAck ack = 1;
+    ChannelStreamSend send_message = 2;
     TurnStateEvent turn_state = 3;
     ServerRequest server_request = 4;
     StreamItem stream_item = 5;
+    Heartbeat heartbeat = 7;
   }
+  reserved 6, 8, 9;
+  reserved "workspace_seq", "catch_up_complete", "replay_impossible";
+}
+
+// Periodic liveness signal, sent on every channel stream at the relay's heartbeat interval.
+message Heartbeat {
+  reserved 1;
+  reserved "workspace_seq";
 }
 
 // --- Streamed activity items (client-harness protocol, first slice) ---
 //
 // Carries one class of live turn activity — streamed text and tool calls —
 // from the harness to the client as it is produced, instead of a single
-// terminal reply. A top-level ChannelOutbound variant (not nested in the
+// terminal reply. A top-level ChannelStreamOutbound variant (not nested in the
 // reply). Each item's start/delta/stop frames share `item_id`; every frame
-// carries the standard envelope (`workspace_seq` + `event_id`) from its
-// first frame. Streaming-only: not persisted as individual log events.
+// carries an `event_id`. Streaming-only: not persisted as individual log
+// events.
 message StreamItem {
-  // Monotonic, 1-indexed per workspace, server-advanced on emit. No client ack.
-  uint64 workspace_seq = 1;
+  reserved 1;
+  reserved "workspace_seq";
   // Stable per frame.
   string event_id = 2;
   // Shared across an item's start / delta / stop frames.
@@ -220,7 +229,7 @@ message ItemDelta {
 
 message ItemStop {}
 
-message ChannelSend {
+message ChannelStreamSend {
   repeated ContentBlock content = 1;
   // Conversation this reply belongs to. Lets the client filter outbound
   // frames against whichever conversation it is currently viewing.
@@ -228,14 +237,14 @@ message ChannelSend {
 }
 
 // Streaming turn-lifecycle phase. The controller pushes this to every
-// ChannelReceive subscriber so clients can render a "working" indicator
+// ChannelStreamReceive subscriber so clients can render a "working" indicator
 // without polling or per-tool detail. Sending (between user submit and
-// the controller's ChannelIngest ack) stays purely client-side; only
+// the controller's ChannelStreamIngest ack) stays purely client-side; only
 // WORKING and IDLE are server-pushed today.
 message TurnStateEvent {
   TurnState state = 1;
   // Conversation this state transition belongs to. Empty string is
-  // reserved for channel-wide replay frames emitted on (re)connect —
+  // reserved for stream-wide replay frames emitted on (re)connect —
   // clients should treat empty as "no conversation context" and skip
   // the per-conversation indicator update.
   string conversation_id = 2;
@@ -252,7 +261,7 @@ message TurnStateEvent {
 
 enum TurnState {
   TURN_STATE_UNSPECIFIED = 0;
-  // No active turn. Default for fresh channels; emitted after the
+  // No active turn. Default for fresh channel streams; emitted after the
   // assistant message persists.
   TURN_STATE_IDLE = 1;
   // Turn is in flight on the cluster: controller enqueued the user
@@ -272,18 +281,17 @@ enum TurnState {
 }
 
 // UserMessage is the canonical "user said something" event. Flows from
-// the relay gateway to the harness. `reply_channel` is the
-// server-minted channel_id (UUID) stamped by the gateway after
-// ChannelIngest / ChannelStream message ingress, so the harness's
-// reply routes back to the originating adapter. Opaque to clients;
-// only valid within the lifetime of the originating ChannelReceive /
-// ChannelStream stream.
+// the relay gateway to the harness. `reply_channel_stream` is the
+// server-minted channel_stream_id (UUID) stamped by the gateway after
+// ChannelStreamIngest message ingress. Opaque to clients;
+// only valid within the lifetime of the originating ChannelStreamReceive
+// stream.
 message UserMessage {
   repeated ContentBlock content = 1;
   string sender = 2;
-  optional string reply_channel = 3;
+  optional string reply_channel_stream = 3;
   // Conversation this message belongs to. Stamped by the relay gateway
-  // at ingest time (caller may supply via ChannelIngestRequest, or the
+  // at ingest time (caller may supply via ChannelStreamIngestRequest, or the
   // gateway mints a fresh id). The harness reads this verbatim
   // when constructing the TurnRequest — it never mints conversation
   // ids on its own anymore.
@@ -378,8 +386,8 @@ message ToolInfo {
 message CallToolRequest {
   string name = 1;
   string input_json = 2;
-  // Conversation this tool call attaches to. The caller (the Flutter app
-  // for an app-run dispatch, the harness for a model-run call) supplies
+  // Conversation this tool call attaches to. The caller (a client for an
+  // app-run dispatch, the harness for a model-run call) supplies
   // its active conversation; the harness records the call's frames in
   // that conversation's execution log. Empty is accepted: a
   // conversation-less app call streams live but persists no per-conversation
@@ -456,24 +464,24 @@ message CancelToolResponse {
   bool cancelled = 1;
 }
 
-// --- External channel-adapter RPCs (Flutter, future SPA) ---
+// --- External channel-stream RPCs ---
 
-message ChannelIngestRequest {
-  // The channel_id received as the first frame on the ChannelReceive
+message ChannelStreamIngestRequest {
+  // The channel_stream_id received as the first frame on the ChannelStreamReceive
   // response stream. Server-minted; opaque to clients.
-  string channel_id = 1;
+  string channel_stream_id = 1;
   // The user's message payload. The workspace comes from the
-  // channel_id's server-side binding (NOT from this field) so external
+  // channel_stream_id's server-side binding (NOT from this field) so external
   // callers cannot inject into other workspaces.
   //
   // Exactly one of `user_message` / `client_response` MUST be set per
   // call. Both-set or neither-set → InvalidArgument at the handler.
   UserMessage user_message = 2;
   // Reply to a prior ServerRequest the client received over its
-  // ChannelReceive stream. Correlation key is request_id.
+  // ChannelStreamReceive stream. Correlation key is request_id.
   ClientResponse client_response = 3;
   // Methods the sending device is willing to render when the agent
-  // dispatches a ServerRequest. Last-sender-wins per channel; sent on
+  // dispatches a ServerRequest. Last-sender-wins per channel stream; sent on
   // every ingest. Names match ServerRequest.method values.
   repeated string supported_methods = 4;
   // Conversation this message belongs to. Empty string → controller
@@ -483,25 +491,27 @@ message ChannelIngestRequest {
   string conversation_id = 5;
 }
 
-message ChannelIngestAck {
+message ChannelStreamIngestAck {
   // Echoed for caller correlation.
-  string channel_id = 1;
+  string channel_stream_id = 1;
   // Conversation under which this message was filed. Pair with
   // GetConversationHistory for replay across reconnects.
   string conversation_id = 2;
 }
 
-message ChannelReceiveRequest {
+message ChannelStreamReceiveRequest {
   // Free-form, untrusted, log-only label for operator debugging.
-  optional string adapter_hint = 1;
+  optional string channel_hint = 1;
   // The workspace this receive stream serves. Every workspace-scoped
   // request names its workspace; the relay authorizes it per credential
   // class.
   string workspace = 2;
-  // The adapter path's sender: the platform user ID the adapter reports
+  // The channel path's sender: the platform user ID the channel reports
   // verbatim. The relay resolves it to a subject through the operator's
-  // handle binding; the adapter vouches for no one.
+  // handle binding; the channel vouches for no one.
   string sender = 3;
+  reserved 4;
+  reserved "resume_after_seq";
 }
 
 // --- Subscribe RPCs ---
@@ -510,11 +520,11 @@ message SubscribeRequest {}
 
 // --- Server-initiated tool dispatch (cluster → client) ---
 //
-// JSON-RPC-shaped envelope over the existing channel. The agent emits a
+// JSON-RPC-shaped envelope over the existing channel stream. The agent emits a
 // tool call for a client-implemented tool (e.g., RevealPath); the
-// controller forwards it as a ChannelOutbound::ServerRequest; the
+// controller forwards it as a ChannelStreamOutbound::ServerRequest; the
 // client either acts on it (notification — empty request_id) or
-// responds with a matching ClientResponse on ChannelIngest.
+// responds with a matching ClientResponse on ChannelStreamIngest.
 
 message ServerRequest {
   // Empty string → notification (fire-and-forget). The client MUST NOT
@@ -545,20 +555,24 @@ message ClientResponseError {
 // --- Internal: harness → relay server-request emit ---
 
 message SendServerNotificationRequest {
-  string channel_id = 1;
+  reserved 1;
   string method = 2;
   string params_json = 3;
+  // The workspace to fan out to. All channel streams for this workspace that
+  // support the method receive the notification.
+  string workspace = 4;
+  reserved 5;
+  reserved "workspace_seq";
 }
 
 message SendServerNotificationResponse {
-  // Best-effort: true if the frame was enqueued for delivery on the
-  // channel's mpsc. False on unknown channel or unsupported method (the
-  // client did not advertise the method in supported_methods).
+  // Best-effort: true if any channel stream in the workspace that advertises
+  // the method enqueued it.
   bool delivered = 1;
 }
 
 message SendServerRequestAndAwaitRequest {
-  string channel_id = 1;
+  reserved 1;
   // Caller-supplied correlation id. Harness uses the LLM's
   // tool_call_id so the agent loop carries one identifier.
   string request_id = 2;
@@ -567,14 +581,19 @@ message SendServerRequestAndAwaitRequest {
   // Server-side wait cap in seconds. The controller clamps to a sane
   // range. Zero falls back to a server default.
   uint32 timeout_seconds = 5;
+  // The workspace to fan out to. The first ClientResponse from any
+  // channel stream wins; subsequent responses are dropped by request_id.
+  string workspace = 6;
+  reserved 7;
+  reserved "workspace_seq";
 }
 
 message SendServerRequestAndAwaitResponse {
-  // Exactly one of result_json / error / timed_out / unknown_channel /
+  // Exactly one of result_json / error / timed_out / unknown_channel_stream /
   // unsupported_method MUST be set on success-shaped outcomes.
   string result_json = 1;
   ClientResponseError error = 2;
   bool timed_out = 3;
-  bool unknown_channel = 4;
+  bool unknown_channel_stream = 4;
   bool unsupported_method = 5;
 }

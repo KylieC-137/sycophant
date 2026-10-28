@@ -55,3 +55,23 @@ to the egress-entry depth (4).
         - port: "53"
           protocol: TCP
 {{- end -}}
+
+{{- /*
+The headscale settings as YAML, from .Values.headscale with defaults filled in.
+The headscale pod checksums this output to roll on a change.
+*/ -}}
+{{- define "sycophant.headscale" -}}
+{{- $hs := .Values.headscale | default dict -}}
+{{- toYaml (dict
+  "enabled" (eq ($hs.enabled | default false | toString) "true")
+  "image" ($hs.image | default "headscale/headscale")
+  "tag" ($hs.tag | default "0.28.0")
+  "pullPolicy" ($hs.pullPolicy | default "IfNotPresent")
+  "serverUrl" ($hs.serverUrl | default "")
+  "magicDns" (dig "magicDns" true $hs)
+  "baseDomain" ($hs.baseDomain | default "ts.local")
+  "storageClass" ($hs.storageClass | default "")
+  "acme" (dict
+    "enabled" (eq (($hs.acme | default dict).enabled | default false | toString) "true")
+    "email" (($hs.acme | default dict).email | default ""))) -}}
+{{- end -}}

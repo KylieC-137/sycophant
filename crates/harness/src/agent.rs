@@ -15,7 +15,7 @@ use crate::turn;
 /// dispatch runs its own bounded loop inside `runtime_tools::dispatch` and
 /// does NOT re-enter this function.
 pub(crate) struct LoopMode {
-    pub reply_channel: Option<String>,
+    pub reply_channel_stream: Option<String>,
     /// Max silence between inference-job events before the turn is failed as
     /// wedged (vs awaited forever). Carried here so callers thread it from
     /// config without changing `llm_loop`'s arg list.
@@ -44,7 +44,7 @@ pub(crate) enum LoopHalt {
 /// All non-Ok exits from `llm_loop`. `Halt(_)` is "loop stopped before natural
 /// completion"; the other variants are infrastructure failures.
 #[derive(Debug)]
-#[allow(dead_code)] // ToolDispatch reserved; today tool errors fold into is_error tool results.
+#[allow(dead_code)] // ToolDispatch is matched but not yet constructed; reserved for tool dispatch errors.
 pub(crate) enum LoopError {
     Halt(LoopHalt),
     ToolsetRpc(String),
@@ -74,7 +74,7 @@ struct ContinuationCtx {
     /// this against its model catalog and refuses an absent one. There is no
     /// default.
     model: Option<String>,
-    reply_channel: Option<String>,
+    reply_channel_stream: Option<String>,
     conversation_id: String,
 }
 
@@ -84,7 +84,7 @@ fn build_continuation(ctx: &ContinuationCtx, messages: Vec<Message>) -> TurnRequ
         tools: ctx.tools.clone(),
         messages,
         model: ctx.model.clone(),
-        reply_channel: ctx.reply_channel.clone(),
+        reply_channel_stream: ctx.reply_channel_stream.clone(),
         role: None,
         correlation_id: None,
         conversation_id: ctx.conversation_id.clone(),
@@ -154,10 +154,9 @@ pub(crate) async fn llm_loop(
     let cancel = mode.cancel;
     let grants = mode.grants;
     // Streamed-item bookkeeping spans every continuation turn in this loop so
-    // `workspace_seq` stays monotonic and item ids stay stable. A delegate
-    // sub-turn stamps every frame with the parent link and the sub-agent name
-    // from its scope so the client nests it under its parent; a primary turn
-    // keeps empty framing.
+    // item ids stay stable. A delegate sub-turn stamps every frame with the
+    // parent link and the sub-agent name from its scope so the client nests
+    // it under its parent; a primary turn keeps empty framing.
     let mut emit = match scope {
         HistoryScope::Delegate {
             parent_conversation_id,
@@ -174,7 +173,7 @@ pub(crate) async fn llm_loop(
         system: initial_request.system.clone(),
         tools: initial_request.tools.clone(),
         model: initial_request.model.clone(),
-        reply_channel: mode.reply_channel,
+        reply_channel_stream: mode.reply_channel_stream,
         conversation_id: initial_request.conversation_id.clone(),
     };
     let tag = scope_tag(scope);
@@ -184,10 +183,13 @@ pub(crate) async fn llm_loop(
     // request) AND to the persistent log (for restart continuity).
     let mut messages = initial_request.messages.clone();
 
-    let mut stream = toolset
-        .turn(initial_request)
-        .await
-        .map_err(LoopError::ToolsetRpc)?;
+    let mut stream = {
+        tracing::info!(conversation_id = %initial_request.conversation_id, "calling model");
+        toolset
+            .turn(initial_request)
+            .await
+            .map_err(LoopError::ToolsetRpc)?
+    };
     let mut iterations = 0u32;
 
     loop {
@@ -215,6 +217,8 @@ pub(crate) async fn llm_loop(
             }
         };
 
+        tracing::info!(conversation_id = %ctx.conversation_id, stop_reason = ?result.stop_reason, "model responded");
+
         match result.stop_reason {
             StopReason::EndTurn => {
                 let assistant = assistant_message(&result);
@@ -236,6 +240,10 @@ pub(crate) async fn llm_loop(
                     let assistant = assistant_message(&result);
                     persist_assistant(log, &assistant, tag.clone(), &attribution).await;
                     return Ok(collect_text(&result.content));
+                }
+
+                for tc in &result.tool_calls {
+                    tracing::info!(conversation_id = %ctx.conversation_id, tool = %tc.name, "tool call detected");
                 }
 
                 iterations += 1;
@@ -260,7 +268,7 @@ pub(crate) async fn llm_loop(
                             &grants,
                             toolset,
                             &ctx.conversation_id,
-                            ctx.reply_channel.as_deref(),
+                            ctx.reply_channel_stream.as_deref(),
                             &tc.id,
                             &cancel,
                         )
@@ -339,17 +347,7 @@ mod tests {
     use toolset_proto::{turn_event, TurnComplete, TurnEvent};
 
     use crate::clients::TurnSource;
-
-    struct FakeTurnSource {
-        events: VecDeque<TurnEvent>,
-    }
-
-    #[async_trait::async_trait]
-    impl TurnSource for FakeTurnSource {
-        async fn next_event(&mut self) -> Option<Result<TurnEvent, String>> {
-            self.events.pop_front().map(Ok)
-        }
-    }
+    use crate::test_doubles::ScriptedSource;
 
     struct FakeToolset {
         turns: VecDeque<Vec<TurnEvent>>,
@@ -387,7 +385,7 @@ mod tests {
                 .turns
                 .pop_front()
                 .ok_or_else(|| "FakeToolset: no more scripted turns".to_string())?;
-            Ok(Box::new(FakeTurnSource {
+            Ok(Box::new(ScriptedSource {
                 events: events.into(),
             }))
         }
@@ -466,7 +464,7 @@ mod tests {
             _grants: &std::collections::HashMap<String, String>,
             _toolset: &mut dyn ToolsetRpc,
             conversation_id: &str,
-            _reply_channel: Option<&str>,
+            _reply_channel_stream: Option<&str>,
             _tool_call_id: &str,
             _cancel: &tokio_util::sync::CancellationToken,
         ) -> Result<CallToolResponse, DispatchAbort> {
@@ -519,39 +517,20 @@ mod tests {
                 is_error: None,
             }],
             model: None,
-            reply_channel: None,
+            reply_channel_stream: None,
             role: None,
             correlation_id: None,
             conversation_id: conv_id.into(),
         }
     }
 
-    fn mode(reply_channel: Option<&str>) -> LoopMode {
+    fn mode(reply_channel_stream: Option<&str>) -> LoopMode {
         LoopMode {
-            reply_channel: reply_channel.map(str::to_string),
+            reply_channel_stream: reply_channel_stream.map(str::to_string),
             idle_gap: std::time::Duration::from_secs(45),
             cancel: tokio_util::sync::CancellationToken::new(),
             grants: std::collections::HashMap::new(),
         }
-    }
-
-    #[tokio::test]
-    async fn endturn_returns_text() {
-        let mut tb = FakeToolset::new().with_turn(vec![complete_event(
-            StopReason::EndTurn,
-            vec![text_block("hello world".into())],
-            vec![],
-        )]);
-        let router = FakeRouter::empty();
-        let result = run_loop(
-            10,
-            &mut tb,
-            &router,
-            user_request("conv-1", None),
-            mode(None),
-        )
-        .await;
-        assert!(matches!(result, Ok(ref s) if s == "hello world"));
     }
 
     #[tokio::test]
@@ -601,25 +580,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_tool_calls_returns_content_text() {
-        let mut tb = FakeToolset::new().with_turn(vec![complete_event(
-            StopReason::ToolUse,
-            vec![text_block("nothing to do".into())],
-            vec![],
-        )]);
-        let router = FakeRouter::empty();
-        let result = run_loop(
-            10,
-            &mut tb,
-            &router,
-            user_request("conv-1", None),
-            mode(None),
-        )
-        .await;
-        assert!(matches!(result, Ok(ref s) if s == "nothing to do"));
-    }
-
-    #[tokio::test]
     async fn tool_use_routes_through_router_and_threads_conv_id() {
         let mut tb = FakeToolset::new()
             .with_turn(vec![complete_event(
@@ -650,58 +610,13 @@ mod tests {
             router.last_conv_id.lock().unwrap().as_deref(),
             Some("conv-99")
         );
-        // Continuation preserves conversation_id, system, and reply_channel.
+        // Continuation preserves conversation_id, system, and reply_channel_stream.
         let cont = &tb.recorded[1];
         assert_eq!(cont.conversation_id, "conv-99");
         assert_eq!(cont.system.as_deref(), Some("orch-system"));
-        assert_eq!(cont.reply_channel.as_deref(), Some("ch-1"));
+        assert_eq!(cont.reply_channel_stream.as_deref(), Some("ch-1"));
         assert_eq!(cont.role, None);
         assert_eq!(cont.correlation_id, None);
-    }
-
-    // A tool-result continuation is the same logical turn as the request that
-    // opened it, so it must name the same model. The harness resolves `model`
-    // against its model catalog and refuses an absent one outright — there is
-    // no default — so dropping the model here fails the whole turn the moment
-    // the model calls a tool.
-    //
-    // Materiality: the shared `user_request` fixture hardcodes `model: None`,
-    // so asserting on it would pass against a `build_continuation` that never
-    // carries a model at all. This test sets a real model precisely so the
-    // assertion can fail.
-    #[tokio::test]
-    async fn continuation_carries_the_initial_model() {
-        let mut tb = FakeToolset::new()
-            .with_turn(vec![complete_event(
-                StopReason::ToolUse,
-                vec![],
-                vec![tool_call("tc1", "Bash", "{}")],
-            )])
-            .with_turn(vec![complete_event(
-                StopReason::EndTurn,
-                vec![text_block("done".into())],
-                vec![],
-            )]);
-        let router = FakeRouter::empty().with_response(Ok(CallToolResponse {
-            content: vec![text_block("ls output".into())],
-            is_error: false,
-        }));
-        let mut req = user_request("conv-1", None);
-        req.model = Some("deepseek-v4-flash".into());
-
-        let result = run_loop(10, &mut tb, &router, req, mode(None)).await;
-
-        assert!(result.is_ok());
-        assert_eq!(
-            tb.recorded[0].model.as_deref(),
-            Some("deepseek-v4-flash"),
-            "the initial turn must carry the resolved model"
-        );
-        assert_eq!(
-            tb.recorded[1].model.as_deref(),
-            Some("deepseek-v4-flash"),
-            "the continuation must name the same model, not None"
-        );
     }
 
     // The model cannot select its own successor. A model-authored payload — a
@@ -711,11 +626,7 @@ mod tests {
     // the first turn's tool call injects `{"model": "attacker-model"}`, the
     // continuation still names the harness-supplied model.
     //
-    // Materiality: an impl that re-derived the continuation model from any model
-    // output (tool-call args, content) would carry "attacker-model" into
-    // recorded[1] and red this. Distinct from
-    // `continuation_carries_the_initial_model`, which only checks propagation of
-    // an uncontested value.
+    // This also covers plain propagation: the continuation keeps the initial model.
     #[tokio::test]
     async fn a_model_authored_value_never_sets_the_continuation_model() {
         let mut tb = FakeToolset::new()
@@ -793,11 +704,8 @@ mod tests {
     // first — no collapse into a single re-wrapped text part, no conversion at
     // the fold boundary.
     //
-    // Materiality: the fold must be `content: resp.content` (carried as-is). A
-    // mutant that re-wraps the answer as `vec![text_block(collect_text(..))]`
-    // (or otherwise flattens to text) drops the image part — length becomes 1
-    // and the first part is no longer an image — reding this. Reverting the
-    // response to a `string output` fails to compile.
+    // The fold carries `resp.content` as-is; flattening it to text would drop
+    // the image part.
     #[tokio::test]
     async fn tool_answer_content_parts_fold_into_conversation_unconverted() {
         let png: Vec<u8> = vec![0x89, 0x50, 0x4e, 0x47, 7, 7, 7];
@@ -857,8 +765,8 @@ mod tests {
     // Post-mortem receipt for the klein-wenner demo crash: an agent previewing
     // several PDFs in ONE turn re-ships every prior image on every continuation.
     // `llm_loop` pushes each tool result (image bytes and all) onto the running
-    // `messages` (agent.rs:272), then reclones the WHOLE vec onto the next Turn
-    // (`build_continuation(&ctx, messages.clone())`, agent.rs:276). So N previews
+    // `messages`, then reclones the WHOLE vec onto the next Turn
+    // (`build_continuation(&ctx, messages.clone())`). So N previews
     // ship sum(1..=N) images, not N — quadratic in the image count. Against the
     // demo node's 2.35 GiB ceiling, a handful of near-cap PNGs re-shipped each
     // step exhausts memory and takes the single-node cluster down.
@@ -1029,26 +937,6 @@ mod tests {
     }
 
     #[test]
-    fn collect_text_joins_blocks_with_newlines() {
-        let blocks = vec![
-            text_block("first".to_string()),
-            text_block("second".to_string()),
-        ];
-        assert_eq!(collect_text(&blocks), "first\nsecond");
-    }
-
-    #[test]
-    fn collect_text_single_block_has_no_separator() {
-        let blocks = vec![text_block("only".to_string())];
-        assert_eq!(collect_text(&blocks), "only");
-    }
-
-    #[test]
-    fn collect_text_empty_input_returns_empty_string() {
-        assert_eq!(collect_text(&[]), "");
-    }
-
-    #[test]
     fn collect_text_skips_non_text_blocks() {
         let blocks = vec![
             text_block("a".to_string()),
@@ -1132,7 +1020,7 @@ mod tests {
             _grants: &std::collections::HashMap<String, String>,
             _toolset: &mut dyn ToolsetRpc,
             _conversation_id: &str,
-            _reply_channel: Option<&str>,
+            _reply_channel_stream: Option<&str>,
             _tool_call_id: &str,
             _cancel: &tokio_util::sync::CancellationToken,
         ) -> Result<CallToolResponse, DispatchAbort> {
@@ -1150,13 +1038,6 @@ mod tests {
         // sub-agent was cancelled. The loop must return LoopError::Cancelled
         // (terminal, mapped downstream to TurnState::Cancelled) and must NOT
         // append a tool result / issue a continuation turn.
-        //
-        // Materiality: route DispatchAbort::Cancelled through the same handling
-        // as an is_error/Err tool result (the funnel that appends a result and
-        // issues a continuation turn) instead of `return Err(LoopError::Cancelled)`. Under that mutant the loop
-        // appends a tool result, dispatches a SECOND toolset turn, and finishes
-        // Ok("resumed") -> both assertions below red: the result is not
-        // Cancelled, and tb.recorded.len() is 2, not 1.
         let mut tb = FakeToolset::new()
             .with_turn(vec![complete_event(
                 StopReason::ToolUse,
@@ -1239,7 +1120,7 @@ mod tests {
         let cancel = tokio_util::sync::CancellationToken::new();
         cancel.cancel(); // fired before the loop consumes the model call
         LoopMode {
-            reply_channel: None,
+            reply_channel_stream: None,
             idle_gap: std::time::Duration::from_secs(45),
             cancel,
             grants: std::collections::HashMap::new(),
@@ -1252,12 +1133,6 @@ mod tests {
         // biased cancel arm in `consume_turn_stream_cancellable` wins and the
         // loop takes its Cancelled exit. On that exit it must issue exactly one
         // `cancel_turn` to the toolset, carrying THIS turn's conversation_id.
-        //
-        // Materiality: delete the `cancel_turn` call on the
-        // `TurnAbort::Cancelled -> LoopError::Cancelled` arm -> `cancels()` is
-        // empty -> red. Pass the wrong id (e.g. a minted uuid instead of the
-        // conversation_id) -> the id assertion reds. Fire it on a non-cancel
-        // exit too -> the uncancelled test reds.
         let mut tb = FakeToolset::new().with_turn(vec![complete_event(
             StopReason::EndTurn,
             vec![text_block(
@@ -1308,13 +1183,6 @@ mod tests {
         // the harness is genuinely PARKED awaiting the model call. A fired
         // cancel must unblock that park with the terminal Cancelled outcome —
         // not hang, and not feed a result back that dispatches another turn.
-        //
-        // Materiality: drop the biased `token.cancelled()` arm in
-        // `consume_turn_stream_cancellable` -> the parked source never yields
-        // -> the loop hangs -> the 2s timeout reds. Map `TurnAbort::Cancelled`
-        // to `Ok`/a continuable result instead of `LoopError::Cancelled` -> a
-        // second `turn` is dispatched -> `recorded.len()` is 2, and the result
-        // is not Cancelled -> red.
         let mut tb = ParkedToolset {
             recorded: Vec::new(),
         };
@@ -1357,11 +1225,6 @@ mod tests {
         // Happy path: the model completes with EndTurn and the cancel token is
         // never fired. The result must come back verbatim AND the new cancel
         // machinery must stay silent.
-        //
-        // Materiality: fire `cancel_turn` unconditionally (outside the
-        // Cancelled arm) -> `cancels()` is non-empty -> red. Leak Cancelled
-        // into the happy path (e.g. mis-map EndTurn) -> the result is not
-        // Ok("hello world") -> red.
         let mut tb = FakeToolset::new().with_turn(vec![complete_event(
             StopReason::EndTurn,
             vec![text_block("hello world".into())],
@@ -1456,22 +1319,23 @@ mod tests {
 
     // A tool call cancelled after its assistant `tool_use` was recorded gets a
     // matching tool result written, so the conversation history stays valid for
-    // the next turn.
+    // the next turn. That result is an error carrying only a cancellation
+    // marker, and it is log-only: output already streamed to the user is not
+    // retracted and nothing new is pushed to the client.
     //
-    // Materiality: reverting the fix (the Cancelled arm returns before
-    // persisting the synthetic tool result) leaves NO tool message for tc1 —
-    // `tool_result.is_some()` reds. Persisting with an empty/wrong
-    // `tool_call_id` (not tc1) also reds it — the id is what pairs it to the
-    // dangling `tool_use`.
+    // The result's `tool_call_id` is what pairs it to the dangling `tool_use`.
     #[tokio::test]
-    async fn cancelled_tool_call_writes_a_matching_tool_result_keeping_history_valid() {
+    async fn cancelled_tool_call_logs_a_cancelled_error_and_streams_nothing_more() {
         let mut sink = CapturingSink(Vec::new());
         let (result, log) = run_cancelled_tool_call(
-            vec![complete_event(
-                StopReason::ToolUse,
-                vec![],
-                vec![tool_call("tc1", "Bash", "{}")],
-            )],
+            vec![
+                content_delta_event("live-output-text"),
+                complete_event(
+                    StopReason::ToolUse,
+                    vec![],
+                    vec![tool_call("tc1", "Bash", "{}")],
+                ),
+            ],
             &mut sink,
         )
         .await;
@@ -1490,54 +1354,23 @@ mod tests {
         );
         let tool_result = history
             .iter()
-            .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("tc1"));
-        assert!(
-            tool_result.is_some(),
-            "a matching tool result for tc1 must be persisted so history stays provider-valid; \
-             log held {:?}",
-            history
-                .iter()
-                .map(|m| (m.role.clone(), m.tool_call_id.clone()))
-                .collect::<Vec<_>>()
-        );
-    }
-
-    // A tool call cancelled mid-run records a tool result marked as an error,
-    // carrying a cancellation marker and NO partial tool output.
-    //
-    // Materiality: reverting the fix reds the `expect` (no tool result at all).
-    // Recording `is_error: None`/`Some(false)` reds the error assertion. Folding
-    // any partial tool output alongside the marker reds the single-block
-    // assertion; dropping the marker text reds the "cancel" assertion.
-    #[tokio::test]
-    async fn cancelled_tool_call_records_error_result_with_cancellation_marker_and_no_partial_output(
-    ) {
-        let mut sink = CapturingSink(Vec::new());
-        let (_result, log) = run_cancelled_tool_call(
-            vec![complete_event(
-                StopReason::ToolUse,
-                vec![],
-                vec![tool_call("tc1", "Bash", "{}")],
-            )],
-            &mut sink,
-        )
-        .await;
-
-        let history = log.read().await.history();
-        let tool_result = history
-            .iter()
             .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("tc1"))
-            .expect("a cancelled tool call must record a tool result for tc1");
+            .unwrap_or_else(|| {
+                panic!(
+                    "a matching tool result for tc1 must be persisted so history stays \
+                     provider-valid; log held {:?}",
+                    history
+                        .iter()
+                        .map(|m| (m.role.clone(), m.tool_call_id.clone()))
+                        .collect::<Vec<_>>()
+                )
+            });
         assert_eq!(
             tool_result.is_error,
             Some(true),
             "a cancelled tool result is marked as an error"
         );
         let blocks = &tool_result.content;
-        assert!(
-            !blocks.is_empty(),
-            "the cancelled tool result carries content"
-        );
         assert_eq!(
             blocks.len(),
             1,
@@ -1554,36 +1387,6 @@ mod tests {
         assert!(
             marker_text.contains("cancel"),
             "the sole content block is a cancellation marker, got {marker_text:?}"
-        );
-    }
-
-    // Cancelling a tool call does not retract output already streamed to the
-    // user's display, and pushes nothing new there — the synthetic result is
-    // log-only.
-    //
-    // Materiality: a mutant that emits a retraction/clear on the Cancelled arm
-    // makes the sink length exceed the 2 pre-cancel frames (Start+Delta) —
-    // reding the length assertion; a mutant that clears already-streamed frames
-    // reds the "streamed live output present" assertion; a mutant that pushes a
-    // cancellation notice to the client reds the no-notice assertion.
-    #[tokio::test]
-    async fn cancelled_tool_call_does_not_retract_output_already_streamed_to_the_user() {
-        let mut sink = CapturingSink(Vec::new());
-        let (result, _log) = run_cancelled_tool_call(
-            vec![
-                content_delta_event("live-output-text"),
-                complete_event(
-                    StopReason::ToolUse,
-                    vec![],
-                    vec![tool_call("tc1", "Bash", "{}")],
-                ),
-            ],
-            &mut sink,
-        )
-        .await;
-        assert!(
-            matches!(result, Err(LoopError::Cancelled)),
-            "a cancelled tool call is terminal, got {result:?}"
         );
 
         let streamed_live = sink

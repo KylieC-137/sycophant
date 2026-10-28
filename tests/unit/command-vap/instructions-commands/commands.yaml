@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-instructions-owned
+  namespace: tenant-acme
+  labels:
+    sycophant.md/command: 'true'
+    app.kubernetes.io/part-of: sycophant
+data:
+  archive: 'H4sIAFU932oC/+3NMQrCQAAEwKt9xb0gHEnQ2kLsbExjGTFgI5Ez+b9HGsFeEZxpdtlmt/vdoTtWt0v4nFSs23bJ4j1TqptXX/ZN3TYhpvAF82Pqc7kM/+k0zrHPQ5yuQ7zn8TxUqwAAAAAAAAAAAMDvewIo91QUACgAAA=='

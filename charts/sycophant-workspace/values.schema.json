@@ -30,26 +30,12 @@
         "instructions": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Object-storage delivery of instruction content. The harness init container syncs each workspace's prefix from this endpoint/bucket using the named read-only credential; the serving container mounts the result read-only and holds no credential.",
+          "description": "Object-storage delivery of instruction content. The harness init container syncs each workspace's folder <bucket>/system:serviceaccount:<namespace>:ws-<workspace>/ from this endpoint, reading with the pod's own projected service-account token; the serving container mounts the result read-only and holds no token for the store.",
           "properties": {
             "endpoint": { "type": "string", "description": "Cross-namespace Service address (host:port) of the shared cluster object store the sync init container reaches. The harness egress netpol reads the store namespace from this host." },
             "bucket": { "type": "string", "description": "Bucket holding every workspace's instruction tree." },
-            "credentialName": { "type": "string", "description": "Name of the Secret carrying the read-only, prefix-scoped sync credential, which the operator creates in the tenant namespace. Mounted into the init container only." },
             "syncImage": { "type": "string", "description": "Image for the object-storage sync init container (carries the sync client)." }
           }
-        }
-      }
-    },
-    "workspaceInit": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["image", "tag"],
-      "properties": {
-        "image": { "type": "string" },
-        "tag": { "type": "string" },
-        "pullPolicy": {
-          "type": "string",
-          "enum": ["Always", "IfNotPresent", "Never"]
         }
       }
     }

@@ -25,9 +25,9 @@ inference:
     singleNodeException: false
 
 toolset:
-  name: git
+  name: hello-world
   tenant: acme
-  image: ghcr.io/sycophant-md/git@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  image: ghcr.io/sycophant-md/hello-world@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   keepalive: true
   deadlineSeconds: 300
   env:
@@ -43,15 +43,21 @@ toolset:
 workspace:
   name: hello-world
   tenant: acme
-  toolsets: [stdlib, ssh-credentials]
+  toolsets: [hello-world]
   models: [deepseek, local]
   storage: 5Gi
   grants:
-    ssh-credentials:
+    hello-world:
       demo-key:
         secret: demo-ssh-key
         path: /home/agent/.ssh/id_ed25519
         egress: git.example.com
+
+instructions:
+  name: hello-world
+  tenant: acme
+  # Set by sycoadm from the instructions folder: a base64 gzip tar.
+  archive: "H4sIAFU932oC/+3NMQrCQAAEwKt9xb0gHEnQ2kLsbExjGTFgI5Ez+b9HGsFeEZxpdtlmt/vdoTtWt0v4nFSs23bJ4j1TqptXX/ZN3TYhpvAF82Pqc7kM/+k0zrHPQ5yuQ7zn8TxUqwAAAAAAAAAAAMDvewIo91QUACgAAA=="
 
 user:
   tenant: acme
@@ -60,7 +66,6 @@ user:
 channel:
   name: app
   tenant: acme
-  kind: app
   loginServer: http://headscale:8080
   image: tailscale/tailscale
   tag: v1.80.0
@@ -68,14 +73,12 @@ channel:
   hostname: relay
   authKeySecret: relay-tsnet-authkey
   storageClass: local-path
-  headscale:
-    enabled: true
-    serverUrl: http://localhost:8080
-    image: headscale/headscale
-    tag: "0.28.0"
-    pullPolicy: Always
-    magicDns: true
-    baseDomain: ts.local
-    acme:
-      enabled: false
-      email: ops@example.com
+
+headscale:
+  enabled: true
+  serverUrl: http://localhost:8080
+  magicDns: true
+  baseDomain: ts.local
+  acme:
+    enabled: false
+    email: ops@example.com
