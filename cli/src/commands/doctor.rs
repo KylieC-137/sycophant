@@ -27,7 +27,10 @@ pub(crate) fn run() -> Result<(), String> {
 
     let script = find_preflight_script()?;
 
-    run_preflight_command(Command::new("bash").arg(&script))
+    run_preflight_command(Command::new("bash").arg(&script).env(
+        "ARCH",
+        env::var("ARCH").unwrap_or_else(|_| env::consts::ARCH.to_string()),
+    ))
 }
 
 /// Execute the diagnostic command and report its result.
